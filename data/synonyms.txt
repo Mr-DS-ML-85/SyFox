@@ -1,0 +1,32 @@
+# ============================================================================
+#  SyFox synonym folding table (P4, v2.1)
+#
+#  format:  canonical: variant, variant, ...
+#
+#  Used in TWO places that must stay in lockstep:
+#    * core/normalize.hpp  — decide-time folding: every table word (canonical
+#      or variant) is porter-stemmed and mapped to the stemmed canonical, so a
+#      query saying "reimbursement" lands on the same node as "refund".
+#    * tools/gen_paraphrases.py — train-time augmentation: swaps existing
+#      words for their table alternates. Single words ONLY, so a paraphrased
+#      row normalizes to the same token stream as its source row.
+#
+#  Rules for edits:
+#    * single words only (the C++ folding is per-token)
+#    * label-safe swaps only: replacing a word with its alternate must never
+#      change the row's labels (no urgency words in fillers, no cross-department
+#      drift, no frustration-scale drift)
+#    * conservative: a wrong merge here is a wrong lane in the fabric
+# ============================================================================
+refund: reimbursement, reimburse
+urgent: asap, immediately, urgently, hurry
+angry: furious, mad, upset
+broken: faulty, busted
+fix: repair, mend
+problem: issue, trouble, glitch
+slow: delayed, sluggish, laggy
+crash: freeze, hang, froze
+price: cost
+scared: afraid, fearful
+money: cash
+wrong: incorrect, mistaken

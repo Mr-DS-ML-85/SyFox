@@ -17,8 +17,10 @@
 //    (community: 3080-task classification bench) |  close-call margin dist
 //
 //  Honesty rules of the suite itself:
-//    * eval rows default to the training JSONL => the accuracy number is
-//      IN-DOMAIN RESUBSTITUTION and is labelled as such in the output.
+//    * v2.1: --split heldout scores the held-out 30% (rows the fabric never
+//      learned from) — the headline number. The default train file is
+//      IN-SAMPLE and the eval_source label says so. Accuracy is never
+//      resubstitution unless the caller asks for the train split by name.
 //    * every figure here is reproducible from this binary on the same inputs;
 //      no number in the output exists without a runnable check behind it.
 //    * the jev_reference block carries PUBLISHED figures for side-by-side
@@ -36,7 +38,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
+#include <cstdio>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -152,7 +156,7 @@ inline bool label_matches(const sfx::JV& q, const std::string& stored, const std
     return false;
 }
 
-struct Bin { long n = 0; long correct = 0; double conf_sum = 0.0; };
+struct Bin { long n = 0; long correct = 0; double conf_sum = 0.0; double ece_conf_sum = 0.0; };
 
 // One full pass of decisions over a probe set, accumulating the Jev axes.
 struct PassResult {
@@ -178,7 +182,10 @@ struct PassResult {
             const Bin& b = kv.second;
             if (b.n == 0) continue;
             const double acc = static_cast<double>(b.correct) / static_cast<double>(b.n);
-            const double cf  = b.conf_sum / static_cast<double>(b.n);
+            // v2.1: ECE uses the MAX-PROBABILITY confidence (the signal
+            // temperature scaling acts on), not the entropy confidence. The
+            // entropy confidence stays in conf_sum for the conf-gap fields.
+            const double cf  = b.ece_conf_sum / static_cast<double>(b.n);
             e += (static_cast<double>(b.n) / static_cast<double>(total)) * std::fabs(acc - cf);
         }
         return e;
@@ -248,8 +255,9 @@ inline PassResult run_pass(Engine& eng, const std::vector<Probe>& probes, int la
                 const float margin = std::max(0.0f, top - std::max(second, 0.0f));
                 agg.margin_sum += margin;
                 agg.close_calls += (margin < 0.10f) ? 1 : 0;
-                Bin& b = agg.ece_bins[PassResult::ece_bin(a.confidence)];
-                b.n += 1; b.correct += correct ? 1 : 0; b.conf_sum += a.confidence;
+                Bin& b = agg.ece_bins[PassResult::ece_bin(top)];
+                b.n += 1; b.correct += correct ? 1 : 0;
+                b.conf_sum += a.confidence; b.ece_conf_sum += top;
             } else if (type == "noul") {
                 ++pr.noul_n;
                 const bool pred_true  = a.probability >= 0.5f;
@@ -266,7 +274,7 @@ inline PassResult run_pass(Engine& eng, const std::vector<Probe>& probes, int la
 
 struct BenchReport {
     std::string model;
-    std::string eval_source;        // "in-domain (resubstitution)" or path
+    std::string eval_source;        // labelled with the split it came from
     long rows = 0, probes = 0, mixed_probes = 0, ood_probes = 0;
 
     // routing (Jev: 4-workflow accuracy 67.8%)
@@ -468,6 +476,202 @@ inline BenchReport run(Engine& eng, const std::vector<sfx::JV>& eval_rows,
         rep.lat_mean_us = s / static_cast<double>(lat.size());
     }
     return rep;
+}
+
+// ---------------------------------------------------------------------------
+// v2.1 — selective prediction: the coverage-vs-accuracy curve.
+//
+// The headline metric of an honest eval is NOT top-1 accuracy (that is the
+// coverage=100% corner of this curve). We sweep a confidence threshold over
+// the TOP-PROBABILITY signal and report, for each threshold, what share of
+// questions the model still answers (coverage) and how often it is right
+// within that share (accuracy-within-coverage). Engine-level honest silence
+// (unknown vocabulary) counts as covered=false at every threshold.
+//
+// Choice + score questions only: these carry the routing semantics the curve
+// exists for. Labelled rows only.
+// ---------------------------------------------------------------------------
+struct CurvePoint {
+    double threshold = 0;      // emit iff top-prob >= threshold
+    long   emitted   = 0;
+    long   correct   = 0;
+    double coverage  = 0;      // emitted / total
+    double accuracy  = 0;      // correct / emitted
+};
+
+struct OperatingPoint {
+    double target    = 0;      // requested minimum coverage (0.5 / 0.7 / 0.9)
+    bool   feasible  = false;  // some threshold reaches the target coverage
+    double threshold = 0;      // the LARGEST threshold still covering the target
+    double coverage  = 0;
+    double accuracy  = 0;
+};
+
+struct CoverageReport {
+    long total = 0;                       // labelled choice+score questions
+    std::vector<CurvePoint> points;
+    OperatingPoint op50, op70, op90;      // spec-required operating points
+
+    sfx::JV to_json() const {
+        const auto r4 = [](double v) { return std::round(v * 10000.0) / 10000.0; };
+        sfx::JVArr pts;
+        for (const auto& p : points)
+            pts.push_back(sfx::JV(sfx::JVObj{
+                {"threshold", r4(p.threshold)},
+                {"emitted", static_cast<double>(p.emitted)},
+                {"correct", static_cast<double>(p.correct)},
+                {"coverage", r4(p.coverage)},
+                {"accuracy", r4(p.accuracy)}}));
+        auto opj = [](const OperatingPoint& o) {
+            return sfx::JV(sfx::JVObj{
+                {"feasible", sfx::JV(o.feasible)},
+                {"threshold", std::round(o.threshold * 10000.0) / 10000.0},
+                {"coverage", std::round(o.coverage * 10000.0) / 10000.0},
+                {"accuracy", std::round(o.accuracy * 10000.0) / 10000.0}});
+        };
+        return sfx::JV(sfx::JVObj{
+            {"total", static_cast<double>(total)},
+            {"points", sfx::JV(pts)},
+            {"at_50_coverage", opj(op50)},
+            {"at_70_coverage", opj(op70)},
+            {"at_90_coverage", opj(op90)}});
+    }
+};
+
+inline CoverageReport coverage_curve(Engine& eng, const std::vector<sfx::JV>& eval_rows,
+                                     int steps = 20) {
+    CoverageReport cr;
+    struct Sample { float conf; bool correct; bool engine_deferred; };
+    std::vector<Sample> samples;
+
+    for (const auto& p : eval_probes(eval_rows)) {
+        syfox::Usage u;
+        auto answers = eng.decide(p.state, p.questions, u);
+        std::size_t ai = 0;
+        for (const auto& qkv : p.questions.obj) {
+            if (ai >= answers.size()) break;
+            const syfox::Answer& a = answers[ai++];
+            const std::string type = qkv.second.at("type").as_str();
+            if (type != "choice" && type != "score") continue;
+            Sample s; s.engine_deferred = a.deferred; s.conf = 0.0f; s.correct = false;
+            if (!a.deferred && !a.probabilities.empty()) {
+                float top = -1.0f;
+                std::string amax;
+                for (const auto& kv : a.probabilities)
+                    if (kv.second > top) { top = kv.second; amax = kv.first; }
+                s.conf = std::max(0.0f, top);
+                const std::string stored =
+                    p.labels.count(qkv.first) ? p.labels.at(qkv.first) : "";
+                s.correct = label_matches(qkv.second, stored, amax);
+            }
+            samples.push_back(s);
+        }
+    }
+    cr.total = static_cast<long>(samples.size());
+    if (cr.total == 0) return cr;
+
+    for (int i = 0; i <= steps; ++i) {
+        const double tau = static_cast<double>(i) / static_cast<double>(steps);
+        CurvePoint pt; pt.threshold = tau;
+        for (const auto& s : samples) {
+            if (s.engine_deferred) continue;                       // honest silence: never emitted
+            if (tau > 0.0 && static_cast<double>(s.conf) < tau) continue;
+            ++pt.emitted; pt.correct += s.correct ? 1 : 0;
+        }
+        pt.coverage = static_cast<double>(pt.emitted) / static_cast<double>(cr.total);
+        pt.accuracy = pt.emitted > 0
+            ? static_cast<double>(pt.correct) / static_cast<double>(pt.emitted) : 0.0;
+        cr.points.push_back(pt);
+    }
+
+    // Operating point for a target coverage: the LARGEST threshold whose
+    // coverage still meets the target (answer at least that share, and be as
+    // accurate as the curve allows at that share).
+    auto pick = [&](double target) {
+        OperatingPoint op; op.target = target;
+        for (auto it = cr.points.rbegin(); it != cr.points.rend(); ++it) {
+            if (it->coverage >= target) {
+                op.feasible = true;
+                op.threshold = it->threshold;
+                op.coverage = it->coverage;
+                op.accuracy = it->accuracy;
+                return op;
+            }
+        }
+        // infeasible: report the widest-net point (threshold 0) for context
+        const CurvePoint& p0 = cr.points.front();
+        op.threshold = p0.threshold; op.coverage = p0.coverage; op.accuracy = p0.accuracy;
+        return op;
+    };
+    cr.op50 = pick(0.50); cr.op70 = pick(0.70); cr.op90 = pick(0.90);
+    return cr;
+}
+
+// ASCII rendering of the coverage curve: accuracy (y, 0-100%) against
+// coverage (x, 0-100%), one mark per sweep point. Thresholds fall where
+// they fall; guides mark the 50/70/90 operating points.
+inline std::string coverage_plot(const CoverageReport& cr, int width = 60, int height = 20) {
+    std::vector<std::string> grid(height, std::string(width, ' '));
+    for (const auto& p : cr.points) {
+        if (p.emitted == 0 && p.threshold > 0.0) continue;
+        const int x = std::min(width - 1,
+            static_cast<int>(std::round(p.coverage * (width - 1))));
+        const int y = std::min(height - 1,
+            static_cast<int>(std::round(p.accuracy * (height - 1))));
+        grid[height - 1 - y][x] = '*';       // later (higher-threshold) points overwrite
+    }
+    auto mark = [&](const OperatingPoint& op, char c) {
+        if (!op.feasible) return;
+        const int x = std::min(width - 1,
+            static_cast<int>(std::round(op.coverage * (width - 1))));
+        const int y = std::min(height - 1,
+            static_cast<int>(std::round(op.accuracy * (height - 1))));
+        grid[height - 1 - y][x] = c;         // operating points stay visible
+    };
+    mark(cr.op50, '5'); mark(cr.op70, '7'); mark(cr.op90, '9');
+
+    std::ostringstream out;
+    out << "  accuracy % |";
+    for (int x = 0; x < width; ++x) out << '-';
+    out << "| coverage %\n";
+    for (int r = 0; r < height; ++r) {
+        const int acc = 100 - static_cast<int>(std::lround(100.0 * r / (height - 1)));
+        char label[16];
+        std::snprintf(label, sizeof(label), "%4d", acc);
+        out << "  " << label << "    |" << grid[r] << "|\n";
+    }
+    out << "  ";
+    for (int i = 0; i < 11; ++i) out << '+';
+    for (int i = 0; i < width - 11; ++i) out << '-';
+    out << "\n  ";
+    out << "0%        50%       100%   (* sweep point; 5/7/9 = coverage>=50/70/90% op)\n";
+    return out.str();
+}
+
+// ---------------------------------------------------------------------------
+// v2.1 — aggregate labelled accuracy over a row set (choice + score + noul).
+// Used by the derive gate to report held-out accuracy before/after, and by
+// any caller that wants one number over labelled rows. Deferred answers are
+// neither correct nor wrong (honest silence) — they leave the denominator.
+// ---------------------------------------------------------------------------
+struct AccSummary {
+    long n = 0, correct = 0;
+    double accuracy = 0.0;
+    long choice_n = 0, choice_correct = 0;
+    long score_n = 0, score_correct = 0;
+    long noul_n = 0, noul_correct = 0;
+};
+
+inline AccSummary labelled_accuracy(Engine& eng, const std::vector<sfx::JV>& rows) {
+    const PassResult pr = run_pass(eng, eval_probes(rows), 1);
+    AccSummary s;
+    s.choice_n = pr.choice.n;          s.choice_correct = pr.choice.correct;
+    s.score_n = pr.score.n;            s.score_correct = pr.score.correct;
+    s.noul_n = pr.noul_n;              s.noul_correct = pr.noul_tp + pr.noul_tn;
+    s.n = s.choice_n + s.score_n + s.noul_n;
+    s.correct = s.choice_correct + s.score_correct + s.noul_correct;
+    if (s.n > 0) s.accuracy = static_cast<double>(s.correct) / static_cast<double>(s.n);
+    return s;
 }
 
 } // namespace bench

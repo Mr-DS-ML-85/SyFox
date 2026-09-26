@@ -229,15 +229,16 @@ directions); structural isomorphism = signature Jaccard; novelty potential
 follows the L9 formulation `Phi = I·exp(k·d)`. High Phi = structurally aligned
 AND fabric-distant: a transfer *hypothesis* for the human, never auto-applied.
 
-*Benchmark (v0.2, honest).* compose on model-tickets: all 3 demo argmaxes held
-and sharpened (technical conf 0.251→0.454, sales 0.579→0.812); on model-game
-1 argmax flipped; on model-guard confidences collapsed and 1 flipped. harvest
-on model-tickets: billing 0.604→0.912 (conf 0.679) but one close-call demo
-flipped. Verdict (v0.2, after the strength-scan): both modes are real and
-pinned by tests, but NO strength — down to 32 lanes — avoids taught-row flips
-on the mixed-label tickets/guard fabrics. That verdict is now ENFORCED by the
-no-regression gate (§11) instead of shipped as advice; model-game passes and
-ships derived.
+*Benchmark (v0.2 → v2.1, honest).* The v0.2 verdict was measured on
+resubstitution (eval rows = training rows): compose sharpened tickets demos
+(technical conf 0.251→0.454) but flipped game/guard rows; harvest lifted
+billing 0.604→0.912 but flipped a close call; no strength avoided taught-row
+flips on the mixed-label fabrics. v2.1 replaces the measurement basis: the
+gate now replays the HELD-OUT split (generalization safety, not memorized
+behavior) and the harness decides per model — game ships derived (253 lanes,
+0 held-out flips, accuracy held 0.667→0.667), tickets (9 flips) and guard
+(1 flip) ship un-derived with the reason logged. Same enforcement philosophy,
+honest measurement basis.
 
 ## 11. The no-regression gate (transactional derivation)
 
@@ -291,19 +292,34 @@ PUBLISHED figures (67.8% workflow accuracy, 70–500 ms, pi-warden 88% hold
 precision) for side-by-side reading — axes shared, numbers not compared
 against toy-data resubstitution.
 
-Seed-model results (in-domain resubstitution; `make bench`):
+Seed-model results, v2.1 methodology — HELD-OUT split (70/30, stratified,
+deterministic; `make bench-heldout`), post-gate derivation state. The v0.2
+table that stood here measured in-domain resubstitution (eval rows = training
+rows) and is retired; in-sample numbers remain available via `make bench` as
+a regression contrast only.
 
-| model | acc | choice ECE | conf ok/wrong | OOD defer | hold precision | p50 / p95 |
-|---|---|---|---|---|---|---|
-| tickets | 1.000 (22) | 0.405 | 0.354 / 0.000 | 1.00 | 1.000 (2/2) | 62 / 80 µs |
-| game (derived) | 1.000 (9) | 0.001 | 0.999 / — | 1.00 | — | 36 / 45 µs |
-| guard | 0.846 (13) | 0.243 | 0.795 / 0.451 | 1.00 | 0.750 (3/4) | 33 / 40 µs |
+| model | held-out choice acc (n) | score acc (n) | choice ECE | OOD defer | p50 / p95 |
+|---|---|---|---|---|---|
+| tickets | 1.000 (6) | 0.667 (6) | 0.012 | 1.00 | 64 / 80 µs |
+| game (derived, gate PASS) | 0.667 (3) | — | 0.329 | 1.00 | 29 / 40 µs |
+| guard | 0.750 (4) | — | 0.200 | 1.00 | 34 / 45 µs |
 
-Reading: honesty is structural (1.00 defer everywhere); wrong answers already
-carry near-zero confidence on the mixed-label fabrics; latency is three
-orders of magnitude under the Jev band with the same one-pass shape. Score
-accuracy on tickets (0.682) is the documented tone-readout data limit, now
-measured instead of asserted.
+Reading: the held-out gap against in-sample (tickets 1.000 vs 1.000; guard
+0.750 vs 0.778) is now measured instead of assumed. Calibration is fitted on
+held-out rows only (2–3 scalars; multi-class NLL objective, 1-bit ECE
+adoption guard) — tickets reaches ECE 0.012; game/guard are held above the
+0.1 bar by a single held-out error each, which is arithmetic (1 wrong of
+3–4 emitted forces ECE ≥ ~0.2), not a tuning failure. The headline metric is
+the coverage-vs-accuracy curve (`make coverage`): tickets trades 100%
+coverage @ 83.3% accuracy for 50% coverage @ 100% — the confident subset is
+trustworthy, measurably. Paraphrase augmentation was implemented, measured on
+the held-out split, and REJECTED by default (intern mass is linear, injection
+damps 1/√mass: re-teaching near-duplicates re-weights the field toward the
+training surface forms; tickets 1.000 → 0.500). The derivation gate replays
+held-out rows and decides per model: game ships derived, tickets/guard ship
+un-derived. Honesty stays structural (1.00 OOD defer everywhere); latency is
+three to four orders of magnitude under the Jev band with the same one-pass
+shape.
 
 ## 13. Recall (associative retrieval in energy space)
 

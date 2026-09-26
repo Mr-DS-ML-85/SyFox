@@ -197,12 +197,17 @@ order), and applies two rules refined by a full strength-scan experiment:
    construction, so their argmax may re-resolve, but if the mean confidence
    on them RISES the fabric is feigning sureness about coin flips → revert.
 
-Per-model verdict on the seed models (conservative strength): **model-game
-ships derived** (668 lanes, 0 taught flips, ambiguous-state confidence
-0.975→0.886 — more honest about close calls, demo argmaxes 3/3 unchanged);
-**model-tickets and model-guard revert at every strength** — their fabrics
-mix labels across contexts (refund is 3×billing + 1×sales in the seed data),
-and the gate now proves that automatically instead of shipping a risk.
+Per-model verdict under the v2.1 held-out gate (`make heldout-gate`, P5 — the
+gate rows are now the HELD-OUT split, so the verdict measures generalization
+safety, not memorized behavior; gold-labelled accuracy before/after is in the
+report):
+
+| model | verdict | heldout flips | reason / outcome |
+|---|---|---|---|
+| tickets | **REVERT** | 9 | fabric restored bit-for-bit; ships un-derived |
+| game | **PASS** | 0 | 253 derived lanes committed; heldout accuracy 0.667 → 0.667 |
+| guard | **REVERT** | 1 | fabric restored bit-for-bit; ships un-derived |
+
 Ungated `derive` still works and prints a warning; the gate is the safe path.
 
 ## The Jev-parity benchmark
@@ -216,27 +221,118 @@ honesty, guardrail precision):
 |---|---|---|
 | decision accuracy | 67.8% on a 4-workflow suite (≈ GPT-5.6 Terra 67.9%) | choice/score argmax on eval rows |
 | latency | 70–500 ms one-pass | p50/p95 µs per decision |
-| calibration | "calibrated Bayesian confidence" | ECE (10 bins) + conf-when-correct vs conf-when-wrong |
+| calibration | "calibrated Bayesian confidence" (RLCD) | ECE (10 bins, top-prob) + conf gap |
 | honesty | "never hallucinates" (schema-bound) | OOD defer rate (untaught vocabulary must defer) |
 | guardrails | pi-warden 88% hold precision | noul hold precision/recall + confusion |
 | determinism | non-autoregressive one-pass | full replay, byte-identical decision signatures |
 
-Seed-model results (in-domain resubstitution — the honest label is in every
-report; `make bench` reproduces):
+### Evaluation methodology v2.1 — held-out, not resubstitution
 
-| model | acc | ECE | conf ok/wrong | OOD defer | hold prec. | p50 latency | deterministic |
-|---|---|---|---|---|---|---|---|
-| tickets | 1.000 | 0.405 | 0.354 / 0.000 | 1.00 | 1.000 (2/2) | 62 µs | yes |
-| game (derived) | 1.000 | 0.001 | 0.999 / — | 1.00 | — | 36 µs | yes |
-| guard | 0.846 | 0.243 | 0.795 / 0.451 | 1.00 | 0.750 (3/4) | 33 µs | yes |
+Every data domain is split **70/30 (train / held-out), stratified by label**,
+deterministic seed (`tools/split_data.py`). The fabric learns only from
+`*_train.jsonl`; `*_heldout.jsonl` is touched exactly twice: the temperature/
+Platt fit sets 2–3 scalars on it (P6 — monotone, so argmax is unaffected),
+and the derivation gate replays it read-only (P5). **The headline numbers
+below are held-out accuracy, not resubstitution.** In-sample numbers are kept
+only as a regression contrast (`make bench`).
 
-The honest reading: on toy seed data SyFox's accuracy is resubstitution, not
-generalization — the numbers that matter structurally are the honesty axis
-(1.00 defer on nonsense everywhere), the calibration gap (wrong answers come
-with near-zero confidence on tickets/guard), and latency (three orders of
-magnitude under the Jev reference band, same one-pass shape). `jev_reference`
-in each report carries the published figures for side-by-side reading; no
-parity is claimed beyond sharing the axes.
+`make bench-heldout` (held-out split; the derivation state is post-gate —
+game derived, tickets/guard un-derived):
+
+| model | held-out choice acc (n) | score acc (n) | choice ECE | OOD defer | p50 latency | deterministic |
+|---|---|---|---|---|---|---|
+| tickets | **1.000** (6) | 0.667 (6) | **0.012** | 1.00 | 64 µs | yes |
+| game (derived) | 0.667 (3) | — | 0.329 | 1.00 | 29 µs | yes |
+| guard | **0.750** (4) | — | 0.200 | 1.00 | 34 µs | yes |
+
+**Held-out accuracy, not resubstitution.** The v0.2 README reported
+1.000 / 1.000 / 0.846 — that was the model grading its own homework (the
+eval rows were the training rows). The honest held-out numbers are above;
+in-sample contrast (`make bench`): tickets 1.000 / game 1.000 / guard 0.778.
+The gap between the two is the actual generalization measure, and it is now
+measured, printed, and impossible to confuse.
+
+### Coverage vs accuracy — the headline metric
+
+Top-1 accuracy at 100% coverage is the worst corner of the trade-off the
+field actually operates in. `syfox bench --split heldout --coverage-curve`
+sweeps a confidence threshold τ over 0.0→1.0 and reports accuracy *within*
+each coverage level (`make coverage` reproduces; ASCII plot included in the
+output). Tickets, held-out, 12 labelled choice/score questions:
+
+| coverage ≥ | τ | coverage | accuracy within |
+|---|---|---|---|
+| 100% | 0.45 | 100% | 83.3% |
+| 90% | 0.45 | 100% | 83.3% |
+| 70% | 0.55 | 83.3% | 90.0% |
+| 50% | 0.95 | 50% | **100%** |
+
+Read that last row the SI way: when the field is confident, it is *right* —
+the substrate's honest silence and the calibration together give a selective
+predictor whose emitted answers are trustworthy, and the curve tells you
+exactly what each confidence threshold buys. Game/guard curves are flat at
+their 0.667–0.75 held-out level (3–4 questions, no headroom — more held-out
+data would give the curve room to separate).
+
+### Calibration on held-out (P6)
+
+Temperature + Platt are fitted on the held-out split — **2–3 scalars only;
+the fabric itself never learns from held-out rows**, and temperature is
+monotone so argmax decisions are untouched. The fit objective is multi-class
+NLL over the full candidate energy vector (the textbook definition), and a
+1-bit adoption guard keeps T = 1 when the fitted T would worsen held-out ECE:
+
+| model | ECE before (T=1) | ECE after | adopted |
+|---|---|---|---|
+| tickets | 0.665 | **0.012** | T = 0.0005 |
+| game | 0.329 | 0.329 | fit rejected (would worsen to 0.503) |
+| guard | 0.496 | 0.200 | T = 0.0107 |
+
+Tickets meets the calibrated-confidence bar (ECE < 0.1). Game and guard
+cannot cross it at full coverage **with their current single held-out error**:
+with 1 wrong answer among 3–4 emitted, ECE ≥ (1/n)·|0 − conf| is
+mathematically ≥ 0.2 no matter the temperature — the remedy is more held-out
+rows and fewer errors, which `make coverage` now measures directly. This is
+the same discipline as the derivation gate: the harness decides adoption, not
+hope.
+
+### Augmentation dose-response (P3, measured)
+
+`tools/gen_paraphrases.py` generates 5 paraphrased lessons per taught state
+(`data/*_paraphrased.jsonl`: clause reorders, neutral fillers, combos —
+never touching held-out files). The held-out harness then **measured the
+augmentation backfiring**: the substrate counts occurrences linearly
+(`intern()` mass) and damps re-exposed tokens by 1/√mass, so re-teaching
+near-duplicate lessons re-weights the field toward the training surface
+forms. Held-out choice accuracy:
+
+| recipe | tickets | game | guard |
+|---|---|---|---|
+| train only (shipped default) | **1.000** | 0.667 | **0.750** |
+| train + 5 paraphrases/state | 0.500 | 0.667 | 0.667 |
+| train + 1 paraphrase/state | 0.500 | — | — |
+| train doubled (pure repeat) | 0.667 | — | — |
+
+A lesson in this substrate is a physical deposition, not a data point: the
+same experience re-deposits mass and *damps* the pathway. So the shipped
+default builds un-augmented (`make models`), the augmented recipe stays
+reproducible (`make models-augmented`), and the synonym-folding table
+(`data/synonyms.txt` + Porter stemming, applied at the token boundary) gives
+the generalization P3 was after — "reimbursement" lands on the same node as
+"refund" — without re-deposition.
+
+### Latency and cost
+
+Measured p50 per decision: 29–64 µs on a single CPU core (p95 ≤ 80 µs) —
+three to four orders of magnitude under the Jev reference band (70–500 ms
+per call), with the same one-pass, non-autoregressive shape and byte-identical
+replay determinism. Cost per decision is electricity: the engine runs
+offline on CPU with no API call, no token billing, and no per-request
+infrastructure; memory footprint is a binary model directory
+(substrate.bin + calibration.json), not a GPU-resident network.
+
+`jev_reference` in each report carries the published figures for side-by-side
+reading; no parity is claimed beyond sharing the axes.
 
 ## Recall — associative memory in energy space
 
@@ -275,8 +371,16 @@ Training = teaching the substrate with labelled lessons (JSONL):
   together; for `noul` false-labels the same routes actively dissolve
   (anti-Hebbian), so the field discriminates instead of accumulating.
 * `calibrate` — a tool-side post-processor fits temperature (choice/score) and
-  Platt scaling (noul) on readout energies so probabilities mean what they say.
-  The core physics is untouched.
+  Platt scaling (noul) on the held-out split's readout energies so
+  probabilities mean what they say. Multi-class NLL objective; a 1-bit ECE
+  guard rejects the fit when it would hurt. The core physics is untouched.
+* Tokenization — one deterministic pipeline for teach + decide
+  (`core/normalize.hpp`): lowercase alnum runs → Porter (1980) stemming →
+  synonym folding via `data/synonyms.txt` (override with `--synonyms`; the
+  file ships with the model). No neural net, no pattern matching in the core
+  — this is input encoding at the boundary, and the energy physics downstream
+  is unchanged. Extend `data/synonyms.txt` to teach the boundary new
+  equivalences; keep it conservative, a wrong merge is a wrong lane.
 
 ## The honest-silence contract
 

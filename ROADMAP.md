@@ -68,3 +68,29 @@
 - No transformer, no neural network, no pattern-matching classifier in the core.
 - No text generation. SyFox returns typed values or silence — nothing else.
 - No cloud dependency. The substrate runs on your CPU, offline, forever.
+
+## v2.1 — evaluation-methodology fix (this release)
+- [x] Held-out 70/30 split, stratified, deterministic (`tools/split_data.py`);
+      `make models` trains on `*_train.jsonl` only; `syfox bench --split
+      heldout` scores rows the fabric never learned from. Resubstitution
+      retired as a headline number (in-sample kept as a labeled contrast).
+- [x] Coverage-vs-accuracy curve (`syfox bench --coverage-curve`): threshold
+      sweep 0.0→1.0, table + ASCII plot, operating points at ≥50/70/90%
+      coverage. The headline metric.
+- [x] Paraphrase augmentation (`tools/gen_paraphrases.py`, 5 variants/state,
+      train-only by construction). Measured on held-out: REGRESSES accuracy
+      (intern mass linear, injection damps 1/√mass) — shipped un-augmented by
+      default, `make models-augmented` reproduces the A/B.
+- [x] Token boundary: Porter (1980) stemming + synonym folding table
+      (`data/synonyms.txt`, `--synonyms`), deterministic, no NN, substrate
+      physics byte-identical.
+- [x] Derivation gate replays held-out rows; per-model verdicts logged
+      (game PASS/derived, tickets+guard REVERT) with gold accuracy
+      before/after.
+- [x] Calibration fitted on held-out rows: multi-class NLL over the full
+      candidate vector, 1-bit ECE adoption guard, pairwise-blind-spot and
+      0.005-clamp defects fixed. Tickets held-out ECE 0.665 → 0.012.
+- [ ] Deeper held-out sets (13 rows today): the harness is ready; more data
+      makes every number mean more without code changes.
+- [ ] Character n-gram concept lanes (carried from v0.2): typo robustness —
+      now measurable on the held-out split.

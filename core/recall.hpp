@@ -23,6 +23,7 @@
 // ============================================================================
 #pragma once
 #include "si_substrate.hpp"
+#include "normalize.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -69,7 +70,7 @@ inline std::vector<RecallHit> recall(si::Substrate& s,
                                      int top_k = 5) {
     std::vector<RecallHit> hits;
     if (memories.empty() || s.node_count() == 0) return hits;
-    const std::vector<float> fq = fingerprint(s, si::tokenize(query_state));
+    const std::vector<float> fq = fingerprint(s, si::norm::normalize(query_state));
     float qn2 = 0.0f;
     for (float v : fq) qn2 += v * v;
     if (qn2 <= 0.0f) return hits;      // query resonates with nothing

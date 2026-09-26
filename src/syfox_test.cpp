@@ -37,11 +37,37 @@ static void test_json() {
 
 static void test_folding() {
     std::cout << "[tokenize]\n";
+    // si::tokenize itself is UNCHANGED since v0.2 (substrate encoding baseline)
     CHECK(si::tokenize("Refunds delayed!!")[0] == "refund", "plural folded");
     CHECK(si::tokenize("Charged twice.")[0] == "charg", "past folded");
     CHECK(si::tokenize("charge")[0] == "charg", "verb folded to same stem");
     CHECK(si::tokenize("hello")[0] == "hello", "plain word untouched");
     CHECK(si::tokenize("a x7").size() == 1, "single chars dropped");
+}
+
+static void test_normalize() {
+    std::cout << "[normalize]\n";
+    // Porter spot-checks against the 1980 reference vocabulary
+    CHECK(si::norm::porter_stem("relational") == "relat", "porter step2: ational");
+    CHECK(si::norm::porter_stem("generalization") == "gener", "porter step4: ization");
+    CHECK(si::norm::porter_stem("controll") == "control", "porter step5: double l");
+    CHECK(si::norm::porter_stem("rate") == "rate", "porter keeps cvc+e");
+    CHECK(si::norm::porter_stem("agreed") == "agre", "porter step1b: ed");
+    // synonym folding through the stemmed table
+    CHECK(si::norm::normalize("Reimbursement denied")[0] == "refund",
+          "synonym fold: reimbursement -> refund");
+    CHECK(si::norm::normalize("urgently")[0] == si::norm::normalize("urgent")[0],
+          "synonym fold: urgently == urgent");
+    CHECK(si::norm::normalize("asap")[0] == si::norm::normalize("immediately")[0],
+          "synonym fold: asap == immediately");
+    // one pipeline for teach + decide: porter parity with the old fold on our vocab
+    CHECK(si::norm::normalize("Charged twice.")[0] == "charg", "porter: charged -> charg");
+    CHECK(si::norm::normalize("charge")[0] == "charg", "porter: charge -> charg");
+    CHECK(si::norm::normalize("Invoices")[0] == "invoic", "porter: invoices -> invoic");
+    // determinism: same input -> same tokens, byte for byte
+    bool det = si::norm::normalize("please refund the duplicate charge immediately")
+            == si::norm::normalize("please refund the duplicate charge immediately");
+    CHECK(det, "normalize is deterministic");
 }
 
 static void test_field_physics() {
@@ -69,7 +95,7 @@ static void test_field_physics() {
     // honest silence on unknown vocabulary
     si::Substrate s2;
     for (const auto& w : std::vector<std::string>{"known", "words"}) s2.intern(w);
-    s2.inject(si::tokenize("totally unknown zebra words fail"));
+    s2.inject(si::norm::normalize("totally unknown zebra words fail"));
     s2.settle();
     CHECK(s2.total_energy() == 0.0f, "unknown tokens inject nothing (honest silence path)");
 
@@ -189,14 +215,20 @@ static void test_noul_valence() {
 
 static void test_calibration_tool() {
     std::cout << "[calibration tool]\n";
+    // v2.1 row shape: FULL candidate vector + gold label (multi-class fit)
     std::vector<syfox::Engine::CalibRow> rows = {
-        {"choice", 2.0f, 0.2f, 1}, {"choice", 1.5f, 0.4f, 1},
-        {"choice", 0.1f, 1.8f, 0}, {"choice", 0.3f, 1.2f, 0},
+        {"choice", "a", {{"a", 2.0f}, {"b", 0.2f}}, 0.0f, 0},
+        {"choice", "a", {{"a", 1.5f}, {"b", 0.4f}}, 0.0f, 0},
+        {"choice", "b", {{"a", 0.1f}, {"b", 1.8f}}, 0.0f, 0},
+        {"choice", "b", {{"a", 0.3f}, {"b", 1.2f}}, 0.0f, 0},
     };
     syfox::Engine eng;
     eng.fit_calibration(rows);
     CHECK(eng.calibration().fitted, "fitted flag set");
     CHECK(eng.calibration().choice_temperature > 0.0f, "temperature positive");
+    // multi-class NLL is sharpness-aware: this fit set has clean margins, so
+    // the optimum must sharpen (T < 1), not flatten
+    CHECK(eng.calibration().choice_temperature < 1.0f, "clean margins sharpen temperature");
 }
 
 static void test_honest_silence_defer() {
@@ -337,7 +369,7 @@ static void test_derivation() {
     const float w_ab_before = s11.lane_weight(s11.find("alpha"), s11.find("beta"));
     {
         std::vector<std::vector<std::string>> replay = {
-            si::tokenize("alpha beta"), si::tokenize("beta gamma")};
+            si::norm::normalize("alpha beta"), si::norm::normalize("beta gamma")};
         HarvestConfig hc;
         HarvestStats hst = harvest(s11, replay, hc);
         CHECK(s11.lane_weight(s11.find("alpha"), s11.find("beta")) == w_ab_before,
@@ -416,8 +448,8 @@ static void test_recall() {
     b2("bug", "crash", 0.5f);     b2("crash", "integr", 0.5f);
 
     std::vector<Memory> memories = {
-        {"billing",   si::tokenize("refund double charg invoic billing payment")},
-        {"technical", si::tokenize("api error connect bug crash integr")},
+        {"billing",   si::norm::normalize("refund double charg invoic billing payment")},
+        {"technical", si::norm::normalize("api error connect bug crash integr")},
     };
     auto hitsA = recall(s, "i was double charged on my invoice, refund please", memories, 2);
     CHECK(!hitsA.empty() && hitsA[0].label == "billing",
@@ -498,9 +530,13 @@ static void test_gate() {
         CHECK(sig1 == sig0, "reverted gate: decide() bit-identical to baseline");
     }
 
-    // (c) gated harvest with replay states: same invariant
+    // (c) gated harvest with replay states: same invariant. NOTE (v2.1): the
+    // revert-branch baseline is sig1 — the fabric state immediately before
+    // the harvest — because a COMMITTED compose gate legitimately changed the
+    // lanes (zero flips), and the harvest revert must restore THAT state,
+    // bit for bit, not the pre-compose one.
     std::vector<std::vector<std::string>> replay;
-    for (const auto& r : rows) replay.push_back(si::tokenize(r.at("state").as_str()));
+    for (const auto& r : rows) replay.push_back(si::norm::normalize(r.at("state").as_str()));
     auto rep2 = gate::gated_derive(eng, "harvest", rows, replay, gc);
     CHECK(rep2.ran, "harvest gate ran");
     const auto sig2 = bench::decision_signature(eng, probes[0]);
@@ -512,7 +548,7 @@ static void test_gate() {
         }
         CHECK(argmax_same, "committed harvest gate: taught argmaxes unchanged");
     } else {
-        CHECK(sig2 == sig0, "reverted harvest gate: decide() bit-identical to baseline");
+        CHECK(sig2 == sig1, "reverted harvest gate: decide() bit-identical to pre-derive state");
     }
 
     // (d) gate report serializes
@@ -556,6 +592,7 @@ int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
     test_folding();
+    test_normalize();
     test_field_physics();
     test_salience_mechanics();
     test_hebbian_choice();

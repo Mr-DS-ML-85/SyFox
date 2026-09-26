@@ -18,6 +18,7 @@
 #pragma once
 #include "json.hpp"
 #include "si_substrate.hpp"
+#include "normalize.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -28,7 +29,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "0.2.0";
+inline const char* VERSION = "2.1.0";
 
 // ---------------------------------------------------------------------------
 struct Answer {
@@ -116,8 +117,8 @@ public:
     //  3. state -> outcome lanes strengthen (fire together, wire together)
     void learn_example(const std::string& state_text, const std::string& instructions,
                        const std::string& outcome_text) {
-        std::vector<std::string> state = si::tokenize(state_text + " " + instructions);
-        std::vector<std::string> outcome = si::tokenize(outcome_text);
+        std::vector<std::string> state = si::norm::normalize(state_text + " " + instructions);
+        std::vector<std::string> outcome = si::norm::normalize(outcome_text);
         for (const auto& t : state) si_.intern(t);
         for (const auto& t : outcome) si_.intern(t);
         for (std::size_t i = 1; i < state.size(); ++i)      // co-occurrence fabric
@@ -126,16 +127,94 @@ public:
     }
 
     // -- CALIBRATION TOOL (external post-processor, not core physics) ----------
-    // Fits temperature (choice/score) and Platt (noul) on collected rows:
-    //   row = {type, energy_of_correct, energy_of_a_wrong (choice/score) or support (noul), y}
-    struct CalibRow { std::string type; float e_correct; float e_wrong; int y; };
+    // Fits temperature (choice/score) and Platt (noul) on collected rows.
+    // v2.1: a choice/score row carries the FULL candidate energy vector plus
+    // the gold label, so the fit sees the same multi-class softmax the decide
+    // path reports. The old {e_correct, worst e_wrong} pairwise view was
+    // structurally blind to argmax errors on near-ties (a wrong-but-tied row
+    // stays p=0.5 under ANY temperature), which let the optimizer drive T to
+    // its floor and manufacture confidence on wrong answers.
+    struct CalibRow {
+        std::string type;
+        std::string label;                                    // gold candidate key
+        std::vector<std::pair<std::string, float>> energies;  // full candidate vector
+        float support = 0.0f;                                 // noul: support readout
+        int y = 0;                                            // noul: gold target
+    };
 
     void fit_calibration(const std::vector<CalibRow>& rows) {
-        fit_temperature(rows, "choice", calib_.choice_temperature);
-        fit_temperature(rows, "score",  calib_.score_temperature);
+        // v2.1 adoption guard: the NLL optimum is the textbook temperature,
+        // but on tiny heldout sets with an unavoidable argmax error it can
+        // WORSEN ECE (sharpening raises the wrong answer's confidence too).
+        // So the fit is a selection between exactly two honest candidates —
+        // T = 1 and the NLL optimum — decided by measured multi-class ECE on
+        // the fit rows (1 bit per question type; argmax never moves). The
+        // calibrate report shows before/after either way.
+        struct Cand { float T; };
+        auto adopt_temp = [&](const std::string& type, float& slot) {
+            float cand = slot;
+            fit_temperature(rows, type, cand);
+            const double e1 = calibration_ece(rows, type, 1.0f, 0, 0);
+            const double e2 = calibration_ece(rows, type, cand, 0, 0);
+            slot = (e2 < e1) ? cand : 1.0f;
+        };
+        adopt_temp("choice", calib_.choice_temperature);
+        adopt_temp("score", calib_.score_temperature);
+        // Platt: same 1-bit selection for the noul map
+        const float a0 = calib_.noul_a, b0 = calib_.noul_b;
+        const double p1 = calibration_ece(rows, "noul", 1.0f, a0, b0);
         fit_platt(rows);
+        const double p2 = calibration_ece(rows, "noul", 1.0f, calib_.noul_a, calib_.noul_b);
+        if (!(p2 < p1)) { calib_.noul_a = a0; calib_.noul_b = b0; }
         calib_.fitted = true;
         calib_.rows = rows.size();
+    }
+
+    // Multi-class expected calibration error over collected rows (10 equal-
+    // width bins on top-probability confidence, argmax-correctness for
+    // choice/score; Platt sigmoid + 0.5 threshold for noul). Same definition
+    // the bench reports, so calibrate's before/after and bench's ECE agree.
+    static double calibration_ece(const std::vector<CalibRow>& rows,
+                                  const std::string& type, float T,
+                                  float noul_a, float noul_b) {
+        long bins[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        long corr[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        double confs[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        const float Ts = std::max(1e-6f, T);
+        for (const auto& r : rows) {
+            if (r.type != type) continue;
+            float conf = 0.0f; bool correct = false;
+            if (r.type == "noul") {
+                const float p = 1.0f / (1.0f + std::exp(-(noul_a * r.support + noul_b)));
+                conf = std::max(p, 1.0f - p);
+                correct = (p >= 0.5f) == (r.y == 1);
+            } else {
+                if (r.energies.empty()) continue;
+                float maxe = -1e30f;
+                for (const auto& kv : r.energies) maxe = std::max(maxe, kv.second);
+                float z = 0.0f, top = -1.0f; std::string amax;
+                for (const auto& kv : r.energies) {
+                    const float v = std::exp((kv.second - maxe) / Ts);
+                    z += v;
+                    if (v > top) { top = v; amax = kv.first; }
+                }
+                conf = top / z;
+                correct = amax == r.label;
+            }
+            const int b = std::min(9, std::max(0, static_cast<int>(conf * 10.0f)));
+            ++bins[b]; corr[b] += correct ? 1 : 0; confs[b] += conf;
+        }
+        long total = 0;
+        for (int i = 0; i < 10; ++i) total += bins[i];
+        if (total == 0) return 0.0;
+        double e = 0.0;
+        for (int i = 0; i < 10; ++i) {
+            if (!bins[i]) continue;
+            e += (static_cast<double>(bins[i]) / total)
+               * std::fabs(static_cast<double>(corr[i]) / bins[i]
+                           - confs[i] / bins[i]);
+        }
+        return e;
     }
 
     // -- Noul lesson (valence-aware) ------------------------------------------
@@ -144,8 +223,8 @@ public:
     // y=false : anti-Hebbian weaken the same routes (disconfirming evidence
     //           dissolves them), so the field discriminates, not accumulates.
     void learn_noul(const std::string& state_text, const std::string& instructions, bool y) {
-        std::vector<std::string> state = si::tokenize(state_text);
-        std::vector<std::string> instr = si::tokenize(instructions);
+        std::vector<std::string> state = si::norm::normalize(state_text);
+        std::vector<std::string> instr = si::norm::normalize(instructions);
         for (const auto& t : state) si_.intern(t);
         for (const auto& t : instr) si_.intern(t);
         if (y) si_.hebbian_lesson(state, instr, 2.0f);   // supporting evidence binds hard
@@ -159,7 +238,7 @@ public:
         usage.lanes = si_.lane_count();
 
         std::vector<Answer> answers;
-        std::vector<std::string> tokens = si::tokenize(state);
+        std::vector<std::string> tokens = si::norm::normalize(state);
         usage.state_tokens = tokens.size();
 
         si_.reset_field();
@@ -197,7 +276,7 @@ public:
             const sfx::JV& qs = ex.has("questions") ? ex.at("questions") : sfx::JV(sfx::JVObj{});
             if (!qs.is_obj()) continue;
             si_.reset_field();
-            si_.inject(si::tokenize(state));
+            si_.inject(si::norm::normalize(state));
             si_.settle();
             if (si_.silent()) continue;
             for (const auto& qkv : qs.obj) {
@@ -213,25 +292,26 @@ public:
                     else if (crit.is_arr())
                         for (std::size_t i = 0; i < crit.arr.size(); ++i)
                             energies.emplace_back(crit.arr[i].as_str(), probe_energy(crit.arr[i].as_str(), ""));
-                    for (const auto& e : energies) {
-                        CalibRow r; r.type = type;
-                        r.y = (e.first == label) ? 1 : 0;
-                        if (r.y == 1) r.e_correct = e.second;
-                        else          r.e_wrong   = e.second;
-                        // store correct energy in e_correct; pair wrong from argmax wrong
-                        if (r.y == 1) {
-                            float worst = -1e9f;
-                            for (const auto& e2 : energies)
-                                if (e2.first != label) worst = std::max(worst, e2.second);
-                            r.e_wrong = worst;
-                            rows.push_back(r);
+                    // resolve the gold label to a candidate KEY: for array
+                    // criteria the stored label may be the level INDEX ("0",
+                    // "1", ...) — the old code compared it to the level text
+                    // and silently dropped every score row from the fit
+                    std::string gold = label;
+                    if (crit.is_arr()) {
+                        bool is_text = false;
+                        for (const auto& v : crit.arr) if (v.as_str() == label) { is_text = true; break; }
+                        if (!is_text) {
+                            long idx = std::strtol(label.c_str(), nullptr, 10);
+                            if (idx >= 0 && idx < static_cast<long>(crit.arr.size()))
+                                gold = crit.arr[static_cast<std::size_t>(idx)].as_str();
                         }
                     }
+                    CalibRow r; r.type = type; r.label = gold; r.energies = energies;
+                    rows.push_back(r);
                 } else if (type == "noul") {
                     float support = noul_support(q.at("instructions").as_str());
                     CalibRow r; r.type = "noul";
-                    r.e_correct = support;
-                    r.e_wrong = 0.0f;
+                    r.support = support;
                     r.y = (label == "true") ? 1 : 0;
                     rows.push_back(r);
                 }
@@ -243,12 +323,12 @@ public:
 private:
     // -- readout helpers --------------------------------------------------------
     float probe_energy(const std::string& label, const std::string& desc) const {
-        return si_.readout(si::tokenize(label + " " + desc));
+        return si_.readout(si::norm::normalize(label + " " + desc));
     }
 
     float noul_support(const std::string& instructions) const {
         // Noul uses the SUPPORT readout lane: breadth of corroboration.
-        float e = si_.readout(si::tokenize(instructions), si::Substrate::ReadoutMode::Support);
+        float e = si_.readout(si::norm::normalize(instructions), si::Substrate::ReadoutMode::Support);
         float total = si_.total_energy();
         if (total <= 0.0f) return 0.0f;
         float support = e / (total * 1.5f);                 // ratio in ~[0,1+]
@@ -265,7 +345,12 @@ private:
         float maxe = *std::max_element(e.begin(), e.end());
         float z = 0.0f;
         p.assign(e.size(), 0.0f);
-        for (std::size_t i = 0; i < e.size(); ++i) { p[i] = std::exp((e[i] - maxe) / std::max(0.005f, T)); z += p[i]; }
+        // v2.1: honor the fitted temperature down to its search floor — the
+        // old 0.005 clamp silently discarded a fitted T below it (fitted
+        // confidences were computed at 0.005 no matter what calibration.json
+        // said). exp((e - maxe)/T) <= 1 for any T > 0: overflow impossible.
+        const float Ts = std::max(1e-6f, T);
+        for (std::size_t i = 0; i < e.size(); ++i) { p[i] = std::exp((e[i] - maxe) / Ts); z += p[i]; }
         for (auto& v : p) v /= z;
         return maxe;
     }
@@ -328,32 +413,56 @@ private:
 
     // -- calibration fitting (tool-side numerical search, no core changes) ------
     static float nll_temperature(const std::vector<CalibRow>& rows, const std::string& type, float T) {
+        // v2.1: multi-class NLL over the FULL candidate vector — the textbook
+        // temperature-scaling objective (Guo et al. 2017). Every candidate
+        // participates, so a wrong-but-tied gold label keeps p_gold ~ 1/nk
+        // under ANY temperature and properly punishes over-sharpening.
         float nll = 0.0f; std::size_t n = 0;
+        // NO floor clamp here beyond positivity: the max-subtracted softmax
+        // is overflow-safe for any T > 0 (exponents are <= 0; deep negatives
+        // just underflow to 0). A 0.005 floor made NLL flat below 0.005 and
+        // hid the true optimum from the search.
+        const float Ts = std::max(1e-6f, T);
         for (const auto& r : rows) {
-            if (r.type != type) continue;
+            if (r.type != type || r.energies.empty()) continue;
             ++n;
-            float ec = r.e_correct / std::max(0.005f, T);
-            float ew = r.e_wrong  / std::max(0.005f, T);
-            float m = std::max(ec, ew);
-            // log softmax of correct over wrong
-            nll -= (ec - m) - std::log(std::exp(ec - m) + std::exp(ew - m));
+            float maxe = -1e30f;
+            for (const auto& kv : r.energies) maxe = std::max(maxe, kv.second);
+            float z = 0.0f, pl = 0.0f;
+            for (const auto& kv : r.energies) {
+                const float v = std::exp((kv.second - maxe) / Ts);
+                z += v;
+                if (kv.first == r.label) pl = v;
+            }
+            nll -= std::log(std::max(pl, 1e-9f) / std::max(z, 1e-9f));
         }
         return n > 0 ? nll / static_cast<float>(n) : 0.0f;
     }
 
     static void fit_temperature(const std::vector<CalibRow>& rows, const std::string& type, float& T) {
-        float lo = 0.005f, hi = 20.0f;
+        // Bounds span the substrate's OWN energy-gap scale: readout gaps on
+        // unfamiliar states are O(0.001..0.05), so a temperature floor of
+        // 0.005 capped achievable sharpness at exp(gap/0.005) and left
+        // correct answers under-confident. 0.0005 covers gaps down to
+        // ~0.003; the max-subtracted softmax is numerically stable all the
+        // way down (exp(-large) simply underflows to 0). The multi-class NLL
+        // guards the fit itself: with any argmax-wrong row in the fit set
+        // the optimum stays off the floor (sharpening a wrong answer costs
+        // NLL), which is exactly the safeguard the pairwise view lacked.
+        const float lo = 0.0005f, hi = 20.0f;
+        float a = lo, b = hi;
         for (int it = 0; it < 60; ++it) {                    // golden-section on NLL
-            float m1 = lo + (hi - lo) / 3.0f, m2 = hi - (hi - lo) / 3.0f;
-            if (nll_temperature(rows, type, m1) < nll_temperature(rows, type, m2)) hi = m2; else lo = m1;
+            float m1 = a + (b - a) / 3.0f, m2 = b - (b - a) / 3.0f;
+            if (nll_temperature(rows, type, m1) < nll_temperature(rows, type, m2)) b = m2; else a = m1;
         }
-        if (nll_temperature(rows, type, (lo + hi) / 2) < nll_temperature(rows, type, 1.0f))
-            T = (lo + hi) / 2.0f;
+        const float cand = (a + b) / 2.0f;
+        if (nll_temperature(rows, type, cand) < nll_temperature(rows, type, 1.0f))
+            T = cand;
     }
 
     void fit_platt(const std::vector<CalibRow>& rows) {
         std::vector<std::pair<float, int>> pts;
-        for (const auto& r : rows) if (r.type == "noul") pts.emplace_back(r.e_correct, r.y);
+        for (const auto& r : rows) if (r.type == "noul") pts.emplace_back(r.support, r.y);
         if (pts.size() < 4) return;
         float a = std::max(10.0f, calib_.noul_a), b = calib_.noul_b;
         float lr = 0.5f;                                     // decaying lr, long run:

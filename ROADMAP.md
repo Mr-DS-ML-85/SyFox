@@ -1,7 +1,8 @@
 # SyFox Roadmap
 
 ## v0.1 — System One on SI physics (this release)
-- [x] Concept field with acoustic mass, dissipative settle, salience gating
+- [x] Concept field with occurrence mass (1/√mass damping at use sites),
+      dissipative settle, energy-gated source capping
 - [x] Hebbian lane learning + anti-Hebbian weakening (Noul)
 - [x] Choice / Score / Noul typed readouts on one settled field
 - [x] Honest silence: defer instead of guess
@@ -12,7 +13,10 @@
 
 ## v0.2 — Depth and robustness
 - [ ] Character n-gram concept lanes: typo robustness without touching the core physics
-- [ ] Two-stage choice for >255 options (salience shortlist → resonance rescore)
+- [ ] Physics experiment: Miller-window source cap (sample [5,9] per
+      decision, as the SI substrate does) vs the fixed 24 — adopt only if it
+      wins on a held-out eval set
+- [ ] Two-stage choice for >255 options (energy shortlist → resonance rescore)
 - [ ] Relational Noul via dual-injection interference readout (command ∩ task overlap)
 - [ ] Eval harness: `syfox eval --model --examples` with accuracy + reliability diagrams
 - [ ] CI regression files (record decisions, diff on retrain) — a libre `jevassert` analog

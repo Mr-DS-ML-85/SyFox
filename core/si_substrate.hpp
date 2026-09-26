@@ -10,10 +10,11 @@
 //                     weighted by acoustic mass (frequent concepts are
 //                     "heavier" and carry less per-token energy).
 //    2. SETTLE      — energy diffuses along Hebbian lanes with decay,
-//                     iterated K_settle passes; a salience cap keeps the
-//                     working set bounded (SI cap window [5,9]); the field
-//                     stops when the total energy delta drops below eps
-//                     (phase stability).
+//                     iterated K_settle passes; an energy-gated source cap
+//                     keeps the working set bounded (SI-inspired — the SI
+//                     substrate samples a Miller window [5,9], SyFox pins a
+//                     fixed cap); the field stops when the total energy delta
+//                     drops below eps (phase stability).
 //    3. READOUT     — a resonance sweep reads the settled field at probe
 //                     nodes (options / anchors / statements). Readout is a
 //                     measurement of the field, not a classifier.
@@ -46,8 +47,8 @@ struct SubstrateConfig {
     float diffusion      = 0.45f;  // fraction of energy that flows along lanes
     int   k_settle       = 8;      // max settle passes
     float eps            = 1e-4f;  // phase-stability threshold (early stop)
-    float salience_cap   = 24.0f;  // max propagation sources per pass (gating, SI-inspired)
-    float salience_floor = 5.0f;   // min working set before pruning stops
+    float source_cap     = 24.0f;  // max propagation sources per pass, top-K BY ENERGY
+                                   // (SI-inspired bounded working set; SI samples [5,9], SyFox fixes 24)
     float silence_floor  = 0.05f;  // below this total energy => honest silence
     float inject_energy  = 1.0f;   // energy per fresh token
     float learn_eta      = 0.10f;  // Hebbian learning rate
@@ -75,8 +76,11 @@ public:
         if (it != index_.end()) { nodes_[it->second].mass += 1.0f; return it->second; }
         NodeId id = static_cast<NodeId>(nodes_.size());
         index_.emplace(concept, id);
-        // acoustic mass: log-compressed frequency; heavy nodes move less
-        nodes_.push_back(Node{concept, 1.0f, 0.0f, 0.0f});
+        // occurrence mass: a LINEAR count of intern() calls (not log-compressed).
+        // The sub-linear behavior lives at the USE sites: injection deposits
+        // energy/sqrt(mass) and Hebbian bind strength scales by 1/sqrt(mass),
+        // so heavy concepts move less.
+        nodes_.push_back(Node{concept, 1.0f, 0.0f});
         return id;
     }
 
@@ -138,16 +142,16 @@ public:
             Node& n = nodes_[id];
             float mass_damp = 1.0f / std::sqrt(n.mass);   // heavy => less per-token
             n.energy += energy * mass_damp;
-            n.salience += 1.0f;
         }
     }
 
     // -- SETTLE ---------------------------------------------------------------
-    // One pass = dissipative diffusion along lanes + salience gating.
+    // One pass = dissipative diffusion along lanes + source gating.
     // Energy is CONSERVED per pass up to decay: each node retains
     // (1 - diffusion) of its (decayed) energy and flows `diffusion` out along
-    // its lanes, split proportionally to lane weight. The salience cap GATES
-    // propagation (only the loudest `cap` nodes send energy this pass);
+    // its lanes, split proportionally to lane weight. The source cap GATES
+    // propagation (only the `source_cap` highest-ENERGY nodes send energy
+    // this pass — selection is by energy, nothing else);
     // gated nodes keep their energy (readout-visible) but stay silent as
     // sources — bounded working set, nothing is annihilated.
     void settle() {
@@ -163,13 +167,13 @@ public:
             for (std::size_t i = 0; i < nodes_.size(); ++i)
                 if (nodes_[i].energy > 1e-7f) active.push_back(i);
 
-            // salience gating: at most `cap` sources per pass
-            if (static_cast<float>(active.size()) > cfg_.salience_cap) {
+            // source gating: at most `source_cap` (top-K by energy) per pass
+            if (static_cast<float>(active.size()) > cfg_.source_cap) {
                 std::nth_element(active.begin(),
-                                 active.begin() + static_cast<std::ptrdiff_t>(cfg_.salience_cap),
+                                 active.begin() + static_cast<std::ptrdiff_t>(cfg_.source_cap),
                                  active.end(), [&](std::size_t a, std::size_t b){
                                      return nodes_[a].energy > nodes_[b].energy; });
-                active.resize(static_cast<std::size_t>(cfg_.salience_cap));
+                active.resize(static_cast<std::size_t>(cfg_.source_cap));
             }
             std::vector<char> is_source(nodes_.size(), 0);
             for (std::size_t i : active) is_source[i] = 1;
@@ -246,7 +250,7 @@ public:
 
     // -- HONEST SILENCE reset ---------------------------------------------------
     void reset_field() {
-        for (auto& n : nodes_) { n.energy = 0.0f; n.salience = 0.0f; }
+        for (auto& n : nodes_) n.energy = 0.0f;
     }
 
     // -- ANTI-HEBBIAN WEAKENING --------------------------------------------------
@@ -321,7 +325,7 @@ public:
             std::string c(len, '\0'); f.read(c.data(), len);
             float mass = 0; f.read(reinterpret_cast<char*>(&mass), 4);
             index_.emplace(c, static_cast<NodeId>(nodes_.size()));
-            nodes_.push_back(Node{c, mass, 0.0f, 0.0f});
+            nodes_.push_back(Node{c, mass, 0.0f});
         }
         std::uint32_t lanes = 0; f.read(reinterpret_cast<char*>(&lanes), 4);
         for (std::uint32_t i = 0; i < lanes; ++i) {
@@ -336,7 +340,7 @@ public:
     const SubstrateConfig& config() const { return cfg_; }
 
 private:
-    struct Node { std::string concept; float mass; float energy; float salience; };
+    struct Node { std::string concept; float mass; float energy; };
 
     void enforce_lane_decay() {
         for (auto& kv : out_)

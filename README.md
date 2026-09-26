@@ -16,7 +16,7 @@ different core: instead of a trained transformer, SyFox runs on the
 state tokens ──inject──> ConceptField (nodes with acoustic mass)
                 │
                 ├── settle: dissipative diffusion along Hebbian lanes,
-                │           salience gating (bounded working set), K_settle
+                │           energy-gated source cap (bounded working set), K_settle
                 │
                 ├── per-question READOUT on the same settled field:
                 │     Choice → specific resonance  → typed option + probabilities

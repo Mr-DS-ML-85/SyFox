@@ -14,12 +14,18 @@ research substrate. The rule that governs this codebase:
 Every lowercase folded token interned by the engine becomes a **concept node**
 (`core/si_substrate.hpp`, `Substrate::intern`). Nodes carry:
 
-* **mass** — log-compressed frequency of the concept across all lessons.
+* **mass** — a raw occurrence count: `intern()` adds exactly `1.0` each time
+  the concept appears in any lesson. It is **linear, not log-compressed**.
   *Lineage:* SI "acoustic mass" — heavier units respond less to the same
-  stimulus. Injection divides energy by `sqrt(mass)`, so frequent concepts
-  ("the", "please") cannot flood the field.
+  stimulus. The sub-linear behavior lives at the **use sites**, not in the
+  counter: injection deposits `energy / sqrt(mass)` and Hebbian bind strength
+  scales by `1/sqrt(mass)`, so frequent concepts ("the", "please") cannot
+  flood the field.
 * **energy** — transient; injected and dissipated per decision.
-* **salience** — transient; marks participation in the current working set.
+
+(An earlier revision also carried a `salience` field. Audit found it was
+write-only — incremented at injection, read nowhere; gating selects sources
+by energy — so it was removed. Dead state in the core is doc debt.)
 
 Token folding (`fold`) is deterministic string normalization (plural / `-ed` /
 `-ing` / trailing `e`), applied identically to states, options, and
@@ -54,12 +60,14 @@ words settles zero energy and defers).
 
 `settle()` runs up to `k_settle` (default 8) dissipative diffusion passes:
 
-1. Sources are gated by **salience cap** (24 by default): only the loudest
-   nodes propagate this pass. *Lineage:* SI salience capping — a bounded
-   working set. Gated nodes keep their energy (they remain readout-visible);
-   the cap gates flow, it does not annihilate. (An earlier version pruned
-   energy outright and destroyed 97% of the field — the gating form is the
-   correct physics and the tests pin it.)
+1. Sources are gated by **source cap** (`source_cap`, 24 by default): the
+   top-K nodes **by energy** propagate this pass — selection is by energy
+   only; no separate salience score exists. *Lineage:* SI working-set
+   capping; the SI substrate samples its cap from a Miller window [5,9],
+   SyFox pins a fixed 24. Gated nodes keep their energy (they remain
+   readout-visible); the cap gates flow, it does not annihilate. (An earlier
+   version pruned energy outright and destroyed 97% of the field — the
+   gating form is the correct physics and the tests pin it.)
 2. Each source retains `(1 − diffusion)` of its decayed energy and flows
    `diffusion` out along its lanes, split proportionally to lane weight:
    `next[b] += e·decay·diffusion·(w_ab / Σw_a)`.
@@ -125,7 +133,7 @@ to the same readout bit-for-bit (pinned by tests).
 | Mechanism | Origin |
 |---|---|
 | Energy injection + field settle | SI `physics.hpp` substrate dynamics |
-| Salience capping (as gating) | SI salience landscape working-set cap |
+| Source capping (top-K by energy) | SI working-set cap (SI samples a Miller window [5,9]; SyFox fixes 24) |
 | Hebbian lane bindings + decay | SI lane learning |
 | Honest silence | SI dispatch contract |
 | Typed Choice/Score/Noul API | interface shape inspired by TypeSafe Jev |

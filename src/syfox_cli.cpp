@@ -3,6 +3,7 @@
 //  (thin tooling around the SI substrate core; no logic lives here)
 // ============================================================================
 #include "core/syfox.hpp"
+#include "core/derive.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -19,6 +20,9 @@ struct Args {
     std::string state;
     std::string questions;
     std::string domain;
+    std::string concept;
+    long steps = 64;                 // dream steps
+    unsigned long long seed = 0x5EED5EEDull;  // dream seed (deterministic by default)
     bool state_file = false, questions_file = false;
     // SI-faithful selection modes (off by default; never persisted into the model)
     bool salience_gating = false, miller_window = false;
@@ -225,6 +229,131 @@ void cmd_stats(const Args& a) {
         {"miller_window", sfx::JV(eng.substrate().config().miller_window)}}).dump() << "\n";
 }
 
+// ---------------------------------------------------------------------------
+// Derivation layer commands. All OFFLINE and EXPLICIT: decide() stays
+// read-only; nothing here runs implicitly. Dreaming never touches the
+// substrate — only a human-validated ledger line can become a lane.
+// ---------------------------------------------------------------------------
+void cmd_derive(const Args& a) {
+    syfox::Engine eng;
+    eng.load_model(a.model);
+    if (!a.examples.empty()) {
+        // dynamic harvest: replay states, let the field's own settle
+        // dynamics nominate which pairs deserve a direct lane
+        auto rows = load_jsonl(a.examples);
+        std::vector<std::vector<std::string>> replay;
+        for (const auto& ex : rows) replay.push_back(si::tokenize(ex.at("state").as_str()));
+        syfox::derive::HarvestConfig hc;
+        auto st = syfox::derive::harvest(eng.substrate(), replay, hc);
+        eng.save_model(a.model);
+        std::cout << sfx::JV(sfx::JVObj{
+            {"command", sfx::JV("derive")},
+            {"mode", sfx::JV("harvest")},
+            {"states_replayed", static_cast<double>(replay.size())},
+            {"created", static_cast<double>(st.created)},
+            {"refreshed", static_cast<double>(st.refreshed)},
+            {"dissolved", static_cast<double>(st.dissolved)},
+            {"lanes", static_cast<double>(eng.substrate().lane_count())},
+            {"note", sfx::JV("co-activation harvest: observed lanes untouched; gen-1 lanes re-verified on every run")}}).dump() << "\n";
+    } else {
+        // static compose: two-hop algebra over the fabric (sparse fabrics)
+        syfox::derive::DeriveConfig cfg;
+        syfox::derive::DeriveStats st = syfox::derive::run(eng.substrate(), cfg, 2);
+        eng.save_model(a.model);
+        std::cout << sfx::JV(sfx::JVObj{
+            {"command", sfx::JV("derive")},
+            {"mode", sfx::JV("compose")},
+            {"created", static_cast<double>(st.created)},
+            {"strengthened", static_cast<double>(st.strengthened)},
+            {"healed", static_cast<double>(st.healed)},
+            {"dissolved", static_cast<double>(st.dissolved)},
+            {"lanes", static_cast<double>(eng.substrate().lane_count())},
+            {"note", sfx::JV("derived lanes carry a generation; observed lanes were never weakened")}}).dump() << "\n";
+    }
+}
+
+void cmd_dream(const Args& a) {
+    syfox::Engine eng;
+    eng.load_model(a.model);
+    syfox::derive::DreamConfig dc;
+    auto cands = syfox::derive::dream(eng.substrate(), dc, a.seed, static_cast<int>(a.steps));
+    const std::string ledger = a.model + "/mutations.jsonl";
+    std::ofstream out(ledger, std::ios::app);
+    long written = 0;
+    for (const auto& c : cands) {
+        if (!out) { std::cerr << "syfox: cannot write " << ledger << "\n"; break; }
+        sfx::JVArr driven;
+        for (si::NodeId id : c.driven) driven.push_back(sfx::JV(eng.substrate().concept_of(id)));
+        out << sfx::JV(sfx::JVObj{
+            {"driven", sfx::JV(driven)},
+            {"emergent", sfx::JV(eng.substrate().concept_of(c.emergent))},
+            {"support", std::round(c.support * 10000.0f) / 10000.0f},
+            {"seed", static_cast<double>(a.seed)},
+            {"validated", sfx::JV(false)}}).dump() << "\n";
+        ++written;
+    }
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("dream")},
+        {"candidates", static_cast<double>(written)},
+        {"ledger", sfx::JV(ledger)},
+        {"substrate_modified", sfx::JV(false)},
+        {"note", sfx::JV("edit the ledger: set validated:true only on lines you vouch for, then run syfox promote")}}).dump() << "\n";
+}
+
+void cmd_promote(const Args& a) {
+    syfox::Engine eng;
+    eng.load_model(a.model);
+    const std::string ledger = a.model + "/mutations.jsonl";
+    auto lines = load_jsonl(ledger);
+    const float promote_gain = 6.0f;
+    long applied = 0, unvalidated = 0, already = 0;
+    sfx::JVArr updated;
+    for (auto& line : lines) {
+        if (!line.is_obj()) continue;
+        const bool validated = line.has("validated") && line.at("validated").is_bool() && line.at("validated").b;
+        const bool promoted  = line.has("promoted")  && line.at("promoted").is_bool()  && line.at("promoted").b;
+        if (!validated) { ++unvalidated; updated.push_back(line); continue; }
+        if (promoted)   { ++already;     updated.push_back(line); continue; }
+        std::vector<std::string> driven;
+        if (line.at("driven").is_arr())
+            for (const auto& d : line.at("driven").arr) driven.push_back(d.as_str());
+        const std::string emergent = line.at("emergent").as_str();
+        const float support = static_cast<float>(line.at("support").as_num(0.0));
+        syfox::derive::apply_promotion(eng.substrate(), driven, emergent, support, promote_gain);
+        line.obj["promoted"] = sfx::JV(true);
+        updated.push_back(line);
+        ++applied;
+    }
+    if (applied > 0) {
+        std::ofstream out(ledger, std::ios::trunc);
+        for (const auto& l : updated) out << l.dump() << "\n";
+        eng.save_model(a.model);
+    }
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("promote")},
+        {"applied", static_cast<double>(applied)},
+        {"unvalidated_skipped", static_cast<double>(unvalidated)},
+        {"already_promoted", static_cast<double>(already)},
+        {"model_saved", sfx::JV(applied > 0)}}).dump() << "\n";
+}
+
+void cmd_analogs(const Args& a) {
+    syfox::Engine eng;
+    eng.load_model(a.model);
+    auto matches = syfox::derive::find_analogues(eng.substrate(), a.concept);
+    sfx::JVArr arr;
+    for (const auto& m : matches)
+        arr.push_back(sfx::JV(sfx::JVObj{
+            {"concept", sfx::JV(m.concept)},
+            {"iso", std::round(m.iso * 1000.0f) / 1000.0f},
+            {"hops", static_cast<double>(m.hops)},
+            {"phi", std::round(m.phi * 1000.0f) / 1000.0f}}));
+    std::cout << sfx::JV(sfx::JVObj{
+        {"source", sfx::JV(a.concept)},
+        {"analogs", sfx::JV(arr)},
+        {"note", sfx::JV("high phi = structurally aligned AND fabric-distant: a transfer hypothesis, verify before use")}}).dump() << "\n";
+}
+
 void usage_exit() {
     std::cerr <<
         "syfox " << syfox::VERSION << " — System One decision engine (SI substrate core)\n"
@@ -234,6 +363,10 @@ void usage_exit() {
         "  syfox decide    --model DIR --state '...' --questions '{...}'\n"
         "  syfox demo      --model DIR --domain tickets|game|guard\n"
         "  syfox stats     --model DIR\n"
+        "  syfox derive    --model DIR\n"
+        "  syfox dream     --model DIR [--steps N] [--seed S]\n"
+        "  syfox promote   --model DIR\n"
+        "  syfox analogs   --model DIR --concept WORD\n"
         "  syfox version\n"
         "selection modes (SI-faithful, off by default, not saved into the model):\n"
         "  --salience-gating   rank settle sources by salience (motion history)\n"
@@ -264,6 +397,9 @@ int main(int argc, char** argv) {
         else if (k == "--questions") need(a.questions);
         else if (k == "--questions-file") { need(a.questions); a.questions_file = true; }
         else if (k == "--domain") need(a.domain);
+        else if (k == "--concept") need(a.concept);
+        else if (k == "--steps") { if (i + 1 >= argc) usage_exit(); a.steps = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--seed")  { if (i + 1 >= argc) usage_exit(); a.seed = std::strtoull(argv[++i], nullptr, 0); }
         else if (k == "--salience-gating") a.salience_gating = true;
         else if (k == "--miller-window") a.miller_window = true;
         else usage_exit();
@@ -274,5 +410,9 @@ int main(int argc, char** argv) {
     if (cmd == "decide") { if (a.state.empty() || a.questions.empty()) usage_exit(); cmd_decide(a); return 0; }
     if (cmd == "demo") { cmd_demo(a); return 0; }
     if (cmd == "stats") { cmd_stats(a); return 0; }
+    if (cmd == "derive") { cmd_derive(a); return 0; }
+    if (cmd == "dream") { cmd_dream(a); return 0; }
+    if (cmd == "promote") { cmd_promote(a); return 0; }
+    if (cmd == "analogs") { if (a.concept.empty()) usage_exit(); cmd_analogs(a); return 0; }
     usage_exit();
 }

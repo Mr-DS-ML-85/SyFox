@@ -303,6 +303,17 @@ public:
         return s;
     }
 
+    float node_energy(NodeId id) const {
+        return id < nodes_.size() ? nodes_[id].energy : 0.0f;
+    }
+
+    // acoustic mass (occurrence count); derivation uses the same 1/sqrt(mass)
+    // damping law the field applies at its use sites, so hub-mediated
+    // composition is suppressed exactly like hub-mediated energy flow
+    float node_mass(NodeId id) const {
+        return id < nodes_.size() ? nodes_[id].mass : 1.0f;
+    }
+
     bool silent() const { return total_energy() < cfg_.silence_floor; }
 
     // -- HONEST SILENCE reset ---------------------------------------------------
@@ -370,6 +381,16 @@ public:
                 f.write(reinterpret_cast<const char*>(&l.first), 4);
                 f.write(reinterpret_cast<const char*>(&l.second), 4);
             }
+        // v2 provenance tail — old (v1) files simply end here; load() detects EOF.
+        std::uint32_t dc = static_cast<std::uint32_t>(derived_gen_.size());
+        f.write(reinterpret_cast<const char*>(&dc), 4);
+        for (const auto& kv : derived_gen_) {
+            std::uint32_t a = static_cast<std::uint32_t>(kv.first >> 32);
+            std::uint32_t b = static_cast<std::uint32_t>(kv.first & 0xffffffffull);
+            f.write(reinterpret_cast<const char*>(&a), 4);
+            f.write(reinterpret_cast<const char*>(&b), 4);
+            f.write(reinterpret_cast<const char*>(&kv.second), 4);
+        }
     }
 
     void load(const std::string& path) {
@@ -393,9 +414,102 @@ public:
             f.read(reinterpret_cast<char*>(&w), 4);
             out_[a].emplace_back(b, w);
         }
+        // v2 provenance tail (optional): v1 files hit EOF here and stay clean.
+        std::uint32_t dc = 0;
+        if (f.read(reinterpret_cast<char*>(&dc), 4)) {
+            for (std::uint32_t i = 0; i < dc; ++i) {
+                std::uint32_t a = 0, b = 0, g = 0;
+                if (!f.read(reinterpret_cast<char*>(&a), 4)) break;
+                if (!f.read(reinterpret_cast<char*>(&b), 4)) break;
+                if (!f.read(reinterpret_cast<char*>(&g), 4)) break;
+                derived_gen_.emplace(lane_key(static_cast<NodeId>(a), static_cast<NodeId>(b)), g);
+            }
+        }
     }
 
     const SubstrateConfig& config() const { return cfg_; }
+
+    // -- LANE PROVENANCE + SURGERY (derivation-layer surface, see derive.hpp) --
+    // Derived lanes are laid by rule composition over existing fabric, not by
+    // direct experience. They carry a generation counter: observed (Hebbian /
+    // human-promoted) lanes are premise-grade (generation 0) and never lose
+    // that grade; each composition step adds one generation. The generation
+    // cap and use-time re-verification live in derive.hpp.
+    void bind_derived(NodeId a, NodeId b, float w, std::uint32_t gen) {
+        if (a == b || w <= 0.0f) return;
+        set_lane_derived(a, b, w, gen);
+        set_lane_derived(b, a, w, gen);
+    }
+
+    // Verifier-side weight set: assign exactly (down too), dissolve at zero.
+    // Only meaningful for derived lanes; observed lanes are never touched by
+    // callers (composition uses bind_derived, which is set-never-weaken).
+    void set_derived_weight(NodeId a, NodeId b, float w) {
+        auto it = out_.find(a);
+        if (it == out_.end()) return;
+        for (auto& l : it->second) {
+            if (l.first == b) {
+                if (w <= 0.0f) { dissolve_lane(a, b); return; }
+                l.second = std::min(4.0f, w);
+                // keep symmetry: the mirror lane tracks the same evidence
+                auto mit = out_.find(b);
+                if (mit != out_.end())
+                    for (auto& ml : mit->second)
+                        if (ml.first == a) { ml.second = l.second; break; }
+                return;
+            }
+        }
+    }
+
+    // Remove a lane (both directions) and its provenance.
+    void dissolve_lane(NodeId a, NodeId b) {
+        auto erase_one = [](std::vector<std::pair<NodeId, float>>& lanes, NodeId t) {
+            for (std::size_t i = 0; i < lanes.size(); ++i)
+                if (lanes[i].first == t) { lanes.erase(lanes.begin() + static_cast<std::ptrdiff_t>(i)); return; }
+        };
+        auto it = out_.find(a);
+        if (it != out_.end()) erase_one(it->second, b);
+        auto mit = out_.find(b);
+        if (mit != out_.end()) erase_one(mit->second, a);
+        derived_gen_.erase(lane_key(a, b));
+        derived_gen_.erase(lane_key(b, a));
+    }
+
+    std::uint32_t generation_of(NodeId a, NodeId b) const {
+        auto it = derived_gen_.find(lane_key(a, b));
+        return it == derived_gen_.end() ? 0u : it->second;
+    }
+
+    float lane_weight(NodeId a, NodeId b) const {
+        auto it = out_.find(a);
+        if (it == out_.end()) return 0.0f;
+        for (const auto& l : it->second) if (l.first == b) return l.second;
+        return 0.0f;
+    }
+
+    const std::string& concept_of(NodeId id) const { return nodes_[id].concept; }
+
+    // Visitor over every lane (a -> b, weight). Directional view of the
+    // symmetric fabric: each direction is visited once, like the save format.
+    template <class F>
+    void for_each_lane(F&& f) const {
+        for (const auto& kv : out_)
+            for (const auto& l : kv.second) f(kv.first, l.first, l.second);
+    }
+
+    void lanes_of(NodeId a, std::vector<std::pair<NodeId, float>>& out_lanes) const {
+        auto it = out_.find(a);
+        if (it == out_.end()) return;
+        out_lanes = it->second;
+    }
+
+    // node-energy injection by id (dreamer probing; no decision fingerprint)
+    void inject_energy(NodeId id, float energy) {
+        if (id >= nodes_.size() || energy <= 0.0f) return;
+        Node& n = nodes_[id];
+        n.energy += energy / std::sqrt(n.mass);
+        n.salience = 1.0f;   // TSDA: spike to ceiling on touch
+    }
 
     // Runtime selection-mode overrides (CLI surface for the SI-faithful modes).
     // Physics constants stay fixed; only the two gating/window modes are
@@ -409,6 +523,32 @@ public:
 private:
     struct Node { std::string concept; float mass; float energy; float salience; };
 
+    static std::uint64_t lane_key(NodeId a, NodeId b) {
+        return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint32_t>(b);
+    }
+
+    // Composition-time lane write: raise-only (never weakens existing fabric),
+    // and provenance is recorded once — a lane already premise-grade (laid by
+    // experience) keeps generation 0; experience dominates derivation.
+    void set_lane_derived(NodeId a, NodeId b, float w, std::uint32_t gen) {
+        auto& lanes = out_[a];
+        for (auto& l : lanes) {
+            if (l.first == b) {
+                if (w > l.second) l.second = std::min(4.0f, w);
+                derived_gen_.emplace(lane_key(a, b), gen);  // keep first (lowest) grade
+                return;
+            }
+        }
+        lanes.emplace_back(b, w);
+        derived_gen_.emplace(lane_key(a, b), gen);
+        if (lanes.size() > cfg_.lane_cap) {              // evict weakest lane
+            auto weakest = std::min_element(lanes.begin(), lanes.end(),
+                [](const auto& x, const auto& y){ return x.second < y.second; });
+            derived_gen_.erase(lane_key(a, weakest->first));
+            lanes.erase(weakest);
+        }
+    }
+
     void enforce_lane_decay() {
         for (auto& kv : out_)
             for (auto& l : kv.second) l.second *= cfg_.lane_decay;
@@ -418,6 +558,8 @@ private:
     std::unordered_map<std::string, NodeId> index_;
     std::vector<Node> nodes_;
     std::unordered_map<NodeId, std::vector<std::pair<NodeId, float>>> out_;
+    // Derivation provenance: lane key -> generation (sparse; observed lanes absent = 0)
+    std::unordered_map<std::uint64_t, std::uint32_t> derived_gen_;
     std::uint64_t state_hash_ = 0;   // decision fingerprint for Miller sampling
     float last_cap_ = 0.0f;          // cap used by the last settle()
 };

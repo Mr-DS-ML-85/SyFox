@@ -173,3 +173,65 @@ to the same readout bit-for-bit (pinned by tests).
 | Honest silence | SI dispatch contract |
 | Typed Choice/Score/Noul API | interface shape inspired by TypeSafe Jev |
 | Temperature/Platt calibration | classical statistics (tool layer) |
+| Derivation layer (§10) | SyFox-native design after studying SI meta_learner / dreamer / analogy as mechanism reference — no code copied; weight algebra on lanes instead of typed relation rules |
+
+## 10. Derivation layer (offline, explicit)
+
+SyFox's lanes so far carried only lived experience (`learn`). The derivation
+layer lets the field grow knowledge **derived from** its own fabric — the
+substrate-level kernel of what the upstream SI stack does with explicit rule
+machinery (meta-learner macro-rules, dreamer emergent resonances, analogical
+mapping). The primitives differ by constitution: SI composes typed relation
+triples over a fact graph; SyFox composes **weighted lane paths** — weight
+algebra and field dynamics, no classifiers. All engines are OFFLINE, explicit
+CLI steps; `decide()` stays read-only and byte-identical unless the operator
+derives on a model. Provenance: derived lanes carry a **generation counter**
+(experienced / human-promoted = 0, each composition step +1, cap 3), persisted
+as a versioned tail in `substrate.bin`; v1 files load clean (generation 0).
+
+**1. Lane induction, compose mode** (`syfox derive --model DIR`): a two-hop
+path A→B→C is evidence for A↔C, with three guards that each came out of a
+real benchmark failure:
+* *acoustic-mass damping* — path evidence is damped by `1/√mass(B)`, the same
+  law `settle()` applies to energy through B; without it, hub tokens ("the",
+  "command") fabricated corroboration between unrelated concepts and two demo
+  argmaxes flipped;
+* *top-K corroboration* (K=3) — a dense fabric offers hundreds of two-hop
+  paths; treating them as independent evidence saturated the field (noul
+  collapsed to 0.999 everywhere);
+* *ghost-guarded verifier* — every derived lane is re-checked against the
+  LIVE fabric (snapshot ghosts of already-dissolved lanes cannot justify
+  anything), over-claims are healed down to their justification, unsupported
+  ones dissolve. Composition is raise-only: observed lanes are never weakened.
+
+**2. Lane induction, harvest mode** (`syfox derive --model DIR --examples
+FILE.jsonl`): static algebra guesses; the settled field knows. Replay states
+through inject→settle and record which concept pairs genuinely **co-activate**.
+Dissipation does the filtering — cross-scenario energy decays before it
+registers. Observed lanes are untouchable; gen-1 lanes must be re-nominated by
+every run or they dissolve (justification is recomputable, hence deterministic).
+Labels are not needed: the field learns structure from unlabelled exposure.
+
+**3. Dreamer** (`syfox dream --model DIR [--steps N] [--seed S]`): inject
+small random energy patterns, settle, and watch for undriven nodes that lit
+up **without any direct lane to the driven set** — reached only through the
+topology's own interference. Candidates go to `model-*/mutations.jsonl`. The
+substrate is never modified by dreaming; a human sets `validated:true` on a
+line and `syfox promote` applies it as a premise-grade lane. Same seed → same
+dream, bit for bit.
+
+**4. Analogy** (`syfox analogs --model DIR --concept WORD`, read-only): a
+concept's signature is its lane neighbourhood (who it touches, both
+directions); structural isomorphism = signature Jaccard; novelty potential
+follows the L9 formulation `Phi = I·exp(k·d)`. High Phi = structurally aligned
+AND fabric-distant: a transfer *hypothesis* for the human, never auto-applied.
+
+*Benchmark (v0.2, honest).* compose on model-tickets: all 3 demo argmaxes held
+and sharpened (technical conf 0.251→0.454, sales 0.579→0.812); on model-game
+1 argmax flipped; on model-guard confidences collapsed and 1 flipped. harvest
+on model-tickets: billing 0.604→0.912 (conf 0.679) but one close-call demo
+flipped. Verdict: both modes are real and pinned by tests, but on 22-row seed
+fabrics the scenario vocabularies overlap too much for derivation to be safe
+as a default — recommend ≥100 rows per domain or well-separated vocabularies,
+and gate adoption on the v0.2 eval harness. The seed models ship un-derived;
+`make models` is unchanged.

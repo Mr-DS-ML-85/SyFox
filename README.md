@@ -140,6 +140,43 @@ salience + literal `[5,9]` 10/10 argmax but probabilities saturate at 1.0
 `[20,24]` 9/10. Modes are runtime-only: `substrate.bin` is mode-neutral, so
 the same saved model replays under any mode on any machine.
 
+## The derivation layer — knowledge the field grows itself
+
+The substrate derives answers through lane diffusion (see Known limits). The
+derivation layer goes further: it lets the operator grow **new lanes** from
+the field's own fabric — the kernel of what the upstream SI stack does with
+explicit rule machinery, rebuilt here as physics (weight algebra + settle
+dynamics; no classifiers). Four offline, explicit commands; `decide` stays
+read-only:
+
+```bash
+./build/syfox derive  --model model-mine                        # compose two-hop evidence
+./build/syfox derive  --model model-mine --examples data.jsonl  # harvest co-activation
+./build/syfox dream   --model model-mine --steps 200            # emergent-resonance candidates
+./build/syfox promote --model model-mine                        # apply human-validated lines only
+./build/syfox analogs --model model-mine --concept refund       # structural analogs (read-only)
+```
+
+* **derive (compose)** — a two-hop path A→B→C is evidence for A↔C, damped by
+  the same `1/√mass` law the field applies to energy, corroborated by at most
+  the top-3 paths, and re-verified against the live fabric on every run.
+* **derive (harvest)** — replay states and record what genuinely
+  **co-activates** during settle; dissipation filters cross-context noise for
+  free. Works on unlabelled text.
+* **dream + promote** — the field is probed with random energy; undriven
+  concepts that light up *without any direct lane* to the probe become
+  candidate facts in a ledger. **A human must validate each line** before
+  `promote` may lay it. Dreaming never modifies the substrate.
+* **analogs** — concepts with the same structural role, ranked by novelty
+  potential `Phi = I·exp(k·d)`; a transfer hypothesis, never auto-applied.
+
+Every derived lane carries a generation counter (experience = 0), persisted
+in `substrate.bin`; observed lanes can never be weakened by derivation.
+Honest verdict on the 22-row seed models: derive sharpens well-separated
+routing domains (billing 0.604→0.912 after harvest) but flips close-call
+scenarios — **do not derive models trained on <100 rows** until the v0.2 eval
+harness says otherwise. Details and benchmark: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §10.
+
 ## Train your own domain
 
 Training = teaching the substrate with labelled lessons (JSONL):

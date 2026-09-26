@@ -8,13 +8,13 @@ all: build/syfox build/syfox-test build/libsyfox_core.so
 build:
 	mkdir -p build
 
-build/syfox: src/syfox_cli.cpp core/syfox.hpp core/si_substrate.hpp core/json.hpp | build
+build/syfox: src/syfox_cli.cpp core/syfox.hpp core/si_substrate.hpp core/derive.hpp core/json.hpp | build
 	$(CXX) $(CXXFLAGS) -I. $< -o $@
 
-build/syfox-test: src/syfox_test.cpp core/syfox.hpp core/si_substrate.hpp core/json.hpp | build
+build/syfox-test: src/syfox_test.cpp core/syfox.hpp core/si_substrate.hpp core/derive.hpp core/json.hpp | build
 	$(CXX) $(CXXFLAGS) -I. $< -o $@
 
-build/libsyfox_core.so: src/syfox_core.cpp core/syfox.hpp core/si_substrate.hpp core/json.hpp | build
+build/libsyfox_core.so: src/syfox_core.cpp core/syfox.hpp core/si_substrate.hpp core/derive.hpp core/json.hpp | build
 	$(CXX) $(CXXFLAGS) -fPIC -shared -I. $< -o $@
 
 # Deterministic: every model is rebuilt from its seed data, not grown in place.
@@ -31,7 +31,7 @@ test: build/syfox-test
 	./build/syfox-test
 
 demo: models
-	@echo "=========== TICKETS ==========="
+	@echo "=========== TICKETS ==========="  
 	./build/syfox demo --domain tickets --model model-tickets
 	@echo "============ GAME ============="
 	./build/syfox demo --domain game --model model-game

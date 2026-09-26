@@ -21,16 +21,19 @@
       Final adoption verdict waits on the eval harness below.
 - [ ] Two-stage choice for >255 options (energy shortlist → resonance rescore)
 - [ ] Relational Noul via dual-injection interference readout (command ∩ task overlap)
-- [ ] Eval harness: `syfox eval --model --examples` with accuracy + reliability diagrams
 - [ ] CI regression files (record decisions, diff on retrain) — a libre `jevassert` analog
 - [ ] More seed data per domain; tone readout re-evaluated with ~100 rows
 
 ## v0.3 — Structure
-- [ ] Derivation layer port from the SI stack: meta-learner macro-rules
-      (composed derived relations), dreamer emergent resonances (undriven
-      constructive-interference candidates, human-validated before
-      promotion), analogical mapping — today the field derives only through
-      lane diffusion (see ARCHITECTURE.md §4)
+- [x] Derivation layer port (shipped early, v0.2): lane induction in two
+      modes (compose: damped two-hop algebra + ghost-guarded verifier;
+      harvest: settle co-activation replay), dreamer emergent-resonance
+      ledger with human-validated promote, read-only analogical mapping.
+      Lane provenance (generation counter) persisted in substrate.bin v2.
+      Benchmarked: sharpens well-separated fabrics, unsafe on 22-row seeds —
+      adoption gated on the eval harness below (ARCHITECTURE.md §10)
+- [ ] Eval harness: `syfox eval --model --examples` with accuracy + reliability
+      diagrams — this gates derive/harvest adoption and the salience flags
 - [ ] Lane graph introspection CLI (`syfox inspect --concept refund`) — audit what the engine knows
 - [ ] Multi-label choice (several true options)
 - [ ] Streaming batches: many states against one model in a single process

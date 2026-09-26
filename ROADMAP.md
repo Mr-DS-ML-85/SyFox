@@ -13,9 +13,12 @@
 
 ## v0.2 — Depth and robustness
 - [ ] Character n-gram concept lanes: typo robustness without touching the core physics
-- [ ] Physics experiment: Miller-window source cap (sample [5,9] per
-      decision, as the SI substrate does) vs the fixed 24 — adopt only if it
-      wins on a held-out eval set
+- [x] Physics port (post-audit): SI cavity salience integrator
+      tanh(s·decay + gain·|ΔE|) runs every pass; `salience_gating` and
+      `miller_window` ([cap−4, cap], TSDA live_cap) ship behind config flags.
+      Bench on 10 in-domain decisions: default 10/10 (stays default),
+      salience+[5,9] 10/10 but saturated confidence, salience-only 4/10.
+      Final adoption verdict waits on the eval harness below.
 - [ ] Two-stage choice for >255 options (energy shortlist → resonance rescore)
 - [ ] Relational Noul via dual-injection interference readout (command ∩ task overlap)
 - [ ] Eval harness: `syfox eval --model --examples` with accuracy + reliability diagrams

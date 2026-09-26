@@ -61,13 +61,35 @@ words settles zero energy and defers).
 `settle()` runs up to `k_settle` (default 8) dissipative diffusion passes:
 
 1. Sources are gated by **source cap** (`source_cap`, 24 by default): the
-   top-K nodes **by energy** propagate this pass — selection is by energy
-   only; no separate salience score exists. *Lineage:* SI working-set
-   capping; the SI substrate samples its cap from a Miller window [5,9],
-   SyFox pins a fixed 24. Gated nodes keep their energy (they remain
-   readout-visible); the cap gates flow, it does not annihilate. (An earlier
-   version pruned energy outright and destroyed 97% of the field — the
-   gating form is the correct physics and the tests pin it.)
+   top-K nodes propagate each pass — ranked **by energy** by default, or by
+   **salience** when `salience_gating` is on. Gated nodes keep their energy
+   (they remain readout-visible); the cap gates flow, it does not
+   annihilate. (An earlier version pruned energy outright and destroyed 97%
+   of the field — the gating form is the correct physics and the tests pin
+   it.)
+
+   **SI salience lineage, restored after audit.** The SI substrate runs a
+   cavity salience integrator, `s = tanh(s·decay + gain·|velocity|)`
+   (`physics.hpp`, `salience_gain = 0.05`, `salience_decay = 0.995`), and
+   its TSDA layer samples the live working cap from
+   `[working_cap−4, working_cap]` = [5,9] (Miller 7 ± 2). SyFox ports both:
+   the integrator runs **every pass** on the motion proxy `|ΔE|` (a node at
+   rest is an exact fixed point, mirroring SI's sparsity guard), and
+   `miller_window = true` samples the live cap from
+   `[source_cap−4, source_cap]` each decision. One deliberate adaptation:
+   SI draws the sample from a seeded mt19937 stream; SyFox derives it from
+   the decision's state hash, so the same state always settles to the same
+   field bit-for-bit (the persistence contract outranks stochasticity).
+   `inject()` spikes salience to 1.0 on touch (TSDA spike semantics).
+
+   *Benchmark (10 in-domain decisions, 3 domains).* default energy gating
+   10/10 with calibrated-shaped confidences; salience ranking at the wide
+   cap 4/10 (motion history is a poor selector when the cap rarely trims);
+   salience + literal [5,9] window 10/10 argmax but probabilities saturate
+   at 1.0 (calibration collapse — needs the v0.2 eval harness before
+   adoption); Miller window at wide cap 9/10. Verdict: default stays
+   energy-gated at a fixed 24; the SI-faithful modes ship behind config
+   flags until a held-out eval says otherwise.
 2. Each source retains `(1 − diffusion)` of its decayed energy and flows
    `diffusion` out along its lanes, split proportionally to lane weight:
    `next[b] += e·decay·diffusion·(w_ab / Σw_a)`.
@@ -133,7 +155,8 @@ to the same readout bit-for-bit (pinned by tests).
 | Mechanism | Origin |
 |---|---|
 | Energy injection + field settle | SI `physics.hpp` substrate dynamics |
-| Source capping (top-K by energy) | SI working-set cap (SI samples a Miller window [5,9]; SyFox fixes 24) |
+| Source capping (top-K, energy or salience) | SI working-set cap + TSDA live_cap ([cap−4, cap], Miller 7 ± 2) |
+| Salience integrator tanh(s·decay + gain·motion) | SI `physics.hpp` cavity salience (verified live there) |
 | Hebbian lane bindings + decay | SI lane learning |
 | Honest silence | SI dispatch contract |
 | Typed Choice/Score/Noul API | interface shape inspired by TypeSafe Jev |

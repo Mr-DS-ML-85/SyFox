@@ -82,6 +82,61 @@ static void test_field_physics() {
           "restored substrate settles identically");
 }
 
+static void test_salience_mechanics() {
+    std::cout << "[si salience + miller window]\n";
+    // (a) integrator (SI physics.hpp lineage): touched/moving nodes gain
+    //     salience; a node at rest is an EXACT fixed point (tanh(0)=0),
+    //     mirroring SI's sparsity guard.
+    si::Substrate s;
+    for (const auto& w : std::vector<std::string>{"a", "b", "far"}) s.intern(w);
+    s.bind(s.find("a"), s.find("b"), 1.0f);
+    s.inject({"a"});
+    s.settle();
+    CHECK(s.node_salience("a") > 0.0f, "moving node carries salience");
+    CHECK(s.node_salience("far") == 0.0f, "node at rest is an exact fixed point");
+
+    // (b) salience-gated settle stays dissipative and still propagates
+    si::SubstrateConfig g;
+    g.salience_gating = true;
+    si::Substrate s2(g);
+    s2.intern("x"); s2.intern("y");
+    s2.bind(s2.find("x"), s2.find("y"), 1.0f);
+    s2.inject({"x"});
+    float before = s2.total_energy();
+    s2.settle();
+    CHECK(s2.total_energy() <= before + 1e-4f, "salience-gated settle is dissipative");
+    CHECK(s2.readout({"y"}) > 0.0f, "salience-gated field propagates along lanes");
+
+    // (c) miller window (TSDA live_cap lineage): cap inside [cap-4, cap],
+    //     and the SAME state always yields the SAME cap and field.
+    si::SubstrateConfig m;
+    m.miller_window = true;
+    m.source_cap = 9.0f;                       // window becomes [5,9], as in TSDA
+    si::Substrate s3(m);
+    std::vector<std::string> toks;
+    for (int i = 0; i < 30; ++i) {
+        std::string t = "t" + std::to_string(i);
+        s3.intern(t);
+        if (i > 0) s3.bind(s3.find("t" + std::to_string(i - 1)), s3.find(t), 0.3f);
+        toks.push_back(t);
+    }
+    s3.inject(toks);
+    s3.settle();
+    float cap_used = s3.last_source_cap();
+    CHECK(cap_used >= 5.0f && cap_used <= 9.0f, "sampled cap inside Miller window [5,9]");
+    float e1 = s3.total_energy();
+    s3.reset_field();
+    s3.inject(toks);
+    s3.settle();
+    CHECK(s3.last_source_cap() == cap_used && s3.total_energy() == e1,
+          "same state -> same cap -> same field (deterministic)");
+
+    // (d) default config: cap stays pinned at source_cap
+    si::Substrate s4;
+    s4.settle();
+    CHECK(s4.last_source_cap() == 24.0f, "default cap pinned at 24");
+}
+
 static syfox::Engine train_choice_engine() {
     syfox::Engine eng;
     const char* ex =
@@ -154,6 +209,7 @@ int main() {
     test_json();
     test_folding();
     test_field_physics();
+    test_salience_mechanics();
     test_hebbian_choice();
     test_noul_valence();
     test_calibration_tool();

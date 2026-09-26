@@ -11,10 +11,17 @@
 //                     "heavier" and carry less per-token energy).
 //    2. SETTLE      — energy diffuses along Hebbian lanes with decay,
 //                     iterated K_settle passes; an energy-gated source cap
-//                     keeps the working set bounded (SI-inspired — the SI
-//                     substrate samples a Miller window [5,9], SyFox pins a
-//                     fixed cap); the field stops when the total energy delta
-//                     drops below eps (phase stability).
+//                     keeps the working set bounded. The SI salience
+//                     integrator (physics.hpp cavity lineage:
+//                     s = tanh(s·decay + gain·|motion|)) runs every pass and
+//                     is observable on every node. Two flags enable the
+//                     faithful SI selection modes: salience_gating ranks
+//                     sources by salience instead of raw energy; miller_window
+//                     samples the live cap from [source_cap-4, source_cap]
+//                     per decision (TSDA "7 ± 2"; SI draws it from a seeded
+//                     mt19937, SyFox derives it from the state hash so the
+//                     same state still settles bit-for-bit). The field stops
+//                     when the total energy delta drops below eps.
 //    3. READOUT     — a resonance sweep reads the settled field at probe
 //                     nodes (options / anchors / statements). Readout is a
 //                     measurement of the field, not a classifier.
@@ -48,7 +55,13 @@ struct SubstrateConfig {
     int   k_settle       = 8;      // max settle passes
     float eps            = 1e-4f;  // phase-stability threshold (early stop)
     float source_cap     = 24.0f;  // max propagation sources per pass, top-K BY ENERGY
-                                   // (SI-inspired bounded working set; SI samples [5,9], SyFox fixes 24)
+                                   // (SI-inspired bounded working set; fixed by default)
+    // -- SI salience lineage (physics.hpp cavity integrator + TSDA SalienceMap) --
+    float salience_gain   = 0.05f;  // SI physics.hpp salience_gain
+    float salience_decay  = 0.995f; // SI physics.hpp salience_decay
+    bool  salience_gating = false;  // true: rank sources by salience (motion history), not energy
+    bool  miller_window   = false;  // true: live cap sampled from [source_cap-4, source_cap]
+                                    // per decision (TSDA live_cap; deterministic per state)
     float silence_floor  = 0.05f;  // below this total energy => honest silence
     float inject_energy  = 1.0f;   // energy per fresh token
     float learn_eta      = 0.10f;  // Hebbian learning rate
@@ -80,7 +93,7 @@ public:
         // The sub-linear behavior lives at the USE sites: injection deposits
         // energy/sqrt(mass) and Hebbian bind strength scales by 1/sqrt(mass),
         // so heavy concepts move less.
-        nodes_.push_back(Node{concept, 1.0f, 0.0f});
+        nodes_.push_back(Node{concept, 1.0f, 0.0f, 0.0f});
         return id;
     }
 
@@ -142,21 +155,52 @@ public:
             Node& n = nodes_[id];
             float mass_damp = 1.0f / std::sqrt(n.mass);   // heavy => less per-token
             n.energy += energy * mass_damp;
+            n.salience = 1.0f;   // TSDA: spike to ceiling on touch
+            state_hash_ = state_hash_ * 1099511628211ull
+                        + static_cast<std::uint64_t>(fnv1a_hash(t));  // decision fingerprint
         }
     }
+
+    // salience of a concept (SI integrator state; diagnostic + test surface)
+    float node_salience(const std::string& c) const {
+        auto it = index_.find(c);
+        return it == index_.end() ? 0.0f : nodes_[it->second].salience;
+    }
+
+    // the source cap actually used by the last settle() (sampled value when
+    // miller_window is on; otherwise always config().source_cap)
+    float last_source_cap() const { return last_cap_; }
 
     // -- SETTLE ---------------------------------------------------------------
     // One pass = dissipative diffusion along lanes + source gating.
     // Energy is CONSERVED per pass up to decay: each node retains
     // (1 - diffusion) of its (decayed) energy and flows `diffusion` out along
     // its lanes, split proportionally to lane weight. The source cap GATES
-    // propagation (only the `source_cap` highest-ENERGY nodes send energy
-    // this pass — selection is by energy, nothing else);
-    // gated nodes keep their energy (readout-visible) but stay silent as
-    // sources — bounded working set, nothing is annihilated.
+    // propagation: only the top-`cap` active nodes send energy each pass —
+    // ranked by energy by default, or by salience (motion history) when
+    // salience_gating is on. Gated nodes keep their energy (readout-visible)
+    // but stay silent as sources — bounded working set, nothing is
+    // annihilated. Salience itself integrates every pass exactly as the SI
+    // cavity physics does: s = tanh(s·decay + gain·|ΔE|); a node at rest is
+    // an exact fixed point (tanh(0) = 0), mirroring SI's sparsity guard.
     void settle() {
         std::vector<float> next(nodes_.size(), 0.0f);
         std::vector<std::size_t> active;
+
+        // Live source cap (TSDA live_cap lineage): when miller_window is on,
+        // the working set is drawn from [source_cap-4, source_cap] each
+        // decision instead of being pinned — narrow focus some decisions,
+        // broad others. SI samples a seeded mt19937 per tick; SyFox derives
+        // the draw from the decision's state hash, so reproducibility holds:
+        // same state -> same cap -> same field, bit for bit.
+        float cap = cfg_.source_cap;
+        if (cfg_.miller_window) {
+            std::uint32_t hi = static_cast<std::uint32_t>(std::max(1.0f, cfg_.source_cap));
+            std::uint32_t lo = (hi >= 5) ? hi - 4 : 1;
+            cap = static_cast<float>(lo + (state_hash_ % (hi - lo + 1)));
+        }
+        last_cap_ = cap;
+        const std::size_t cap_n = static_cast<std::size_t>(cap);
         for (int pass = 0; pass < cfg_.k_settle; ++pass) {
             float total_before = 0.0f;
             for (const auto& n : nodes_) total_before += n.energy;
@@ -167,13 +211,16 @@ public:
             for (std::size_t i = 0; i < nodes_.size(); ++i)
                 if (nodes_[i].energy > 1e-7f) active.push_back(i);
 
-            // source gating: at most `source_cap` (top-K by energy) per pass
-            if (static_cast<float>(active.size()) > cfg_.source_cap) {
+            // source gating: at most `cap` sources per pass (ties break by
+            // vocabulary order — deterministic)
+            if (active.size() > cap_n) {
                 std::nth_element(active.begin(),
-                                 active.begin() + static_cast<std::ptrdiff_t>(cfg_.source_cap),
+                                 active.begin() + static_cast<std::ptrdiff_t>(cap_n),
                                  active.end(), [&](std::size_t a, std::size_t b){
-                                     return nodes_[a].energy > nodes_[b].energy; });
-                active.resize(static_cast<std::size_t>(cfg_.source_cap));
+                                     return cfg_.salience_gating
+                                         ? nodes_[a].salience > nodes_[b].salience
+                                         : nodes_[a].energy   > nodes_[b].energy; });
+                active.resize(cap_n);
             }
             std::vector<char> is_source(nodes_.size(), 0);
             for (std::size_t i : active) is_source[i] = 1;
@@ -193,6 +240,16 @@ public:
                     for (const auto& lane : it->second)
                         next[lane.first] += flow * (lane.second / out_w);
                 }
+            }
+            // SI cavity salience integrator: s = tanh(s·decay + gain·|ΔE|).
+            // Motion proxy is how much energy moved through the node this
+            // pass. Updated before the energies are committed, so the next
+            // pass's source ranking sees it.
+            for (std::size_t i = 0; i < nodes_.size(); ++i) {
+                if (nodes_[i].energy <= 0.0f && next[i] <= 0.0f) continue;
+                float motion = std::fabs(next[i] - nodes_[i].energy);
+                nodes_[i].salience = std::tanh(nodes_[i].salience * cfg_.salience_decay
+                                             + cfg_.salience_gain * motion);
             }
             for (std::size_t i = 0; i < nodes_.size(); ++i) nodes_[i].energy = next[i];
 
@@ -250,7 +307,8 @@ public:
 
     // -- HONEST SILENCE reset ---------------------------------------------------
     void reset_field() {
-        for (auto& n : nodes_) n.energy = 0.0f;
+        for (auto& n : nodes_) { n.energy = 0.0f; n.salience = 0.0f; }
+        state_hash_ = 0;
     }
 
     // -- ANTI-HEBBIAN WEAKENING --------------------------------------------------
@@ -325,7 +383,7 @@ public:
             std::string c(len, '\0'); f.read(c.data(), len);
             float mass = 0; f.read(reinterpret_cast<char*>(&mass), 4);
             index_.emplace(c, static_cast<NodeId>(nodes_.size()));
-            nodes_.push_back(Node{c, mass, 0.0f});
+            nodes_.push_back(Node{c, mass, 0.0f, 0.0f});
         }
         std::uint32_t lanes = 0; f.read(reinterpret_cast<char*>(&lanes), 4);
         for (std::uint32_t i = 0; i < lanes; ++i) {
@@ -340,7 +398,7 @@ public:
     const SubstrateConfig& config() const { return cfg_; }
 
 private:
-    struct Node { std::string concept; float mass; float energy; };
+    struct Node { std::string concept; float mass; float energy; float salience; };
 
     void enforce_lane_decay() {
         for (auto& kv : out_)
@@ -351,6 +409,8 @@ private:
     std::unordered_map<std::string, NodeId> index_;
     std::vector<Node> nodes_;
     std::unordered_map<NodeId, std::vector<std::pair<NodeId, float>>> out_;
+    std::uint64_t state_hash_ = 0;   // decision fingerprint for Miller sampling
+    float last_cap_ = 0.0f;          // cap used by the last settle()
 };
 
 // ---------------------------------------------------------------------------

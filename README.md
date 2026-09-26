@@ -17,6 +17,8 @@ state tokens ──inject──> ConceptField (nodes with acoustic mass)
                 │
                 ├── settle: dissipative diffusion along Hebbian lanes,
                 │           energy-gated source cap (bounded working set), K_settle
+                │           + SI salience integrator (tanh decay/gain·motion;
+                │           optional salience ranking + Miller [cap-4,cap] window)
                 │
                 ├── per-question READOUT on the same settled field:
                 │     Choice → specific resonance  → typed option + probabilities

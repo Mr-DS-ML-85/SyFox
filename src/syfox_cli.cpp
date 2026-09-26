@@ -209,7 +209,9 @@ void cmd_stats(const Args& a) {
         {"calibrated", sfx::JV(eng.calibration().fitted)},
         {"choice_temperature", eng.calibration().choice_temperature},
         {"noul_a", eng.calibration().noul_a},
-        {"noul_b", eng.calibration().noul_b}}).dump() << "\n";
+        {"noul_b", eng.calibration().noul_b},
+        {"salience_gating", sfx::JV(eng.substrate().config().salience_gating)},
+        {"miller_window", sfx::JV(eng.substrate().config().miller_window)}}).dump() << "\n";
 }
 
 void usage_exit() {

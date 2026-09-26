@@ -1,0 +1,23 @@
+{
+  "state": "Hi, I've been trying to connect my stripe account for 3 days and it keeps failing. I'm losing sales. Please help ASAP.",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which team should handle this",
+      "criteria": {
+        "billing": "payment or subscription issues",
+        "technical": "bugs or integration problems",
+        "sales": "pricing or account questions"
+      }
+    },
+    "frustration": {
+      "type": "score",
+      "instructions": "How frustrated the customer appears",
+      "criteria": ["calm just stating facts", "frustrated but civil", "very angry strong language"]
+    },
+    "is_urgent": {
+      "type": "noul",
+      "instructions": "the message conveys urgency or time sensitivity"
+    }
+  }
+}

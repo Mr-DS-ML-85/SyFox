@@ -1,0 +1,14 @@
+{
+  "state": "Night. Zombies are spawning near the player. Health is dropping fast.",
+  "questions": {
+    "action": {
+      "type": "choice",
+      "instructions": "What should the bot do next",
+      "criteria": {
+        "flee": "run away escape avoid danger retreat safe",
+        "fight": "attack combat weapon sword strike",
+        "dig_in": "hide wait build shelter fortify safe"
+      }
+    }
+  }
+}

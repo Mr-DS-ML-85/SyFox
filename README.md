@@ -172,10 +172,91 @@ read-only:
 
 Every derived lane carries a generation counter (experience = 0), persisted
 in `substrate.bin`; observed lanes can never be weakened by derivation.
-Honest verdict on the 22-row seed models: derive sharpens well-separated
-routing domains (billing 0.604→0.912 after harvest) but flips close-call
-scenarios — **do not derive models trained on <100 rows** until the v0.2 eval
-harness says otherwise. Details and benchmark: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §10.
+
+## The no-regression gate — derivation that cannot lie
+
+v0.1's honest verdict was: derive sharpens separated domains but flips
+close-call scenarios on small fabrics, so models shipped un-derived. v0.2
+turns that verdict into a **mechanism**: `syfox derive --gate FILE.jsonl` is
+transactional.
+
+```bash
+./build/syfox derive --model model-mine --gate data.jsonl                      # compose, gated
+./build/syfox derive --model model-mine --examples data.jsonl --gate data.jsonl # harvest, gated
+```
+
+The gate replays every labelled row plus generated close-call probes
+(cross-domain state mixtures) before and after the derivation, snapshots the
+fabric bit-exactly (per-node lane order included — settle() sums in lane
+order), and applies two rules refined by a full strength-scan experiment:
+
+1. **taught rows never flip** — a derive that breaks a lesson is destroying
+   knowledge; any argmax flip on labelled rows reverts the fabric to the
+   snapshot and the model on disk is untouched;
+2. **no manufactured certainty** — close-call probes are ambiguous by
+   construction, so their argmax may re-resolve, but if the mean confidence
+   on them RISES the fabric is feigning sureness about coin flips → revert.
+
+Per-model verdict on the seed models (conservative strength): **model-game
+ships derived** (668 lanes, 0 taught flips, ambiguous-state confidence
+0.975→0.886 — more honest about close calls, demo argmaxes 3/3 unchanged);
+**model-tickets and model-guard revert at every strength** — their fabrics
+mix labels across contexts (refund is 3×billing + 1×sales in the seed data),
+and the gate now proves that automatically instead of shipping a risk.
+Ungated `derive` still works and prints a warning; the gate is the safe path.
+
+## The Jev-parity benchmark
+
+`syfox bench` measures the axes the System One model class is judged on —
+same evaluation type as TypeSafe's published Jev numbers and the community
+classification benchmarks (accuracy, latency, calibration, confidence,
+honesty, guardrail precision):
+
+| axis | Jev published reference | `syfox bench` measures |
+|---|---|---|
+| decision accuracy | 67.8% on a 4-workflow suite (≈ GPT-5.6 Terra 67.9%) | choice/score argmax on eval rows |
+| latency | 70–500 ms one-pass | p50/p95 µs per decision |
+| calibration | "calibrated Bayesian confidence" | ECE (10 bins) + conf-when-correct vs conf-when-wrong |
+| honesty | "never hallucinates" (schema-bound) | OOD defer rate (untaught vocabulary must defer) |
+| guardrails | pi-warden 88% hold precision | noul hold precision/recall + confusion |
+| determinism | non-autoregressive one-pass | full replay, byte-identical decision signatures |
+
+Seed-model results (in-domain resubstitution — the honest label is in every
+report; `make bench` reproduces):
+
+| model | acc | ECE | conf ok/wrong | OOD defer | hold prec. | p50 latency | deterministic |
+|---|---|---|---|---|---|---|---|
+| tickets | 1.000 | 0.405 | 0.354 / 0.000 | 1.00 | 1.000 (2/2) | 62 µs | yes |
+| game (derived) | 1.000 | 0.001 | 0.999 / — | 1.00 | — | 36 µs | yes |
+| guard | 0.846 | 0.243 | 0.795 / 0.451 | 1.00 | 0.750 (3/4) | 33 µs | yes |
+
+The honest reading: on toy seed data SyFox's accuracy is resubstitution, not
+generalization — the numbers that matter structurally are the honesty axis
+(1.00 defer on nonsense everywhere), the calibration gap (wrong answers come
+with near-zero confidence on tickets/guard), and latency (three orders of
+magnitude under the Jev reference band, same one-pass shape). `jev_reference`
+in each report carries the published figures for side-by-side reading; no
+parity is claimed beyond sharing the axes.
+
+## Recall — associative memory in energy space
+
+`syfox recall` retrieves stored experiences the way the physics allows: settle
+the query into an energy fingerprint, settle each stored memory, rank by
+cosine of the two settled fields. Hopfield-style content-addressable memory,
+but similarity lives in the substrate's own state space — **no token
+comparison, no n-grams, no embedding table, no transformer**.
+
+```bash
+./build/syfox recall --model model-game --state "zombies at night, health dropping" \
+                     --memories data/game_train.jsonl --topk 5
+```
+
+On the derived game model: the zombie query recalls the flee lessons at
+resonance 0.9696–0.9421, fight lessons clearly below at 0.856; untaught
+vocabulary resonates with nothing (empty hits — the same honest silence as
+decide). Read-only and bit-deterministic.
+
+Details and mechanism specs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §10–13.
 
 ## Train your own domain
 

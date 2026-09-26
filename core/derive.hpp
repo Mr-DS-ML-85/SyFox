@@ -74,6 +74,17 @@ struct DeriveConfig {
                                             // argmax flips + noul collapse). Top-K
                                             // keeps derived lanes in evidence range.
     int           max_derived_per_node = 32; // creation budget per source per pass
+
+    // Gate-safe preset (see HarvestConfig::conservative for the rationale):
+    // weaker composed evidence, fewer candidates per node, stricter
+    // corroboration. Pair with the no-regression gate in gate.hpp.
+    static DeriveConfig conservative() {
+        DeriveConfig c;
+        c.compose_gain         = 0.25f;
+        c.max_derived_per_node = 4;
+        c.max_paths            = 2;
+        return c;
+    }
 };
 
 struct DeriveStats {
@@ -231,6 +242,21 @@ struct HarvestConfig {
     float gain            = 0.50f;  // derived evidence is weaker than lived evidence
     int   max_per_node    = 16;     // laying budget per node
     int   max_total       = 4096;   // global laying budget per harvest run
+
+    // Gate-safe preset: small fabrics co-activate across contexts structurally,
+    // so the default thresholds nominate hundreds of bridges and the field's
+    // close calls flip. The conservative preset raises the evidence bar (only
+    // strong co-activations count), dampens the write strength, and shrinks
+    // the budgets. Pair it with the no-regression gate: if even this strength
+    // flips a replayed decision, the gate reverts and the model ships as-is.
+    static HarvestConfig conservative() {
+        HarvestConfig c;
+        c.co_floor     = 0.15f;
+        c.gain         = 0.35f;
+        c.max_per_node = 8;
+        c.max_total    = 512;
+        return c;
+    }
 };
 
 struct HarvestStats { long created = 0, refreshed = 0, dissolved = 0; };

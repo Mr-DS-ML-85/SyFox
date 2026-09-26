@@ -28,7 +28,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "0.1.0";
+inline const char* VERSION = "0.2.0";
 
 // ---------------------------------------------------------------------------
 struct Answer {

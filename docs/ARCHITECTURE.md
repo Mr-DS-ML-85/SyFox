@@ -174,6 +174,9 @@ to the same readout bit-for-bit (pinned by tests).
 | Typed Choice/Score/Noul API | interface shape inspired by TypeSafe Jev |
 | Temperature/Platt calibration | classical statistics (tool layer) |
 | Derivation layer (§10) | SyFox-native design after studying SI meta_learner / dreamer / analogy as mechanism reference — no code copied; weight algebra on lanes instead of typed relation rules |
+| No-regression gate (§11) | SyFox-native: transactional derive + bit-exact fabric snapshot/restore; policy refined by a full strength-scan (taught-row integrity + no manufactured certainty) |
+| Jev-parity bench (§12) | SyFox-native: axis lineage from TypeSafe's published Jev material + community classification benchmarks; all numbers produced by this repo's binary |
+| Recall (§13) | Hopfield-style associative memory reinterpreted as settled-field cosine — SI-physics-native, zero symbol-space similarity |
 
 ## 10. Derivation layer (offline, explicit)
 
@@ -230,8 +233,89 @@ AND fabric-distant: a transfer *hypothesis* for the human, never auto-applied.
 and sharpened (technical conf 0.251→0.454, sales 0.579→0.812); on model-game
 1 argmax flipped; on model-guard confidences collapsed and 1 flipped. harvest
 on model-tickets: billing 0.604→0.912 (conf 0.679) but one close-call demo
-flipped. Verdict: both modes are real and pinned by tests, but on 22-row seed
-fabrics the scenario vocabularies overlap too much for derivation to be safe
-as a default — recommend ≥100 rows per domain or well-separated vocabularies,
-and gate adoption on the v0.2 eval harness. The seed models ship un-derived;
-`make models` is unchanged.
+flipped. Verdict (v0.2, after the strength-scan): both modes are real and
+pinned by tests, but NO strength — down to 32 lanes — avoids taught-row flips
+on the mixed-label tickets/guard fabrics. That verdict is now ENFORCED by the
+no-regression gate (§11) instead of shipped as advice; model-game passes and
+ships derived.
+
+## 11. The no-regression gate (transactional derivation)
+
+Derivation writes into the fabric; the gate (`core/gate.hpp`, CLI
+`syfox derive --gate FILE.jsonl`) makes that write safe by construction:
+
+1. replay every labelled row + generated close-call probes (cross-domain
+   state mixtures, deterministic generator shared with `bench`) → baseline
+   decision signatures;
+2. snapshot the fabric **bit-exactly** — `snapshot_fabric()` copies each
+   node's lane vector in insertion order plus the provenance map, because
+   `settle()` sums over lanes in vector order (a weight set is not the
+   state);
+3. run the derivation (conservative presets: harvest co_floor 0.15/gain
+   0.35/budgets 8·512, compose gain 0.25/top-2/budget 4);
+4. replay the same probe set → compare;
+5. **policy**: (a) any argmax flip on a TAUGHT row reverts — labelled
+   knowledge must survive derivation; (b) any RISE in mean confidence on the
+   MIXED probes reverts — close-call states are ambiguous by construction,
+   their argmax may re-resolve, but manufactured certainty about them is the
+   exact failure the gate exists to kill;
+6. revert = `restore_fabric(snapshot)` → the fabric is bit-identical and
+   `decide()` output is byte-identical (pinned by test); commit = the caller
+   saves the model.
+
+Strength-scan evidence (scripts/syfox_gate_scan.cpp, all strengths from
+default down to 32 lanes): tickets reverts everywhere (8–18 taught flips —
+its seed data mixes refund/invoice labels across billing and sales), guard
+reverts at every useful strength, game commits at the conservative strength.
+Per-model outcome: `model-game` ships derived (668 lanes, 0 taught flips,
+mixed mean confidence 0.975→0.886 — the fabric got MORE honest about close
+calls; demo argmaxes 3/3 unchanged; `make models` reproduces). `model-tickets`
+and `model-guard` ship un-derived because the gate proves it, not because a
+human remembered to check.
+
+## 12. The Jev-parity benchmark (`syfox bench`)
+
+`core/bench.hpp` measures the axes the System One model class is judged on
+(axis lineage verified against TypeSafe's published Jev material and the
+community classification benchmarks, Sept 2026): decision accuracy, latency
+percentiles, calibration (ECE, 10 bins, + conf-when-correct vs
+conf-when-wrong gap), honesty (OOD probes built from deterministic nonsense
+vocabulary checked against the model's own — untaught tokens must defer),
+guardrail hold precision/recall (noul confusion at the 0.5 threshold),
+determinism (full replay compared byte-wise), and close-call margin
+distribution (mixed cross-domain states; the same generator the gate
+replays). Accuracy/calibration/guardrail aggregate over LABELLED rows only;
+unlabelled mixed probes never pollute accuracy denominators (a real bug the
+e2e suite caught). Every report carries a `jev_reference` block with the
+PUBLISHED figures (67.8% workflow accuracy, 70–500 ms, pi-warden 88% hold
+precision) for side-by-side reading — axes shared, numbers not compared
+against toy-data resubstitution.
+
+Seed-model results (in-domain resubstitution; `make bench`):
+
+| model | acc | choice ECE | conf ok/wrong | OOD defer | hold precision | p50 / p95 |
+|---|---|---|---|---|---|---|
+| tickets | 1.000 (22) | 0.405 | 0.354 / 0.000 | 1.00 | 1.000 (2/2) | 62 / 80 µs |
+| game (derived) | 1.000 (9) | 0.001 | 0.999 / — | 1.00 | — | 36 / 45 µs |
+| guard | 0.846 (13) | 0.243 | 0.795 / 0.451 | 1.00 | 0.750 (3/4) | 33 / 40 µs |
+
+Reading: honesty is structural (1.00 defer everywhere); wrong answers already
+carry near-zero confidence on the mixed-label fabrics; latency is three
+orders of magnitude under the Jev band with the same one-pass shape. Score
+accuracy on tickets (0.682) is the documented tone-readout data limit, now
+measured instead of asserted.
+
+## 13. Recall (associative retrieval in energy space)
+
+`core/recall.hpp`, CLI `syfox recall --state '...' --memories FILE.jsonl`.
+Content-addressable memory the only way the constitution allows: settle the
+query into an energy fingerprint (one float per node, L2-normalized), settle
+each stored memory the same way, rank by cosine of the two settled fields.
+No token comparison, no string distance, no n-gram overlap, no embedding
+table, no transformer — similarity is measured in the substrate's own state
+space, so two states resonate exactly as far as the field routes them
+together. Unknown vocabulary resonates with nothing (empty hits — honest
+silence, since `inject` skips unknown tokens). Read-only, bit-deterministic;
+memory stores accept `{"state","label"}` rows or the training schema
+(label = first label value). On the derived game model the zombie query
+recalls the flee lessons at 0.9696–0.9421 with fight lessons at ≤0.856.

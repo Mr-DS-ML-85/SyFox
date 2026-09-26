@@ -497,6 +497,37 @@ public:
             for (const auto& l : kv.second) f(kv.first, l.first, l.second);
     }
 
+    // -- FABRIC SNAPSHOT (transactional derivation surface, see gate.hpp) ------
+    // Exact, order-preserving capture of the lane fabric. settle() sums over
+    // each node's lane vector in insertion order, so a faithful restore must
+    // reproduce that order bit-for-bit: a (a,b,w) set is NOT enough, the
+    // per-node vector sequences are the state. Used by the no-regression gate
+    // to guarantee "revert" means "decide() output is byte-identical again".
+    struct FabricSnapshot {
+        std::vector<std::vector<std::pair<NodeId, float>>> adj;   // per node, exact order
+        std::unordered_map<std::uint64_t, std::uint32_t> gen;     // lane_key -> generation
+        std::size_t lanes = 0;
+    };
+
+    FabricSnapshot snapshot_fabric() const {
+        FabricSnapshot snap;
+        snap.adj.resize(nodes_.size());
+        for (const auto& kv : out_) {
+            if (kv.first >= snap.adj.size()) continue;
+            snap.adj[kv.first] = kv.second;
+            snap.lanes += kv.second.size();
+        }
+        snap.gen = derived_gen_;
+        return snap;
+    }
+
+    void restore_fabric(const FabricSnapshot& snap) {
+        out_.clear();
+        for (std::size_t a = 0; a < snap.adj.size(); ++a)
+            if (!snap.adj[a].empty()) out_[static_cast<NodeId>(a)] = snap.adj[a];
+        derived_gen_ = snap.gen;
+    }
+
     void lanes_of(NodeId a, std::vector<std::pair<NodeId, float>>& out_lanes) const {
         auto it = out_.find(a);
         if (it == out_.end()) return;

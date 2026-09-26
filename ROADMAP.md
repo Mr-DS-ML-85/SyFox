@@ -18,7 +18,24 @@
       `miller_window` ([cap−4, cap], TSDA live_cap) ship behind config flags.
       Bench on 10 in-domain decisions: default 10/10 (stays default),
       salience+[5,9] 10/10 but saturated confidence, salience-only 4/10.
-      Final adoption verdict waits on the eval harness below.
+      Harness now exists (`syfox bench`); salience-mode benching still to
+      do before the verdict is reopened.
+- [x] Jev-parity eval harness (`syfox bench --model --eval`): routing
+      accuracy, ECE + confidence gap, OOD defer rate, guardrail hold
+      precision/recall, latency p50/p95, determinism (byte-identical
+      replays), close-call margin distribution. Axis lineage from TypeSafe's
+      published Jev material (ARCHITECTURE §12); `make bench` on the seed
+      models.
+- [x] No-regression derivation gate (`syfox derive --gate`): transactional
+      derive — bit-exact fabric snapshot, replay taught rows + close-call
+      probes, revert on any taught flip or manufactured certainty on
+      ambiguous states. Strength-scan verdict: model-game ships derived at
+      the conservative strength, tickets/guard provably cannot (ARCHITECTURE
+      §11). This retires the "seed models ship un-derived" advice: the gate
+      enforces it per model.
+- [x] Recall: associative retrieval via settled-field cosine (Hopfield-style,
+      zero symbol-space similarity) — `syfox recall --state --memories`
+      (ARCHITECTURE §13)
 - [ ] Two-stage choice for >255 options (energy shortlist → resonance rescore)
 - [ ] Relational Noul via dual-injection interference readout (command ∩ task overlap)
 - [ ] CI regression files (record decisions, diff on retrain) — a libre `jevassert` analog
@@ -30,10 +47,12 @@
       harvest: settle co-activation replay), dreamer emergent-resonance
       ledger with human-validated promote, read-only analogical mapping.
       Lane provenance (generation counter) persisted in substrate.bin v2.
-      Benchmarked: sharpens well-separated fabrics, unsafe on 22-row seeds —
-      adoption gated on the eval harness below (ARCHITECTURE.md §10)
-- [ ] Eval harness: `syfox eval --model --examples` with accuracy + reliability
-      diagrams — this gates derive/harvest adoption and the salience flags
+      Strength-scan verdict enforced by the no-regression gate (v0.2):
+      model-game ships derived, tickets/guard provably revert at every
+      strength (ARCHITECTURE.md §10–11)
+- [x] Eval harness (delivered early as `syfox bench` + the derivation gate;
+      see v0.2) — gates derive/harvest adoption per model and measures the
+      salience flags when that question is reopened
 - [ ] Lane graph introspection CLI (`syfox inspect --concept refund`) — audit what the engine knows
 - [ ] Multi-label choice (several true options)
 - [ ] Streaming batches: many states against one model in a single process

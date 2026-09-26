@@ -4,6 +4,9 @@
 // ============================================================================
 #include "core/syfox.hpp"
 #include "core/derive.hpp"
+#include "core/bench.hpp"
+#include "core/gate.hpp"
+#include "core/recall.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -14,6 +17,8 @@
 
 namespace {
 
+void usage_exit();
+
 struct Args {
     std::string model = "model";
     std::string examples;
@@ -23,6 +28,10 @@ struct Args {
     std::string concept;
     long steps = 64;                 // dream steps
     unsigned long long seed = 0x5EED5EEDull;  // dream seed (deterministic by default)
+    std::string eval;                // bench eval rows (defaults to --examples)
+    std::string gate;                // derivation gate rows (no-regression replay)
+    std::string memories;            // recall memory store (jsonl)
+    long topk = 5;                   // recall top-k
     bool state_file = false, questions_file = false;
     // SI-faithful selection modes (off by default; never persisted into the model)
     bool salience_gating = false, miller_window = false;
@@ -230,13 +239,105 @@ void cmd_stats(const Args& a) {
 }
 
 // ---------------------------------------------------------------------------
-// Derivation layer commands. All OFFLINE and EXPLICIT: decide() stays
-// read-only; nothing here runs implicitly. Dreaming never touches the
-// substrate — only a human-validated ledger line can become a lane.
+// Jev-parity benchmark. Read-only; measures the axes the System One model
+// class is judged on (accuracy, calibration, honesty, guardrail, latency,
+// determinism). See core/bench.hpp for the axis-by-axis lineage.
 // ---------------------------------------------------------------------------
+void cmd_bench(const Args& a) {
+    syfox::Engine eng;
+    eng.load_model(a.model);
+    const std::string eval_path = !a.eval.empty() ? a.eval : a.examples;
+    if (eval_path.empty()) usage_exit();
+    auto rows = load_jsonl(eval_path);
+    if (rows.empty()) { std::cerr << "syfox: no eval rows in " << eval_path << "\n"; std::exit(2); }
+    syfox::bench::BenchConfig bc;
+    syfox::bench::BenchReport rep =
+        syfox::bench::run(eng, rows,
+                          eval_path, bc, a.model);
+    std::cout << rep.to_json().dump() << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Associative recall through field dynamics (Hopfield-style, similarity in
+// settled-energy space; no token comparison, no pattern matching).
+// ---------------------------------------------------------------------------
+void cmd_recall(const Args& a) {
+    syfox::Engine eng;
+    eng.load_model(a.model);
+    if (a.state.empty() || (a.memories.empty() && a.examples.empty())) usage_exit();
+    std::vector<syfox::recall::Memory> memories;
+    auto memory_from_row = [](const sfx::JV& r) -> syfox::recall::Memory {
+        // two accepted schemas: {"state","label"} or the examples schema
+        // {"state","labels"} (label = first label value, sorted-key order)
+        std::string label;
+        if (r.has("label")) label = r.at("label").as_str();
+        else if (r.has("labels") && r.at("labels").is_obj() && !r.at("labels").obj.empty())
+            label = r.at("labels").obj.begin()->second.as_str();
+        return {label, si::tokenize(r.at("state").as_str())};
+    };
+    if (!a.memories.empty()) {
+        for (const auto& r : load_jsonl(a.memories)) {
+            if (!r.has("state")) continue;
+            memories.push_back(memory_from_row(r));
+        }
+    } else {
+        for (const auto& r : load_jsonl(a.examples)) {
+            if (!r.has("state")) continue;
+            memories.push_back(memory_from_row(r));
+        }
+    }
+    auto hits = syfox::recall::recall(eng.substrate(), a.state, memories,
+                                      static_cast<int>(a.topk));
+    sfx::JVArr arr;
+    for (const auto& h : hits)
+        arr.push_back(sfx::JV(sfx::JVObj{
+            {"label", sfx::JV(h.label)},
+            {"resonance", std::round(h.resonance * 10000.0f) / 10000.0f},
+            {"memory_index", static_cast<double>(h.index)}}));
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("recall")},
+        {"query", sfx::JV(a.state)},
+        {"memories", static_cast<double>(memories.size())},
+        {"hits", sfx::JV(arr)},
+        {"note", sfx::JV("similarity measured in the settled-energy field; no token comparison, no pattern matching")}}).dump() << "\n";
+}
+
 void cmd_derive(const Args& a) {
     syfox::Engine eng;
     eng.load_model(a.model);
+    // Derivation layer commands. All OFFLINE and EXPLICIT: decide() stays
+    // read-only; nothing here runs implicitly. Dreaming never touches the
+    // substrate — only a human-validated ledger line can become a lane.
+    if (!a.gate.empty()) {
+        // TRANSACTIONAL derivation: replay gate rows + close-call probes before
+        // and after; any argmax flip reverts the fabric bit-for-bit.
+        auto gate_rows = load_jsonl(a.gate);
+        std::vector<std::vector<std::string>> replay;
+        const std::string replay_src = !a.examples.empty() ? a.examples : a.gate;
+        for (const auto& ex : load_jsonl(replay_src))
+            replay.push_back(si::tokenize(ex.at("state").as_str()));
+        const std::string mode = !a.examples.empty() ? "harvest" : "compose";
+        syfox::gate::GateConfig gc;
+        // conservative derivation strength: the gate's recommended starting
+        // point; anything that still flips a taught row is reverted outright
+        auto rep = syfox::gate::gated_derive(eng, mode, gate_rows, replay, gc,
+                                             syfox::derive::HarvestConfig::conservative(),
+                                             syfox::derive::DeriveConfig::conservative());
+        bool saved = false;
+        if (rep.committed) { eng.save_model(a.model); saved = true; }
+        std::cout << sfx::JV(sfx::JVObj{
+            {"command", sfx::JV("derive")},
+            {"mode", sfx::JV(mode)},
+            {"gated", sfx::JV(true)},
+            {"gate", rep.to_json()},
+            {"changed", static_cast<double>(rep.changed)},
+            {"removed", static_cast<double>(rep.removed)},
+            {"model_saved", sfx::JV(saved)},
+            {"note", sfx::JV(rep.committed
+                ? "gate passed: no replayed decision flipped; derived lanes committed"
+                : "gate REVERTED the derivation: fabric restored bit-for-bit; model unchanged")}}).dump() << "\n";
+        return;
+    }
     if (!a.examples.empty()) {
         // dynamic harvest: replay states, let the field's own settle
         // dynamics nominate which pairs deserve a direct lane
@@ -249,6 +350,8 @@ void cmd_derive(const Args& a) {
         std::cout << sfx::JV(sfx::JVObj{
             {"command", sfx::JV("derive")},
             {"mode", sfx::JV("harvest")},
+            {"gated", sfx::JV(false)},
+            {"warning", sfx::JV("ungated derive can flip close-call decisions; pass --gate FILE.jsonl for the transactional no-regression gate")},
             {"states_replayed", static_cast<double>(replay.size())},
             {"created", static_cast<double>(st.created)},
             {"refreshed", static_cast<double>(st.refreshed)},
@@ -263,6 +366,8 @@ void cmd_derive(const Args& a) {
         std::cout << sfx::JV(sfx::JVObj{
             {"command", sfx::JV("derive")},
             {"mode", sfx::JV("compose")},
+            {"gated", sfx::JV(false)},
+            {"warning", sfx::JV("ungated derive can flip close-call decisions; pass --gate FILE.jsonl for the transactional no-regression gate")},
             {"created", static_cast<double>(st.created)},
             {"strengthened", static_cast<double>(st.strengthened)},
             {"healed", static_cast<double>(st.healed)},
@@ -363,10 +468,12 @@ void usage_exit() {
         "  syfox decide    --model DIR --state '...' --questions '{...}'\n"
         "  syfox demo      --model DIR --domain tickets|game|guard\n"
         "  syfox stats     --model DIR\n"
-        "  syfox derive    --model DIR\n"
+        "  syfox derive    --model DIR [--gate FILE.jsonl] [--examples FILE.jsonl]\n"
         "  syfox dream     --model DIR [--steps N] [--seed S]\n"
         "  syfox promote   --model DIR\n"
         "  syfox analogs   --model DIR --concept WORD\n"
+        "  syfox bench     --model DIR --eval FILE.jsonl   (Jev-parity eval suite)\n"
+        "  syfox recall    --model DIR --state '...' (--memories FILE.jsonl | --examples FILE.jsonl) [--topk N]\n"
         "  syfox version\n"
         "selection modes (SI-faithful, off by default, not saved into the model):\n"
         "  --salience-gating   rank settle sources by salience (motion history)\n"
@@ -398,6 +505,10 @@ int main(int argc, char** argv) {
         else if (k == "--questions-file") { need(a.questions); a.questions_file = true; }
         else if (k == "--domain") need(a.domain);
         else if (k == "--concept") need(a.concept);
+        else if (k == "--eval") need(a.eval);
+        else if (k == "--gate") need(a.gate);
+        else if (k == "--memories") need(a.memories);
+        else if (k == "--topk") { if (i + 1 >= argc) usage_exit(); a.topk = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--steps") { if (i + 1 >= argc) usage_exit(); a.steps = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--seed")  { if (i + 1 >= argc) usage_exit(); a.seed = std::strtoull(argv[++i], nullptr, 0); }
         else if (k == "--salience-gating") a.salience_gating = true;
@@ -414,5 +525,7 @@ int main(int argc, char** argv) {
     if (cmd == "dream") { cmd_dream(a); return 0; }
     if (cmd == "promote") { cmd_promote(a); return 0; }
     if (cmd == "analogs") { if (a.concept.empty()) usage_exit(); cmd_analogs(a); return 0; }
+    if (cmd == "bench") { cmd_bench(a); return 0; }
+    if (cmd == "recall") { cmd_recall(a); return 0; }
     usage_exit();
 }

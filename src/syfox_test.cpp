@@ -4,6 +4,9 @@
 // ============================================================================
 #include "core/syfox.hpp"
 #include "core/derive.hpp"
+#include "core/bench.hpp"
+#include "core/gate.hpp"
+#include "core/recall.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -356,6 +359,199 @@ static void test_derivation() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared fixtures for the e2e suite: six labelled ticket rows (choice + noul)
+// over two well-separated vocabulary groups.
+// ---------------------------------------------------------------------------
+static std::vector<sfx::JV> make_ticket_rows() {
+    const std::string q =
+        R"({"department":{"type":"choice","instructions":"Which team should handle this","criteria":{"billing":"payment or subscription issues","technical":"bugs or integration problems"}},"is_urgent":{"type":"noul","instructions":"the message conveys urgency or time sensitivity"}})";
+    const char* src[] = {
+        "{\"state\":\"refund double charge invoice immediately\",\"labels\":{\"department\":\"billing\",\"is_urgent\":\"true\"}}",
+        "{\"state\":\"charged twice money back now please\",\"labels\":{\"department\":\"billing\",\"is_urgent\":\"true\"}}",
+        "{\"state\":\"change invoice address next month\",\"labels\":{\"department\":\"billing\",\"is_urgent\":\"false\"}}",
+        "{\"state\":\"price team plan twenty seats\",\"labels\":{\"department\":\"billing\",\"is_urgent\":\"false\"}}",
+        "{\"state\":\"download invoice records\",\"labels\":{\"department\":\"billing\",\"is_urgent\":\"false\"}}",
+        "{\"state\":\"api throws error when connecting\",\"labels\":{\"department\":\"technical\",\"is_urgent\":\"false\"}}",
+        "{\"state\":\"integration keeps failing client crashes\",\"labels\":{\"department\":\"technical\",\"is_urgent\":\"false\"}}",
+        "{\"state\":\"production down api errors every request\",\"labels\":{\"department\":\"technical\",\"is_urgent\":\"true\"}}",
+        "{\"state\":\"bug breaks checkout browser\",\"labels\":{\"department\":\"technical\",\"is_urgent\":\"true\"}}",
+        "{\"state\":\"dashboard shows blank page after update\",\"labels\":{\"department\":\"technical\",\"is_urgent\":\"false\"}}",
+    };
+    std::vector<sfx::JV> out;
+    for (const char* r : src) {
+        std::string s(r);
+        s.pop_back();                                   // drop the outer '}'
+        out.push_back(sfx::JV::parse(s + ",\"questions\":" + q + "}"));
+    }
+    return out;
+}
+
+static void learn_tickets(syfox::Engine& eng, const std::vector<sfx::JV>& rows) {
+    for (const auto& r : rows) {
+        const std::string state = r.at("state").as_str();
+        const sfx::JV& qs = r.at("questions");
+        const sfx::JV& labels = r.at("labels");
+        const std::string dept = labels.at("department").as_str();
+        eng.learn_example(state, qs.at("department").at("instructions").as_str(),
+                          dept + " " + qs.at("department").at("criteria").at(dept).as_str());
+        eng.learn_noul(state, qs.at("is_urgent").at("instructions").as_str(),
+                       labels.at("is_urgent").as_str() == "true");
+    }
+}
+
+// ---------------------------------------------------------------------------
+static void test_recall() {
+    std::cout << "[recall: associative retrieval in settled-energy space]\n";
+    using namespace syfox::recall;
+    si::Substrate s;
+    for (const char* w : {"refund", "charg", "invoic", "billing", "double", "payment",
+                          "api", "error", "connect", "bug", "crash", "integr"})
+        s.intern(w);
+    auto b2 = [&](const char* a, const char* b, float w) { s.bind(s.find(a), s.find(b), w); };
+    // two disjoint neighbourhoods (billing / technical)
+    b2("refund", "charg", 0.6f);  b2("charg", "invoic", 0.6f); b2("invoic", "billing", 0.6f);
+    b2("double", "charg", 0.5f);  b2("billing", "payment", 0.5f);
+    b2("api", "error", 0.6f);     b2("error", "connect", 0.5f); b2("connect", "bug", 0.5f);
+    b2("bug", "crash", 0.5f);     b2("crash", "integr", 0.5f);
+
+    std::vector<Memory> memories = {
+        {"billing",   si::tokenize("refund double charg invoic billing payment")},
+        {"technical", si::tokenize("api error connect bug crash integr")},
+    };
+    auto hitsA = recall(s, "i was double charged on my invoice, refund please", memories, 2);
+    CHECK(!hitsA.empty() && hitsA[0].label == "billing",
+          "billing query recalls the billing memory first");
+    auto hitsB = recall(s, "the api crashes when I connect the integration", memories, 2);
+    CHECK(!hitsB.empty() && hitsB[0].label == "technical",
+          "technical query recalls the technical memory first");
+    if (hitsA.size() == 2)
+        CHECK(hitsA[0].resonance > hitsA[1].resonance, "winner clearly separated from runner-up");
+
+    // determinism: same model + query + memories => bit-identical resonances
+    auto hitsA2 = recall(s, "i was double charged on my invoice, refund please", memories, 2);
+    bool same = hitsA.size() == hitsA2.size();
+    for (std::size_t i = 0; same && i < hitsA.size(); ++i)
+        same = hitsA[i].resonance == hitsA2[i].resonance && hitsA[i].label == hitsA2[i].label;
+    CHECK(same, "recall is deterministic (bit-identical resonances)");
+
+    // unknown vocabulary resonates with nothing (inject skips unknown tokens)
+    auto hitsO = recall(s, "zorblatz quibblemock framistan", memories, 2);
+    CHECK(hitsO.empty() || hitsO[0].resonance == 0.0f,
+          "unknown vocabulary resonates with nothing");
+
+    // read-only: recall leaves the fabric untouched
+    const std::size_t lanes_before = s.lane_count();
+    (void)recall(s, "another refund query about charges", memories, 2);
+    CHECK(s.lane_count() == lanes_before, "recall never mutates the fabric");
+}
+
+// ---------------------------------------------------------------------------
+static void test_gate() {
+    std::cout << "[gate: transactional derivation, bit-exact revert]\n";
+    using namespace syfox;
+    Engine eng;
+    auto rows = make_ticket_rows();
+    learn_tickets(eng, rows);
+    auto probes = bench::eval_probes(rows);
+
+    // baseline signature before anything touches the fabric
+    const auto sig0 = bench::decision_signature(eng, probes[0]);
+    const std::size_t lanes0 = eng.substrate().lane_count();
+
+    // (a) snapshot/restore is bit-exact, even after an adversarial write
+    const auto snap = eng.substrate().snapshot_fabric();
+    CHECK(snap.lanes == lanes0, "snapshot counts every lane");
+    eng.substrate().bind_derived(eng.substrate().find("refund"),
+                                 eng.substrate().find("error"), 1.2f, 1);
+    CHECK(eng.substrate().lane_weight(eng.substrate().find("refund"),
+                                      eng.substrate().find("error")) > 0.0f,
+          "adversarial derived lane laid");
+    eng.substrate().restore_fabric(snap);
+    CHECK(eng.substrate().lane_weight(eng.substrate().find("refund"),
+                                      eng.substrate().find("error")) == 0.0f,
+          "restore removes the adversarial lane");
+    CHECK(eng.substrate().lane_count() == lanes0, "lane count restored");
+    const auto sigR = bench::decision_signature(eng, probes[0]);
+    CHECK(sigR == sig0, "restore is bit-exact: decide() output identical");
+
+    // (b) gated compose: whatever the gate decides, decisions never regress
+    gate::GateConfig gc;
+    auto rep = gate::gated_derive(eng, "compose", rows, {}, gc);
+    CHECK(rep.ran, "gate ran");
+    CHECK(rep.taught_probes == static_cast<long>(rows.size()), "taught probes replayed");
+    CHECK(rep.mixed_probes > 0, "close-call probes generated");
+    if (rep.committed)
+        CHECK(rep.taught_flips == 0, "committed gate => zero taught flips (mixed may re-resolve)");
+    else
+        CHECK(rep.taught_flips > 0 || rep.conf_inflated,
+              "reverted gate => taught flips or manufactured certainty");
+    const auto sig1 = bench::decision_signature(eng, probes[0]);
+    if (rep.committed) {
+        bool argmax_same = true;
+        for (const auto& kv : sig0) {
+            auto it = sig1.find(kv.first);
+            if (it == sig1.end() || it->second.first != kv.second.first) argmax_same = false;
+        }
+        CHECK(argmax_same, "committed gate: taught argmaxes unchanged");
+    } else {
+        CHECK(sig1 == sig0, "reverted gate: decide() bit-identical to baseline");
+    }
+
+    // (c) gated harvest with replay states: same invariant
+    std::vector<std::vector<std::string>> replay;
+    for (const auto& r : rows) replay.push_back(si::tokenize(r.at("state").as_str()));
+    auto rep2 = gate::gated_derive(eng, "harvest", rows, replay, gc);
+    CHECK(rep2.ran, "harvest gate ran");
+    const auto sig2 = bench::decision_signature(eng, probes[0]);
+    if (rep2.committed) {
+        bool argmax_same = true;
+        for (const auto& kv : sig0) {
+            auto it = sig2.find(kv.first);
+            if (it == sig2.end() || it->second.first != kv.second.first) argmax_same = false;
+        }
+        CHECK(argmax_same, "committed harvest gate: taught argmaxes unchanged");
+    } else {
+        CHECK(sig2 == sig0, "reverted harvest gate: decide() bit-identical to baseline");
+    }
+
+    // (d) gate report serializes
+    CHECK(rep.to_json().dump().find("committed") != std::string::npos, "gate report serializes");
+}
+
+// ---------------------------------------------------------------------------
+static void test_bench_e2e() {
+    std::cout << "[bench: Jev-parity suite end to end]\n";
+    using namespace syfox;
+    Engine eng;
+    auto rows = make_ticket_rows();
+    learn_tickets(eng, rows);
+    auto calib = eng.harvest_rows(rows);
+    CHECK(!calib.empty(), "calibration rows harvested");
+    eng.fit_calibration(calib);
+
+    bench::BenchConfig bc;
+    bc.latency_reps = 3;
+    auto rep = bench::run(eng, rows, "in-domain (resubstitution)", bc, "test-model");
+
+    CHECK(rep.rows == static_cast<long>(rows.size()), "eval rows loaded");
+    CHECK(rep.choice_accuracy == 1.0,
+          "in-domain choice accuracy 1.0 (taught states resubstituted)");
+    CHECK(rep.deterministic, "decisions are bit-deterministic across replays");
+    CHECK(rep.ood_defer_rate == 1.0, "unknown vocabulary defers (honest silence)");
+    CHECK(rep.choice_ece >= 0.0 && rep.choice_ece <= 1.0, "ECE in [0,1]");
+    CHECK(rep.mixed_probes > 0 && rep.probes > rep.rows, "close-call probes generated");
+    CHECK(rep.lat_p50_us > 0.0 && rep.lat_p95_us >= rep.lat_p50_us, "latency percentiles sane");
+    CHECK(rep.g_tp >= 1, "guardrail caught at least one true hold");
+    CHECK(rep.mean_margin >= 0.0 && rep.mean_margin <= 1.0, "margins in [0,1]");
+
+    // the JSON report carries every axis
+    const std::string j = rep.to_json().dump();
+    for (const char* key : {"choice_accuracy", "choice_ece", "ood_defer_rate",
+                            "hold_precision", "p95", "deterministic", "jev_reference"})
+        CHECK(j.find(key) != std::string::npos, std::string("report carries ") + key);
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -367,6 +563,9 @@ int main() {
     test_calibration_tool();
     test_honest_silence_defer();
     test_derivation();
+    test_recall();
+    test_gate();
+    test_bench_e2e();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

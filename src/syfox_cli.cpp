@@ -20,7 +20,15 @@ struct Args {
     std::string questions;
     std::string domain;
     bool state_file = false, questions_file = false;
+    // SI-faithful selection modes (off by default; never persisted into the model)
+    bool salience_gating = false, miller_window = false;
 };
+
+// Apply the CLI mode overrides after load_model(). Mode-neutral by design:
+// substrate.bin stays untouched, flags live only for this process.
+void apply_modes(syfox::Engine& eng, const Args& a) {
+    eng.substrate().set_source_modes(a.salience_gating, a.miller_window);
+}
 
 std::string read_file(const std::string& path) {
     std::ifstream f(path);
@@ -131,6 +139,7 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
 void cmd_decide(const Args& a) {
     syfox::Engine eng;
     eng.load_model(a.model);
+    apply_modes(eng, a);
     std::string state = a.state_file ? read_file(a.state) : a.state;
     std::string qtext = a.questions_file ? read_file(a.questions) : a.questions;
     sfx::JV questions = sfx::JV::parse(qtext);
@@ -189,6 +198,7 @@ const std::vector<Demo>& demos_for(const std::string& domain) {
 void cmd_demo(const Args& a) {
     syfox::Engine eng;
     eng.load_model(a.model);
+    apply_modes(eng, a);
     std::cout << "SyFox demo — domain: " << (a.domain.empty() ? "tickets" : a.domain)
               << " | core: si-substrate (no transformer, no classifier)\n";
     for (const auto& d : demos_for(a.domain)) {
@@ -203,6 +213,7 @@ void cmd_demo(const Args& a) {
 void cmd_stats(const Args& a) {
     syfox::Engine eng;
     eng.load_model(a.model);
+    apply_modes(eng, a);   // stats reflects the modes this process would run under
     std::cout << sfx::JV(sfx::JVObj{
         {"nodes", static_cast<double>(eng.substrate().node_count())},
         {"lanes", static_cast<double>(eng.substrate().lane_count())},
@@ -223,7 +234,13 @@ void usage_exit() {
         "  syfox decide    --model DIR --state '...' --questions '{...}'\n"
         "  syfox demo      --model DIR --domain tickets|game|guard\n"
         "  syfox stats     --model DIR\n"
-        "  syfox version\n";
+        "  syfox version\n"
+        "selection modes (SI-faithful, off by default, not saved into the model):\n"
+        "  --salience-gating   rank settle sources by salience (motion history)\n"
+        "                      instead of raw energy\n"
+        "  --miller-window     live source cap drawn from [source_cap-4, source_cap]\n"
+        "                      per decision (= [20,24] at the default cap 24;\n"
+        "                      TSDA live_cap lineage, SI samples [5,9] at cap 9)\n";
     std::exit(2);
 }
 
@@ -247,6 +264,8 @@ int main(int argc, char** argv) {
         else if (k == "--questions") need(a.questions);
         else if (k == "--questions-file") { need(a.questions); a.questions_file = true; }
         else if (k == "--domain") need(a.domain);
+        else if (k == "--salience-gating") a.salience_gating = true;
+        else if (k == "--miller-window") a.miller_window = true;
         else usage_exit();
     }
     if (cmd == "version") { std::cout << "syfox " << syfox::VERSION << " (core: si-substrate)\n"; return 0; }

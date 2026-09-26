@@ -98,6 +98,48 @@ Every question is evaluated **in isolation against the same settled field** —
 adding questions does not re-settle the substrate (flat marginal latency,
 inherited structurally from the one-pass design).
 
+## The SI salience lineage — and the two selection modes
+
+SyFox's bounded working set is not an arbitrary batch size. The
+Synthetic-Intelligence substrate it descends from runs two verified
+mechanisms around the source cap, and both are ported here:
+
+* **Cavity salience integrator** (SI `physics.hpp`,
+  `s = tanh(s·0.995 + 0.05·|velocity|)`): every settle pass, each node
+  integrates its own motion. A node at rest is an *exact* fixed point
+  (`tanh(0) = 0`), so salience sparsely marks **what moved** — observable
+  per concept via `node_salience()`. `inject()` spikes a touched node to
+  the ceiling (TSDA spike semantics).
+* **TSDA Miller window** (SI `salience.hpp`): the working cap is not fixed —
+  SI samples it per decision from `[cap−4, cap]`, i.e. `[5,9]` at cap 9
+  (Miller's 7±2). SyFox keeps the same lineage at its default cap 24:
+  `--miller-window` draws the live cap from `[20,24]` each decision.
+
+Selection itself stays **energy-gated by default** because that benchmarks
+best on SyFox's narrow domains. The SI-faithful alternatives ship as CLI
+flags, off by default:
+
+```bash
+./build/syfox decide --model model-tickets --miller-window --salience-gating \
+  --state "You charged me twice for the same invoice, please refund" \
+  --questions '{"department":{"type":"choice",...}}'
+```
+
+* `--miller-window` — live cap from `[source_cap−4, source_cap]` per
+  decision. One deliberate adaptation: SI draws from a seeded `mt19937`
+  stream; SyFox derives the draw from the decision's state fingerprint, so
+  **the same state settles the same field, bit for bit**.
+* `--salience-gating` — rank propagation sources by salience (motion
+  history) instead of raw energy.
+
+Benchmark (10 in-domain decisions × 3 seed domains): default energy gating
+10/10 with calibrated-shaped confidences; salience ranking alone 4/10 at the
+wide cap (motion history is a poor selector when the cap rarely trims);
+salience + literal `[5,9]` 10/10 argmax but probabilities saturate at 1.0
+(calibration collapse — verdict deferred to the v0.2 eval harness); Miller
+`[20,24]` 9/10. Modes are runtime-only: `substrate.bin` is mode-neutral, so
+the same saved model replays under any mode on any machine.
+
 ## Train your own domain
 
 Training = teaching the substrate with labelled lessons (JSONL):

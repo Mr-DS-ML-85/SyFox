@@ -397,6 +397,15 @@ public:
 
     const SubstrateConfig& config() const { return cfg_; }
 
+    // Runtime selection-mode overrides (CLI surface for the SI-faithful modes).
+    // Physics constants stay fixed; only the two gating/window modes are
+    // settable, and neither is persisted into substrate.bin — the saved model
+    // is mode-neutral, so every binary can replay it under any mode.
+    void set_source_modes(bool salience_gating_mode, bool miller_window_mode) {
+        cfg_.salience_gating = salience_gating_mode;
+        cfg_.miller_window   = miller_window_mode;
+    }
+
 private:
     struct Node { std::string concept; float mass; float energy; float salience; };
 

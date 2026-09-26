@@ -100,6 +100,18 @@ One settle per decision — all questions read the same settled field. Adding
 questions never re-settles the substrate: flat marginal latency by structure,
 not by scheduling.
 
+**Derivation, not retrieval.** Because diffusion is multi-hop, a state that
+was never in any lesson still settles to a computed answer: energy crosses
+the co-occurrence fabric into outcome lanes laid down by *other* lessons.
+Probe (two lessons, `alpha beta`→x and `beta gamma`→y): the untaught state
+`alpha` alone settles with y at 0.494 — lesson 2 never mentioned alpha; the
+two-hop path alpha→beta→y carried the evidence. The boundary is the taught
+vocabulary and lane fabric: concepts never interned have no node, unknown
+words settle to zero energy and defer (§6). This is the substrate-level
+kernel of the SI stack's explicit derivation layers (meta-learner
+macro-rules, dreamer emergent resonances, analogical mapping) — not yet
+ported; see ROADMAP v0.3.
+
 ## 5. Readout (resonance sweep, two lanes)
 
 Probes read the settled field at their own concepts: direct node energy plus a

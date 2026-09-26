@@ -180,8 +180,16 @@ band: route answers with confidence below your threshold to a human.
   gram lanes are on the roadmap).
 * English/Bengali-style token folding is deliberately minimal (deterministic
   string normalization, no NLP pipeline).
-* Every answer is only as good as the lessons you taught — the substrate
-  cannot exceed its data. Audit `model-*/substrate.bin` before trusting it.
+* The substrate **derives, it doesn't retrieve**. A state you never taught
+  still gets a computed answer: energy diffuses across the lane fabric and
+  evidence composes across lessons. Verified in a two-lesson probe (only
+  `alpha beta`→x and `beta gamma`→y taught): querying `alpha` alone — a
+  state never taught, from a lesson that never mentioned y — puts y at
+  0.494 through the two-hop path alpha→beta→y. What the field cannot exceed
+  is the vocabulary and lane fabric of its experience: concepts you never
+  taught don't exist in it, and unknown words defer (honest silence) instead
+  of being hallucinated. Audit `model-*/substrate.bin` — the lanes ARE the
+  knowledge, every one inspectable.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full mechanism
 specification and the Synthetic-Intelligence lineage, and

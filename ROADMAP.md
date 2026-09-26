@@ -26,6 +26,11 @@
 - [ ] More seed data per domain; tone readout re-evaluated with ~100 rows
 
 ## v0.3 — Structure
+- [ ] Derivation layer port from the SI stack: meta-learner macro-rules
+      (composed derived relations), dreamer emergent resonances (undriven
+      constructive-interference candidates, human-validated before
+      promotion), analogical mapping — today the field derives only through
+      lane diffusion (see ARCHITECTURE.md §4)
 - [ ] Lane graph introspection CLI (`syfox inspect --concept refund`) — audit what the engine knows
 - [ ] Multi-label choice (several true options)
 - [ ] Streaming batches: many states against one model in a single process

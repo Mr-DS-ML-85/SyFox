@@ -335,3 +335,97 @@ silence, since `inject` skips unknown tokens). Read-only, bit-deterministic;
 memory stores accept `{"state","label"}` rows or the training schema
 (label = first label value). On the derived game model the zombie query
 recalls the flee lessons at 0.9696–0.9421 with fight lessons at ≤0.856.
+
+## 14. v3 — the hidden-test firewall and the evidence ledger
+
+### 14.1 Firewall (core/firewall.hpp)
+
+The 70/15/15 train/cal/hidden contract is enforced where a typo cannot
+bypass it: the CLI consults the file's split role (decided by its filename
+suffix — `_train`, `_cal`, `_hidden`, `_heldout`, anything else is
+unclassified and stays readable, because worksheets and paraphrase files
+must remain learnable) before opening anything.
+
+| role      | suffix            | learn | calibrate | derive --gate | bench |
+|-----------|-------------------|-------|-----------|---------------|-------|
+| train     | `_train.jsonl`    | YES   | yes       | yes           | yes   |
+| heldout   | `_heldout.jsonl`  | yes   | YES       | yes           | yes   |
+| cal       | `_cal.jsonl`      | no    | YES       | yes           | yes   |
+| hidden    | `_hidden.jsonl`   | NO    | NO        | NO            | YES   |
+
+Rationale: calibration files exist to fit 2–3 scalars (temperature/Platt)
+on rows the fabric never learned from. Hidden files exist to be SCORED,
+once. A hidden row that leaks into any build path is not a mistake — it is
+a different (worthless) number. `make firewall-check` runs the four
+refusals against the real binary.
+
+### 14.2 Evidence ledger (v3, Milestone 3)
+
+Every lane key carries a `LaneEvidence` record: `support_events`,
+`counter_events` (anti-Hebbian dissolutions), `generation` (derivation
+provenance), `first_seq` / `last_seq` (teach-event window), and the
+engine-set context tag (which substrate/model owned the event). The ledger
+persists as an optional tail on `substrate.bin`; v2 files load unchanged
+(the tail is detected at EOF) and v3 files load on v2 readers that stop at
+the v2 end.
+
+`decide --evidence` projects the ledger for the lanes the decision
+actually used — a READ-ONLY view. The field is driven by lane weights;
+the ledger never feeds back into physics. It exists so a decision can be
+audited after the fact: which lanes, how strong, taught when, by which
+corpus, disputed how many times.
+
+### 14.3 Contradictions
+
+Teaching the same (state, question) with a different outcome is a
+contradiction: it increments the learn report's `contradictions` counter,
+writes a contradiction record (old outcome, new outcome, both seq numbers,
+state hash, context), and marks the affected lanes with a counter event —
+the anti-Hebbian term weakens the disputed binding exactly as the physics
+specifies. There is no last-write-wins: the field keeps the binding its
+weights support, and the dispute stays on the record (`contested: true`
+in the decide evidence view). Silent override is a design error, and the
+adversarial suite (§15 of the README; `make adv-big`) tests for it with a
+control arm that separates contradiction-specific damage from the generic
+cost of re-teaching.
+
+## 15. v3 — multicore settle and the GPU gate (M5)
+
+### 15.1 CSR mirror
+
+The settle hot path reads a compressed-sparse-row mirror of the out-lane
+fabric: `csr_off_` (n+1 offsets), `csr_dst_`, `csr_w_` — contiguous
+buffers, rebuilt lazily when the fabric mutates. The build copies each
+source's lane vector verbatim, so per-source iteration order is exactly
+the map order the sequential settle used: every float sum keeps its exact
+operand order and results are bit-identical. This is the layout a GPU
+port generalizes.
+
+### 15.2 Deterministic OpenMP settle
+
+`make omp` builds the same sources with `-fopenmp`. The diffusion pass
+partitions sources with a static schedule (contiguous ascending chunks);
+each thread scatters into its own buffer; the buffers are combined in
+ascending thread order; therefore every accumulator sees contributions in
+ascending SOURCE order — the sequential order. Bit-identity is a gate,
+not a hope: `make omp-identity` fails the build if sequential and
+`--threads 2` reports differ in any block (routing, calibration, honesty,
+guardrail). Measured honestly: below ~10k nodes on a 2-core sandbox the
+deterministic parallel settle is slower than sequential (thread
+coordination exceeds the gain); it pays on denser fabrics.
+
+### 15.3 Batched throughput and the GPU gate
+
+`bench --throughput N` measures decisions/sec with N worker threads, each
+owning a PRIVATE engine copy (decisions mutate the field, so workers never
+share a substrate). It is a performance axis, not an accuracy headline —
+a non-zero checksum proves the work happened. Measured on the 3,518-node
+tickets fabric: 2,390 → 3,714 decisions/sec at N=2 on 2 cores.
+
+The GPU port gate is MEASURED, not assumed: `make density` reports per-
+fabric density and mean out-degree (tickets 0.0067 @ degree 23.5, game
+0.0458, guard 0.0485). A GPU port happens when dense substrates make the
+transfer costs pay for themselves — until then it stays design, and the
+SoA/CSR buffers above are the only GPU-specific preparation the core
+carries. No neural network enters the core at any point; the parallelism
+is the SAME physics, executed on more cores.

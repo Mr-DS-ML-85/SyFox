@@ -748,5 +748,498 @@ inline AccSummary labelled_accuracy(Engine& eng, const std::vector<sfx::JV>& row
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// v3 Milestone 4 — adversarial / OOD evaluation suite
+// ---------------------------------------------------------------------------
+// Nine deterministic stress families over labelled eval rows (the hidden test
+// in the M1 discipline). The engine under test is NEVER mutated: all families
+// run read-only decisions, except the conflicting-lessons sub-suite, which
+// works on a THROWAWAY copy of the engine and reports its blast radius.
+//
+// Metrics per family (the four the milestone asks for, made concrete):
+//   accuracy          labelled-choice accuracy under the transform
+//   defer_rate        fraction of choice answers deferred (honest silence)
+//   conf_when_wrong   mean confidence of WRONG non-deferred answers
+//   false_conf_rate   wrong AND confidence >= 0.5 AND not deferred / answered
+//
+// Honesty notes baked into the report:
+//   * synonym-swap paraphrases fold to the SAME token stream after
+//     normalization (Porter + synonym table), so they are not adversarial
+//     here — the paraphrase axis is covered by reorder + padding, which DO
+//     change the token stream.
+//   * score/noul questions are not scored under label-preserving transforms:
+//     a transformed state may legitimately move a frustration score or flip a
+//     guard valence, so scoring them would manufacture errors. Choice
+//     (routing) is intent-level and label-stable; that is what is scored.
+//   * every transform is a pure function of the row index: the suite replays
+//     bit-identically.
+// ---------------------------------------------------------------------------
+struct AdvFamilyResult {
+    std::string name, note;
+    long n = 0, answered = 0, correct = 0, deferred = 0, high_conf_wrong = 0;
+    double conf_wrong_sum = 0.0;
+
+    double accuracy() const {
+        return answered ? static_cast<double>(correct) / static_cast<double>(answered) : 0.0;
+    }
+    double defer_rate() const {
+        return n ? static_cast<double>(deferred) / static_cast<double>(n) : 0.0;
+    }
+    double conf_when_wrong() const {
+        long wrong = answered - correct;
+        return wrong > 0 ? conf_wrong_sum / static_cast<double>(wrong) : 0.0;
+    }
+    double false_conf_rate() const {
+        return answered ? static_cast<double>(high_conf_wrong) / static_cast<double>(answered) : 0.0;
+    }
+    sfx::JV to_json() const {
+        return sfx::JV(sfx::JVObj{
+            {"name", sfx::JV(name)},
+            {"n", static_cast<double>(n)},
+            {"answered", static_cast<double>(answered)},
+            {"accuracy", std::round(accuracy() * 10000.0) / 10000.0},
+            {"defer_rate", std::round(defer_rate() * 10000.0) / 10000.0},
+            {"conf_when_wrong", std::round(conf_when_wrong() * 10000.0) / 10000.0},
+            {"false_conf_rate", std::round(false_conf_rate() * 10000.0) / 10000.0},
+            {"note", sfx::JV(note)}});
+    }
+};
+
+// whitespace tokenizer for the state transforms (surface form; decide()
+// re-normalizes internally, so transforming surface text is enough)
+inline std::vector<std::string> adv_split(const std::string& s) {
+    std::vector<std::string> out;
+    std::istringstream in(s);
+    std::string w;
+    while (in >> w) out.push_back(w);
+    return out;
+}
+inline std::string adv_join(const std::vector<std::string>& ws) {
+    std::string out;
+    for (std::size_t i = 0; i < ws.size(); ++i) { if (i) out += " "; out += ws[i]; }
+    return out;
+}
+
+// label -> outcome text, identical to the CLI's learn-side resolution so the
+// conflicting-lessons sub-suite teaches in EXACTLY the production format.
+inline std::string adv_outcome_text(const sfx::JV& q, const std::string& label) {
+    if (!q.has("criteria")) return label;
+    const sfx::JV& crit = q.at("criteria");
+    if (crit.is_obj() && crit.has(label)) return label + " " + crit.at(label).as_str();
+    if (crit.is_arr()) {
+        for (const auto& v : crit.arr)
+            if (v.as_str() == label) return label;
+        long idx = std::strtol(label.c_str(), nullptr, 10);
+        if (idx >= 0 && idx < static_cast<long>(crit.arr.size()))
+            return crit.arr[static_cast<std::size_t>(idx)].as_str();
+    }
+    return label;
+}
+
+// the first choice-type question of a row (qid + question object)
+inline bool adv_first_choice(const sfx::JV& row, std::string& qid, sfx::JV& qout) {
+    if (!row.has("questions") || !row.at("questions").is_obj()) return false;
+    for (const auto& qkv : row.at("questions").obj) {
+        if (qkv.second.has("type") && qkv.second.at("type").as_str() == "choice") {
+            qid = qkv.first; qout = qkv.second; return true;
+        }
+    }
+    return false;
+}
+
+// foreign vocabulary pools for near-miss / cross-domain families. Used only
+// when the caller does not pass --mix; pools are per-domain content words.
+inline std::vector<std::string> adv_builtin_pool(const std::string& model_name) {
+    static const char* kGame[]   = {"zombie", "dungeon", "quest", "sword", "shelter",
+                                    "respawn", "boss", "inventory", "health", "village",
+                                    "attack", "defend", "resources", "night", "wall"};
+    static const char* kTicket[] = {"invoice", "refund", "login", "password", "screen",
+                                    "keyboard", "subscription", "shipping", "warranty",
+                                    "crash", "email", "account", "payment", "update", "server"};
+    static const char* kGuard[]  = {"rm", "sudo", "drop", "table", "delete", "wipe",
+                                    "chmod", "root", "exec", "payload", "script",
+                                    "database", "credential", "token", "deploy"};
+    std::vector<std::string> out;
+    auto add = [&out](const char** arr, int k) {
+        for (int i = 0; i < k; ++i) out.push_back(arr[i]);
+    };
+    const bool has_ticket = model_name.find("ticket") != std::string::npos;
+    const bool has_game   = model_name.find("game")   != std::string::npos;
+    const bool has_guard  = model_name.find("guard")  != std::string::npos;
+    if (has_ticket) { add(kGame, 15); add(kGuard, 15); }
+    else if (has_game) { add(kTicket, 15); add(kGuard, 15); }
+    else if (has_guard) { add(kTicket, 15); add(kGame, 15); }
+    else { add(kGame, 15); add(kTicket, 15); }             // unknown domain: everything foreign
+    return out;
+}
+
+// content words from --mix rows (the caller's own cross-domain corpus)
+inline std::vector<std::string> adv_pool_from_rows(const std::vector<sfx::JV>& mix_rows) {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const auto& r : mix_rows) {
+        if (!r.has("state")) continue;
+        for (const auto& t : si::norm::normalize(r.at("state").as_str())) {
+            if (t.size() < 4 || seen.count(t)) continue;
+            seen.insert(t);
+            out.push_back(t);
+            if (out.size() >= 400) return out;
+        }
+    }
+    return out;
+}
+
+struct ConflictResult {
+    long taught = 0, detected = 0, contested_flagged = 0, checked = 0;
+    double untouched_acc_before = 0.0, untouched_acc_control = 0.0, untouched_acc_after = 0.0;
+    bool deterministic_after = true;
+    sfx::JV to_json() const {
+        return sfx::JV(sfx::JVObj{
+            {"contradictions_taught", static_cast<double>(taught)},
+            {"conflicts_detected", static_cast<double>(detected)},
+            {"contested_flagged", static_cast<double>(contested_flagged)},
+            {"states_checked", static_cast<double>(checked)},
+            {"untouched_acc_before", std::round(untouched_acc_before * 10000.0) / 10000.0},
+            {"untouched_acc_control", std::round(untouched_acc_control * 10000.0) / 10000.0},
+            {"untouched_acc_after", std::round(untouched_acc_after * 10000.0) / 10000.0},
+            {"deterministic_after", sfx::JV(deterministic_after)},
+            {"silent_override", sfx::JV(detected != taught || contested_flagged != checked)},
+            {"note", sfx::JV("control arm = same states re-taught with their GOLD outcomes "
+                             "(same teach-event count, no dispute): isolates the forgetting-law "
+                             "cost every teach event pays from contradiction-specific damage. "
+                             "Accuracy basis: all labelled questions (choice+score+noul).")}});
+    }
+};
+
+struct AdvReport {
+    std::vector<AdvFamilyResult> families;
+    ConflictResult conflicts;
+    sfx::JV to_json() const {
+        sfx::JVArr f;
+        for (const auto& fam : families) f.push_back(fam.to_json());
+        // worst false-confidence family = the headline honesty risk
+        std::string worst; double worst_fc = -1.0;
+        for (const auto& fam : families) {
+            if (fam.answered < 10) continue;               // too small to judge
+            if (fam.false_conf_rate() > worst_fc) { worst_fc = fam.false_conf_rate(); worst = fam.name; }
+        }
+        return sfx::JV(sfx::JVObj{
+            {"families", sfx::JV(f)},
+            {"conflicting_lessons", conflicts.to_json()},
+            {"worst_false_conf_family", sfx::JV(worst)},
+            {"worst_false_conf_rate", std::round(worst_fc * 10000.0) / 10000.0},
+            {"note", sfx::JV("all transforms are pure functions of the row index; "
+                             "the suite replays bit-identically and never mutates the "
+                             "model under test (conflicts run on a throwaway copy)")}});
+    }
+};
+
+// score ONE transformed probe set on choice questions only, accumulating the
+// four M4 metrics. Deferred answers count toward defer_rate, leave accuracy.
+inline AdvFamilyResult adv_score_family(Engine& eng, const std::vector<Probe>& probes,
+                                        const std::string& name, const std::string& note) {
+    AdvFamilyResult fam; fam.name = name; fam.note = note;
+    for (const auto& p : probes) {
+        syfox::Usage u;
+        auto answers = eng.decide(p.state, p.questions, u);
+        std::size_t ai = 0;
+        for (const auto& qkv : p.questions.obj) {
+            const sfx::JV& q = qkv.second;
+            if (ai >= answers.size()) break;
+            const syfox::Answer& a = answers[ai++];
+            if (q.at("type").as_str() != "choice") continue;   // choice-only scoring
+            ++fam.n;
+            if (a.deferred) { ++fam.deferred; continue; }
+            if (a.probabilities.empty()) { ++fam.deferred; continue; }
+            std::string amax; float top = -1.0f;
+            for (const auto& kv : a.probabilities)
+                if (kv.second > top) { top = kv.second; amax = kv.first; }
+            const std::string stored =
+                p.labels.count(qkv.first) ? p.labels.at(qkv.first) : "";
+            ++fam.answered;
+            const bool correct = p.taught && label_matches(q, stored, amax);
+            fam.correct += correct ? 1 : 0;
+            if (!correct) {
+                fam.conf_wrong_sum += a.confidence;
+                if (a.confidence >= 0.5f) ++fam.high_conf_wrong;
+            }
+        }
+    }
+    return fam;
+}
+
+inline std::vector<Probe> adv_transform_rows(const std::vector<sfx::JV>& rows,
+                                             std::string (*fn)(const std::string&, std::size_t)) {
+    std::vector<Probe> out;
+    std::size_t i = 0;
+    for (const auto& r : rows) {
+        if (!r.has("state") || !r.has("questions") || !r.has("labels")) { ++i; continue; }
+        Probe p;
+        p.state     = fn(r.at("state").as_str(), i);
+        p.questions = r.at("questions");
+        for (const auto& kv : r.at("labels").obj) p.labels[kv.first] = kv.second.as_str();
+        p.taught    = true;
+        out.push_back(p);
+        ++i;
+    }
+    return out;
+}
+
+// -- the transform families (pure functions of state + row index) ------------
+inline std::string adv_reorder(const std::string& s, std::size_t) {
+    std::vector<std::string> ws = adv_split(s);
+    if (ws.size() < 3) return s;
+    const std::size_t h = ws.size() / 2;
+    std::vector<std::string> out(ws.begin() + static_cast<long>(h), ws.end());
+    out.insert(out.end(), ws.begin(), ws.begin() + static_cast<long>(h));
+    return adv_join(out);
+}
+inline std::string adv_padding(const std::string& s, std::size_t i) {
+    static const char* kPad[] = {
+        "Hope you are doing well today.",
+        "Also the weather is quite nice this week.",
+        "This is an unrelated aside about office chairs.",
+        "By the way the meeting got rescheduled again."};
+    return s + " " + kPad[i % 4];
+}
+inline std::string adv_typo(const std::string& s, std::size_t) {
+    return corrupt_state(s, 15.0f);
+}
+inline std::string adv_intensifiers(const std::string& s, std::size_t) {
+    std::vector<std::string> ws = adv_split(s);
+    std::vector<std::string> out;
+    long doubled = 0;
+    for (const auto& w : ws) {
+        out.push_back(w);
+        if (w.size() > 3 && doubled < 3) { out.push_back(w); ++doubled; }
+    }
+    out.push_back("URGENT"); out.push_back("URGENT");
+    return adv_join(out);
+}
+inline std::string adv_self_contradiction(const std::string& s, std::size_t) {
+    return s + " Actually never mind, everything is fine now.";
+}
+inline std::string adv_negation(const std::string& s, std::size_t) {
+    std::vector<std::string> ws = adv_split(s);
+    for (std::size_t j = 0; j < ws.size(); ++j)
+        if (ws[j].size() > 3) { ws.insert(ws.begin() + static_cast<long>(j), "not"); break; }
+    return adv_join(ws);
+}
+inline std::string adv_double_negation(const std::string& s, std::size_t) {
+    return s + " It is not that this was never handled.";
+}
+// unknown vocabulary: rows re-generated from the OOD nonsense pool (the same
+// machinery as the honesty probes, filtered against THIS model's vocabulary)
+inline std::vector<Probe> adv_unknown_probes(Engine& eng, const std::vector<sfx::JV>& rows) {
+    std::vector<Probe> out;
+    const auto nonsense = ood_states(eng.substrate(), 24);
+    if (nonsense.empty()) return out;
+    for (const auto& r : rows) {
+        if (!r.has("questions") || !r.has("labels")) continue;
+        Probe p;
+        p.state     = nonsense[out.size() % nonsense.size()];
+        p.questions = r.at("questions");
+        for (const auto& kv : r.at("labels").obj) p.labels[kv.first] = kv.second.as_str();
+        p.taught    = false;               // nonsense has no gold answer: defer-only
+        out.push_back(p);
+        if (out.size() >= 48) break;
+    }
+    return out;
+}
+// near-miss: foreign words that SHARE trigrams with taught vocabulary — the
+// dangerous OOD class, because the traction gate may bridge them
+inline std::vector<Probe> adv_nearmiss_probes(Engine& eng, const std::vector<sfx::JV>& rows,
+                                              const std::vector<std::string>& pool) {
+    std::vector<Probe> out;
+    if (pool.empty()) return out;
+    std::vector<std::string> entangled;
+    for (const auto& w : pool) {
+        for (const auto& g : si::norm::expand_ngrams({w}))
+            if (eng.substrate().has(g)) { entangled.push_back(w); break; }
+        if (entangled.size() >= 32) break;
+    }
+    if (entangled.empty()) return out;
+    for (const auto& r : rows) {
+        if (!r.has("state") || !r.has("questions") || !r.has("labels")) continue;
+        std::vector<std::string> ws = adv_split(r.at("state").as_str());
+        long hit = -1;
+        for (std::size_t j = ws.size(); j-- > 0;)
+            if (ws[j].size() > 3) { hit = static_cast<long>(j); break; }
+        if (hit >= 0) ws[static_cast<std::size_t>(hit)] = entangled[out.size() % entangled.size()];
+        Probe p;
+        p.state     = adv_join(ws);
+        p.questions = r.at("questions");
+        for (const auto& kv : r.at("labels").obj) p.labels[kv.first] = kv.second.as_str();
+        p.taught    = true;
+        out.push_back(p);
+        if (out.size() >= 240) break;
+    }
+    return out;
+}
+// cross-domain mixture: append foreign content words to the state
+inline std::vector<Probe> adv_crossdomain_probes(const std::vector<sfx::JV>& rows,
+                                                 const std::vector<std::string>& pool) {
+    std::vector<Probe> out;
+    if (pool.empty()) return out;
+    for (const auto& r : rows) {
+        if (!r.has("state") || !r.has("questions") || !r.has("labels")) continue;
+        std::string st = r.at("state").as_str();
+        for (int j = 0; j < 4; ++j)
+            st += " " + pool[(out.size() * 4 + static_cast<std::size_t>(j)) % pool.size()];
+        Probe p;
+        p.state     = st;
+        p.questions = r.at("questions");
+        for (const auto& kv : r.at("labels").obj) p.labels[kv.first] = kv.second.as_str();
+        p.taught    = true;
+        out.push_back(p);
+        if (out.size() >= 240) break;
+    }
+    return out;
+}
+
+// -- the conflicting-lessons sub-suite (throwaway engine copy) ---------------
+// The M3 contract under attack: contradictory lessons must (a) always be
+// detected, (b) always surface as contested in the evidence, (c) keep
+// decisions deterministic, and (d) cause no damage beyond what ANY teach
+// event causes (the forgetting law decays every lane on every deposit, so a
+// CONTROL arm — same states re-taught with their gold outcomes — isolates
+// the contradiction-specific cost).
+inline ConflictResult adv_conflict_suite(const Engine& eng, const std::vector<sfx::JV>& rows) {
+    ConflictResult cr;
+    // collect the rows we can contradict (a choice question with a criteria
+    // list to pick a wrong answer from)
+    struct Target { std::string state, instructions, gold_outcome, wrong_outcome; sfx::JV q; };
+    std::vector<Target> targets;
+    for (const auto& r : rows) {
+        if (!r.has("state") || !r.has("labels")) continue;
+        std::string qid; sfx::JV q;
+        if (!adv_first_choice(r, qid, q)) continue;
+        if (!r.at("labels").has(qid)) continue;
+        const std::string gold = r.at("labels").at(qid).as_str();
+        std::string wrong;
+        if (q.has("criteria") && q.at("criteria").is_obj()) {
+            for (const auto& kv : q.at("criteria").obj)
+                if (kv.first != gold) { wrong = kv.first; break; }
+        } else if (q.has("criteria") && q.at("criteria").is_arr()) {
+            for (const auto& v : q.at("criteria").arr) {
+                bool is_gold = v.as_str() == gold;
+                long idx = std::strtol(gold.c_str(), nullptr, 10);
+                if (idx >= 0 && idx < static_cast<long>(q.at("criteria").arr.size()) &&
+                    q.at("criteria").arr[static_cast<std::size_t>(idx)].as_str() == v.as_str())
+                    is_gold = true;
+                if (!is_gold) { wrong = v.as_str(); break; }
+            }
+        }
+        if (wrong.empty()) continue;
+        targets.push_back({r.at("state").as_str(), q.at("instructions").as_str(),
+                           adv_outcome_text(q, gold), adv_outcome_text(q, wrong), q});
+        if (targets.size() >= 40) break;
+    }
+    if (targets.empty()) return cr;
+    std::vector<sfx::JV> suffix(rows.begin() + static_cast<long>(targets.size()), rows.end());
+    // pristine copy for the BEFORE baseline (the engine under test is never
+    // touched, not even for read-only scoring)
+    syfox::Engine pristine = eng;
+    if (!suffix.empty())
+        cr.untouched_acc_before = labelled_accuracy(pristine, suffix).accuracy;
+    // ATTACK copy: establish the gold lesson, then contradict it. The
+    // establish step is required — hidden rows were never taught, and a
+    // wrong answer to a state the fabric never learned is NOT a dispute.
+    syfox::Engine probe = eng;
+    const long conflicts_before = static_cast<long>(probe.conflicts().size());
+    for (const auto& t : targets) {
+        probe.learn_example(t.state, t.instructions, t.gold_outcome);
+        probe.learn_example(t.state, t.instructions, t.wrong_outcome);
+    }
+    cr.taught = static_cast<long>(targets.size());
+    cr.detected = static_cast<long>(probe.conflicts().size()) - conflicts_before;
+    // CONTROL copy: same teach-event count, gold outcomes only — no dispute
+    syfox::Engine control = eng;
+    for (const auto& t : targets) {
+        control.learn_example(t.state, t.instructions, t.gold_outcome);
+        control.learn_example(t.state, t.instructions, t.gold_outcome);
+    }
+    if (!suffix.empty())
+        cr.untouched_acc_control = labelled_accuracy(control, suffix).accuracy;
+    // every contradicted state must surface as contested in its evidence
+    for (const auto& t : targets) {
+        syfox::Usage u;
+        sfx::JV qobj(sfx::JVObj{});
+        qobj.obj["q"] = t.q;
+        auto answers = probe.decide(t.state, qobj, u);
+        sfx::JV ev = probe.evidence_json(t.state, qobj, answers);
+        ++cr.checked;
+        if (ev.at("contested").as_str() == "true") ++cr.contested_flagged;
+        // determinism under dispute: same decision twice
+        syfox::Usage u2;
+        auto answers2 = probe.decide(t.state, qobj, u2);
+        if (answers.size() != answers2.size()) { cr.deterministic_after = false; continue; }
+        for (std::size_t k = 0; k < answers.size(); ++k)
+            if (answers[k].deferred != answers2[k].deferred ||
+                std::fabs(answers[k].confidence - answers2[k].confidence) > 1e-6f ||
+                answers[k].choice != answers2[k].choice)
+                cr.deterministic_after = false;
+    }
+    // blast radius: untouched suffix after the attack (compare with CONTROL,
+    // not just BEFORE — every teach event pays the forgetting-law cost)
+    if (!suffix.empty())
+        cr.untouched_acc_after = labelled_accuracy(probe, suffix).accuracy;
+    return cr;
+}
+
+// -- the full suite -----------------------------------------------------------
+inline AdvReport adversarial_suite(Engine& eng, const std::vector<sfx::JV>& rows,
+                                   const std::vector<std::string>& foreign_pool) {
+    AdvReport rep;
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_reorder), "reorder",
+        "clause halves swapped; token stream changes, gold label unchanged"));
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_padding), "padding",
+        "irrelevant clause appended; co-occurrence fabric must not be hijacked"));
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_typo), "typos",
+        "15% deterministic codepoint corruption (deletion/swap/duplication)"));
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_intensifiers), "intensifiers",
+        "content words doubled + URGENT caps; intern-mass stress"));
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_self_contradiction), "self_contradiction",
+        "opposing-sentiment clause appended; routing intent must survive"));
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_negation), "negation",
+        "single 'not' inserted; scored on choice only (valence labels may flip)"));
+    rep.families.push_back(adv_score_family(eng,
+        adv_transform_rows(rows, adv_double_negation), "double_negation",
+        "double-negation clause appended; scored on choice only"));
+    // unknown vocabulary: expect defer_rate 1.0, zero answered
+    {
+        auto probes = adv_unknown_probes(eng, rows);
+        AdvFamilyResult fam = adv_score_family(eng, probes, "unknown_concepts",
+            "true OOD nonsense vocabulary; 100% defer is the contract, any answer is false confidence");
+        rep.families.push_back(fam);
+    }
+    // near-miss: trigram-entangled foreign words
+    {
+        auto probes = adv_nearmiss_probes(eng, rows, foreign_pool);
+        AdvFamilyResult fam = adv_score_family(eng, probes, "near_miss",
+            foreign_pool.empty()
+                ? "no foreign pool available (skipped)"
+                : "one content word replaced by a trigram-entangled foreign word; tests the traction gate");
+        rep.families.push_back(fam);
+    }
+    // cross-domain mixture
+    {
+        auto probes = adv_crossdomain_probes(rows, foreign_pool);
+        AdvFamilyResult fam = adv_score_family(eng, probes, "cross_domain",
+            foreign_pool.empty()
+                ? "no foreign pool available (skipped)"
+                : "four foreign content words appended; contamination resistance");
+        rep.families.push_back(fam);
+    }
+    rep.conflicts = adv_conflict_suite(eng, rows);
+    return rep;
+}
+
 } // namespace bench
 } // namespace syfox

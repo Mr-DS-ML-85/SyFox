@@ -23,14 +23,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace syfox {
 
-inline const char* VERSION = "2.2.0";
+inline const char* VERSION = "3.0.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -57,6 +60,26 @@ inline bool subword_traction(const si::Substrate& s, const std::string& w) {
     for (const auto& g : grams) if (s.has(g)) ++known;
     return known * 4 >= grams.size();                    // >= 25% of trigrams known
 }
+
+// ---------------------------------------------------------------------------
+// v3 Milestone 2 — the distinct-experience policy (boundary layer, flag-gated).
+// Measured twice (v2.1 paraphrases, v2.2 variants): re-teaching near-
+// duplicate lessons REGRESSED held-out accuracy, while distinct experience
+// scales (the v3 dose-response probe: tickets hidden 0.603@250 -> 0.825@8400).
+// The fix lives in the TEACHING dose, not in the physics:
+//   * dedup   — an exact duplicate lesson (same normalized token stream,
+//               same outcome) carries ZERO new information: skip it.
+//   * novelty — a lesson's Hebbian dose scales with how much of its state
+//               vocabulary the fabric has never seen: eta_scale =
+//               floor + (1-floor) * n_new_words / n_words. A fresh sentence
+//               binds at full strength; a rephrasing of known words binds
+//               at 25% — enough to track drift, not enough to smear lanes.
+// ---------------------------------------------------------------------------
+struct LearnPolicy {
+    bool  dedup = false;
+    bool  novelty = false;
+    float novelty_floor = 0.25f;
+};
 
 // ---------------------------------------------------------------------------
 struct Answer {
@@ -116,6 +139,23 @@ public:
     const si::Substrate& substrate() const { return si_; }
     Calibration& calibration() { return calib_; }
 
+    // -- v3 Milestone 1: decide-side energy normalization (boundary GAIN knob) --
+    // At seed scale (tens of lessons) acoustic mass is small and a state's
+    // settled field sits comfortably above the silence floor. At corpus scale
+    // (8,400 lessons) common words carry mass in the hundreds, the damping law
+    // energy/sqrt(mass) whispers, and honest silence (absolute floor 0.05)
+    // defers most states — coverage collapses to the rows that happen to
+    // contain rare tokens (measured: 33/40 hidden rows deferred).
+    // The fix is a measurement gain, NOT a physics change: the injection dose
+    // is scaled by the mean sqrt(mass) of the state's KNOWN tokens, which
+    // preserves the damping law's per-token ratios exactly (uniform mass m
+    // reproduces the seed-scale total n*inject_energy bit-for-bit up to the
+    // scale factor). si_substrate.hpp is untouched; the silence floor stays
+    // absolute; unknown vocabulary still injects nothing and still defers.
+    // Off by default: every v2.1/v2.2 number reproduces unchanged.
+    void set_energy_norm(bool on) { energy_norm_ = on; }
+    bool energy_norm() const { return energy_norm_; }
+
     // -- model persistence ----------------------------------------------------
     void save_model(const std::string& dir) const {
         std::string cmd_mkdir = "mkdir -p '" + dir + "'";
@@ -127,7 +167,26 @@ public:
         mf << sfx::JV(sfx::JVObj{
             {"engine", "syfox"}, {"version", VERSION},
             {"core", "si-substrate"}, {"nodes", static_cast<double>(si_.node_count())},
-            {"lanes", static_cast<double>(si_.lane_count())}}).dump();
+            {"lanes", static_cast<double>(si_.lane_count())},
+            {"evidence_records", static_cast<double>(si_.evidence_count())},
+            {"teach_events", static_cast<double>(teach_seq_)},
+            {"contradictions", static_cast<double>(conflicts_.size())}}).dump();
+        // v3 Milestone 3: the audit trail. conflicts.jsonl = every detected
+        // contradiction; lessons_index.jsonl = state-hash -> outcome index
+        // (so a LATER learn invocation still detects contradictions against
+        // every lesson ever taught, not just this process's).
+        {
+            std::ofstream of(dir + "/conflicts.jsonl");
+            for (const auto& c : conflicts_) of << c.dump() << "\n";
+        }
+        {
+            std::ofstream of(dir + "/lessons_index.jsonl");
+            for (const auto& kv : taught_outcomes_)
+                of << sfx::JV(sfx::JVObj{
+                    {"state_hash_hex", sfx::JV(hex64(kv.first))},
+                    {"seq", static_cast<double>(kv.second.seq)},
+                    {"outcome", sfx::JV(kv.second.outcome)}}).dump() << "\n";
+        }
     }
 
     void load_model(const std::string& dir) {
@@ -135,7 +194,42 @@ public:
         std::ifstream cf(dir + "/calibration.json");
         if (cf) { std::string buf((std::istreambuf_iterator<char>(cf)), std::istreambuf_iterator<char>());
                   calib_ = Calibration::from_json(sfx::JV::parse(buf)); }
+        // v3 audit trail (optional files; a v2 model dir simply lacks them)
+        {
+            std::ifstream f(dir + "/conflicts.jsonl");
+            if (f) {
+                std::string line;
+                while (std::getline(f, line))
+                    if (!line.empty()) {
+                        sfx::JV c = sfx::JV::parse(line);
+                        conflicts_.push_back(c);
+                        if (c.has("state_hash_hex"))
+                            conflicts_by_state_[hex_to_u64(c.at("state_hash_hex").as_str())]
+                                .push_back(conflicts_.size() - 1);
+                    }
+            }
+        }
+        {
+            std::ifstream f(dir + "/lessons_index.jsonl");
+            if (f) {
+                std::string line;
+                while (std::getline(f, line)) {
+                    if (line.empty()) continue;
+                    sfx::JV r = sfx::JV::parse(line);
+                    Taught t;
+                    t.seq = static_cast<std::uint64_t>(r.at("seq").as_num(0));
+                    t.outcome = r.at("outcome").as_str();
+                    taught_outcomes_[hex_to_u64(r.at("state_hash_hex").as_str())] = t;
+                    if (t.seq > teach_seq_) teach_seq_ = t.seq;
+                }
+            }
+        }
     }
+
+    // set the audit context tag recorded into the lane evidence ledger
+    void set_context(const std::string& c) { context_ = c; }
+    std::uint64_t teach_events() const { return teach_seq_; }
+    const std::vector<sfx::JV>& conflicts() const { return conflicts_; }
 
     // -- HEBBIAN LESSON (learning = substrate rewiring) -------------------------
     // One labelled experience: state text + question + rewarded outcome.
@@ -153,25 +247,79 @@ public:
     // REGRESSED held-out accuracy). With the guard, a variant lesson only
     // lays/strengthens LANES (coverage), it never re-deposits mass.
     void learn_example(const std::string& state_text, const std::string& instructions,
-                       const std::string& outcome_text, bool augment = false) {
+                       const std::string& outcome_text, bool augment = false,
+                       const LearnPolicy& lp = LearnPolicy{}, bool* learned = nullptr) {
         const bool grams = si::norm::grams_enabled();
         const std::vector<std::string> words =
             si::norm::normalize(state_text + " " + instructions);
         std::vector<std::string> state = si::norm::state_tokens(words, grams);
         const std::size_t n_words = words.size();
         std::vector<std::string> outcome = si::norm::normalize(outcome_text);
+        // Milestone 2: novelty is measured BEFORE interning (a word the fabric
+        // has not seen yet is exactly the new information this lesson carries).
+        float eta = 1.0f;
+        if (lp.novelty && n_words > 0) {
+            std::size_t fresh = 0;
+            for (const auto& w : words) if (!si_.has(w)) ++fresh;
+            eta = lp.novelty_floor
+                + (1.0f - lp.novelty_floor) * (static_cast<float>(fresh) / static_cast<float>(n_words));
+        }
+        // Milestone 2: exact-duplicate lessons are skipped outright.
+        if (lp.dedup) {
+            std::uint64_t h = 1469598103934665603ull;
+            // cast! fnv1a_hash returns float; an uncast + would promote the
+            // whole chain to float (24-bit mantissa) and collapse every
+            // lesson onto one hash (measured: 25111/25200 false duplicates).
+            for (const auto& w : words) { h = h * 1099511628211ull + static_cast<std::uint64_t>(si::fnv1a_hash(w)); }
+            for (const auto& w : outcome) { h = h * 1099511628211ull + static_cast<std::uint64_t>(si::fnv1a_hash(w)); }
+            if (!lesson_hashes_.insert(h).second) {
+                if (learned) *learned = false;
+                return;
+            }
+        }
+        // Milestone 3: contradiction check. Same (state + question) taught
+        // with a DIFFERENT outcome is a contradiction — it must surface in
+        // the audit trail, never silently override (or be silently ignored).
+        const std::uint64_t shash = stream_hash(words);
+        const std::uint64_t seq = ++teach_seq_;
+        auto prev = taught_outcomes_.find(shash);
+        if (prev != taught_outcomes_.end() && prev->second.outcome != outcome_text) {
+            sfx::JV c(sfx::JVObj{
+                {"type", sfx::JV("contradiction")},
+                {"state", sfx::JV(state_text)}, {"state_hash_hex", sfx::JV(hex64(stream_hash(si::norm::normalize(state_text))))},
+                {"instructions", sfx::JV(instructions)},
+                {"outcome_old", sfx::JV(prev->second.outcome)},
+                {"outcome_new", sfx::JV(outcome_text)},
+                {"seq_old", static_cast<double>(prev->second.seq)},
+                {"seq_new", static_cast<double>(seq)},
+                {"context", sfx::JV(context_)}});
+            conflicts_by_state_[stream_hash(si::norm::normalize(state_text))].push_back(conflicts_.size());
+            conflicts_.push_back(c);
+            // the new lesson is COUNTER-EVIDENCE for the old binding's lanes:
+            // mark every old lane reachable from this state's words.
+            mark_counter_lanes(words, prev->second.outcome, seq);
+        }
+        taught_outcomes_[shash] = Taught{seq, outcome_text};
         for (const auto& t : state)
             if (!(augment && si_.has(t))) si_.intern(t);
         for (const auto& t : outcome)
             if (!(augment && si_.has(t))) si_.intern(t);
         for (std::size_t i = 1; i < n_words; ++i)          // co-occurrence fabric
-            si_.bind(si_.find(words[i - 1]), si_.find(words[i]), si_.config().learn_eta * 0.5f);
+            si_.bind(si_.find(words[i - 1]), si_.find(words[i]), si_.config().learn_eta * 0.5f * eta);
         if (grams)                                         // word<->its own trigrams fabric
             for (const auto& w : words)
                 for (const auto& g : si::norm::expand_ngrams({w}))
                     if (si_.has(g))
-                        si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f);
-        si_.hebbian_lesson(state, outcome);
+                        si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f * eta);
+        si_.hebbian_lesson(state, outcome, eta);
+        // Milestone 3: record the support evidence for every state->outcome
+        // lane this lesson just strengthened (bookkeeping; the ledger never
+        // feeds back into the field).
+        for (const auto& a : state)
+            if (si_.has(a))
+                for (const auto& b : outcome)
+                    if (si_.has(b)) si_.record_support(si_.find(a), si_.find(b), seq, context_);
+        if (learned) *learned = true;
     }
 
     // -- CALIBRATION TOOL (external post-processor, not core physics) ----------
@@ -271,11 +419,50 @@ public:
     // y=false : anti-Hebbian weaken the same routes (disconfirming evidence
     //           dissolves them), so the field discriminates, not accumulates.
     void learn_noul(const std::string& state_text, const std::string& instructions, bool y,
-                    bool augment = false) {
+                    bool augment = false, const LearnPolicy& lp = LearnPolicy{},
+                    bool* learned = nullptr) {
         const bool grams = si::norm::grams_enabled();
         const std::vector<std::string> words = si::norm::normalize(state_text);
         std::vector<std::string> state = si::norm::state_tokens(words, grams);
         std::vector<std::string> instr = si::norm::normalize(instructions);   // gram-free
+        float eta = 1.0f;
+        if (lp.novelty && !words.empty()) {
+            std::size_t fresh = 0;
+            for (const auto& w : words) if (!si_.has(w)) ++fresh;
+            eta = lp.novelty_floor
+                + (1.0f - lp.novelty_floor) * (static_cast<float>(fresh) / static_cast<float>(words.size()));
+        }
+        if (lp.dedup) {
+            std::uint64_t h = 1469598103934665603ull;
+            for (const auto& w : words) { h = h * 1099511628211ull + static_cast<std::uint64_t>(si::fnv1a_hash(w)); }
+            for (const auto& w : instr) { h = h * 1099511628211ull + static_cast<std::uint64_t>(si::fnv1a_hash(w)); }
+            h = h * 1099511628211ull + (y ? 0x9E3779B9ull : 0x85EBCA6Bull);
+            if (!lesson_hashes_.insert(h).second) {
+                if (learned) *learned = false;
+                return;
+            }
+        }
+        // Milestone 3: noul contradictions — same (state + instruction) taught
+        // with the opposite valence (true vs false) is a contradiction too.
+        const std::string outcome_text = y ? "true" : "false";
+        const std::uint64_t shash = stream_hash(words);
+        const std::uint64_t seq = ++teach_seq_;
+        auto prev = taught_outcomes_.find(shash);
+        if (prev != taught_outcomes_.end() && prev->second.outcome != outcome_text) {
+            sfx::JV c(sfx::JVObj{
+                {"type", sfx::JV("contradiction")},
+                {"state", sfx::JV(state_text)}, {"state_hash_hex", sfx::JV(hex64(stream_hash(si::norm::normalize(state_text))))},
+                {"instructions", sfx::JV(instructions)},
+                {"outcome_old", sfx::JV(prev->second.outcome)},
+                {"outcome_new", sfx::JV(outcome_text)},
+                {"seq_old", static_cast<double>(prev->second.seq)},
+                {"seq_new", static_cast<double>(seq)},
+                {"context", sfx::JV(context_)}});
+            conflicts_by_state_[stream_hash(si::norm::normalize(state_text))].push_back(conflicts_.size());
+            conflicts_.push_back(c);
+            mark_counter_lanes(words, prev->second.outcome, seq);
+        }
+        taught_outcomes_[shash] = Taught{seq, outcome_text};
         for (const auto& t : state)
             if (!(augment && si_.has(t))) si_.intern(t);
         for (const auto& t : instr)
@@ -284,9 +471,36 @@ public:
             for (const auto& w : words)
                 for (const auto& g : si::norm::expand_ngrams({w}))
                     if (si_.has(g))
-                        si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f);
-        if (y) si_.hebbian_lesson(state, instr, 2.0f);   // supporting evidence binds hard
-        else   si_.weaken(state, instr);                 // disconfirming evidence dissolves
+                        si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f * eta);
+        if (y) {
+            si_.hebbian_lesson(state, instr, 2.0f * eta);   // supporting evidence binds hard
+            for (const auto& a : state)
+                if (si_.has(a))
+                    for (const auto& b : instr)
+                        if (si_.has(b)) si_.record_support(si_.find(a), si_.find(b), seq, context_);
+        } else {
+            si_.weaken(state, instr, eta);                  // disconfirming evidence dissolves
+            for (const auto& a : state)
+                if (si_.has(a))
+                    for (const auto& b : instr)
+                        if (si_.has(b)) si_.record_counter(si_.find(a), si_.find(b), seq, context_);
+        }
+        if (learned) *learned = true;
+    }
+
+    // decide-side injection dose (Milestone-1 gain knob; see set_energy_norm)
+    float state_dose(const std::vector<std::string>& words) const {
+        if (!energy_norm_) return si_.config().inject_energy;
+        double sum_sqrt = 0.0;
+        int present = 0;
+        for (const auto& w : words)
+            if (si_.has(w)) {
+                sum_sqrt += std::sqrt(static_cast<double>(si_.node_mass(si_.find(w))));
+                ++present;
+            }
+        if (present == 0 || sum_sqrt <= 0.0) return si_.config().inject_energy;
+        return si_.config().inject_energy
+             * static_cast<float>(sum_sqrt / present);
     }
 
     // -- DECISION ----------------------------------------------------------------
@@ -300,7 +514,7 @@ public:
         usage.state_tokens = words.size();
 
         si_.reset_field();
-        si_.inject(words);                               // words at the substrate's own level
+        si_.inject(words, state_dose(words));          // words at the (gained) substrate level
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
             for (const auto& w : words)
@@ -343,7 +557,10 @@ public:
             const sfx::JV& qs = ex.has("questions") ? ex.at("questions") : sfx::JV(sfx::JVObj{});
             if (!qs.is_obj()) continue;
             si_.reset_field();
-            si_.inject(si::norm::normalize(state));
+            {
+                const std::vector<std::string> hw = si::norm::normalize(state);
+                si_.inject(hw, state_dose(hw));           // gained dose (Milestone-1)
+            }
             if (si::norm::grams_enabled()) {
                 const std::vector<std::string> words2 = si::norm::normalize(state);
                 std::vector<std::string> bridges;
@@ -397,6 +614,46 @@ public:
     }
 
 private:
+    // -- Milestone 3 audit internals -------------------------------------------
+    struct Taught { std::uint64_t seq; std::string outcome; };
+
+    // 64-bit hashes travel as HEX STRINGS in JSON: the house dump is %.6g and
+    // doubles lose integer precision past 2^53 — a numeric hash silently
+    // corrupts on every save/load round-trip (measured: reloaded conflict
+    // keys no longer matched the decide-side hash).
+    static std::string hex64(std::uint64_t v) {
+        char buf[17];
+        std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+        return buf;
+    }
+    static std::uint64_t hex_to_u64(const std::string& s) {
+        return std::stoull(s, nullptr, 16);
+    }
+
+    static std::uint64_t stream_hash(const std::vector<std::string>& ws) {
+        std::uint64_t h = 1469598103934665603ull;
+        for (const auto& w : ws) h = h * 1099511628211ull + static_cast<std::uint64_t>(si::fnv1a_hash(w));
+        return h;
+    }
+
+    // A contradicting lesson is COUNTER-EVIDENCE for the binding it disputes:
+    // mark every existing lane from this state's words into the OLD outcome's
+    // token set. Bookkeeping only — the physics is untouched.
+    void mark_counter_lanes(const std::vector<std::string>& words,
+                            const std::string& old_outcome, std::uint64_t seq) {
+        std::vector<std::string> old_toks = si::norm::normalize(old_outcome);
+        for (const auto& w : words) {
+            if (!si_.has(w)) continue;
+            const si::NodeId a = si_.find(w);
+            std::vector<std::pair<si::NodeId, float>> lanes;
+            si_.lanes_of(a, lanes);
+            for (const auto& l : lanes)
+                for (const auto& t : old_toks)
+                    if (si_.has(t) && si_.find(t) == l.first)
+                        si_.record_counter(a, l.first, seq, context_);
+        }
+    }
+
     // -- readout helpers --------------------------------------------------------
     float probe_energy(const std::string& label, const std::string& desc) const {
         return si_.readout(si::norm::normalize(label + " " + desc));
@@ -414,6 +671,95 @@ private:
 public:
     // debug/eval accessor (read-only)
     float noul_support_public(const std::string& instructions) const { return noul_support(instructions); }
+
+public:
+    // -- Milestone 3: machine-auditable evidence for a decision ------------------
+    // Built AFTER decide(): per question, the winning candidate's supporting
+    // lanes (weight, generation, support/counter events, provenance window,
+    // context) and any contradiction records for this exact state. Read-only.
+    sfx::JV evidence_json(const std::string& state, const sfx::JV& questions,
+                          const std::vector<Answer>& answers) const {
+        const std::vector<std::string> words = si::norm::normalize(state);
+        const std::uint64_t shash = stream_hash(words);
+        sfx::JVArr contr;
+        auto cit = conflicts_by_state_.find(shash);
+        if (cit != conflicts_by_state_.end())
+            for (std::size_t idx : cit->second)
+                if (idx < conflicts_.size()) contr.push_back(conflicts_[idx]);
+
+        sfx::JVObj qout;
+        std::size_t ai = 0;
+        for (const auto& qkv : questions.obj) {
+            const sfx::JV& q = qkv.second;
+            if (ai >= answers.size()) break;
+            const Answer& a = answers[ai++];
+            sfx::JVObj qe;
+            qe["type"] = sfx::JV(a.type);
+            qe["deferred"] = sfx::JV(a.deferred);
+            if (a.deferred) { qe["reason"] = sfx::JV(a.reason); qout[qkv.first] = sfx::JV(qe); continue; }
+
+            std::string argmax;
+            if (a.type == "choice") argmax = a.choice;
+            else if (a.type == "score") {
+                float top = -1.0f;
+                for (const auto& kv : a.probabilities) if (kv.second > top) { top = kv.second; argmax = kv.first; }
+            } else {
+                argmax = a.probability >= 0.5f ? "true" : "false";
+                qe["probability"] = std::round(a.probability * 1000.0f) / 1000.0f;
+            }
+            qe["argmax"] = sfx::JV(argmax);
+
+            // the probe tokens the readout actually measured for the winner
+            std::string probe_text = argmax;
+            if (q.has("criteria")) {
+                const sfx::JV& crit = q.at("criteria");
+                if (crit.is_obj() && crit.has(argmax)) probe_text = argmax + " " + crit.at(argmax).as_str();
+                else if (crit.is_arr())
+                    for (const auto& v : crit.arr) if (v.as_str() == argmax) probe_text = argmax;
+            }
+            const std::vector<std::string> probe = si::norm::normalize(probe_text);
+
+            struct Sup { std::string lane; float w; si::LaneEvidence e; std::uint32_t gen; };
+            std::vector<Sup> sups;
+            for (const auto& w : words) {
+                if (!si_.has(w)) continue;
+                const si::NodeId a = si_.find(w);
+                if (si_.node_energy(a) <= 0.0f) continue;
+                for (const auto& p : probe) {
+                    if (!si_.has(p)) continue;
+                    const si::NodeId b = si_.find(p);
+                    const float lw = si_.lane_weight(a, b);
+                    if (lw <= 0.0f) continue;
+                    Sup s; s.lane = w + " -> " + p; s.w = lw;
+                    s.gen = si_.generation_of(a, b);
+                    si_.evidence_of(a, b, s.e);
+                    sups.push_back(s);
+                }
+            }
+            std::sort(sups.begin(), sups.end(),
+                      [](const Sup& x, const Sup& y) { return x.w > y.w; });
+            sfx::JVArr lanes;
+            for (std::size_t i = 0; i < sups.size() && i < 8; ++i)
+                lanes.push_back(sfx::JV(sfx::JVObj{
+                    {"lane", sfx::JV(sups[i].lane)},
+                    {"weight", std::round(sups[i].w * 10000.0f) / 10000.0f},
+                    {"generation", static_cast<double>(sups[i].gen)},
+                    {"support_events", static_cast<double>(sups[i].e.support_events)},
+                    {"counter_events", static_cast<double>(sups[i].e.counter_events)},
+                    {"first_seq", static_cast<double>(sups[i].e.first_seq)},
+                    {"last_seq", static_cast<double>(sups[i].e.last_seq)},
+                    {"context", sfx::JV(sups[i].e.context)}}));
+            qe["supporting_lanes"] = sfx::JV(lanes);
+            qe["supporting_lane_total"] = static_cast<double>(sups.size());
+            qout[qkv.first] = sfx::JV(qe);
+        }
+        return sfx::JV(sfx::JVObj{
+            {"state_hash_hex", sfx::JV(hex64(shash))},
+            {"contested", sfx::JV(!contr.empty())},
+            {"contradictions", sfx::JV(contr)},
+            {"questions", sfx::JV(qout)},
+            {"note", sfx::JV("evidence is a read-only ledger view; lane weights drive the field, the ledger never does")}});
+    }
 
 private:
 
@@ -560,6 +906,14 @@ private:
 
     si::Substrate si_;
     Calibration calib_;
+    bool energy_norm_ = false;                          // Milestone-1 gain knob (default off)
+    std::unordered_set<std::uint64_t> lesson_hashes_;   // Milestone-2 dedup memory
+    // Milestone-3 audit state
+    std::string context_ = "default";
+    std::uint64_t teach_seq_ = 0;
+    std::map<std::uint64_t, Taught> taught_outcomes_;               // state-stream hash -> outcome
+    std::vector<sfx::JV> conflicts_;
+    std::map<std::uint64_t, std::vector<std::size_t>> conflicts_by_state_;
 };
 
 } // namespace syfox

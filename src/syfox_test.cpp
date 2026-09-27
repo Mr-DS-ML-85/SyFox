@@ -740,6 +740,228 @@ static void test_typo_corruption() {
     CHECK(b != "আমার কার্ড থেকে টাকা কেটেছে দুইবার", "bengali words corrupt on codepoints");
 }
 
+// ============================================================================
+// v3 Milestone 3 — contradiction + provenance
+//   The contract: a contradictory lesson NEVER silently overrides. The
+//   dispute must surface in the audit trail, the disputed lanes must carry
+//   counter-evidence, and the ledger must survive save/load round-trips.
+// ============================================================================
+static void test_m3_contradiction() {
+    std::cout << "[m3 contradiction]\n";
+    syfox::Engine eng;
+    eng.set_context("test-contradiction");
+    // first lesson: this state routes to billing
+    eng.learn_example("the invoice charged my card twice",
+                      "which team should handle this", "billing payment team");
+    CHECK(eng.conflicts().empty(), "no contradiction on first teach");
+    // same (state + instructions), DIFFERENT outcome -> contradiction record
+    eng.learn_example("the invoice charged my card twice",
+                      "which team should handle this", "technical bug team");
+    CHECK(eng.conflicts().size() == 1, "second outcome recorded as contradiction");
+    const sfx::JV& c = eng.conflicts()[0];
+    CHECK(c.at("type").as_str() == "contradiction", "record typed as contradiction");
+    CHECK(c.at("outcome_old").as_str() == "billing payment team", "old outcome preserved");
+    CHECK(c.at("outcome_new").as_str() == "technical bug team", "new outcome preserved");
+    CHECK(c.at("seq_new").as_num() > c.at("seq_old").as_num(), "provenance window ordered");
+    // the dispute surfaces in the machine-auditable evidence for this state
+    sfx::JV q = sfx::JV::parse(
+        R"({"team":{"type":"choice","instructions":"which team should handle this",)"
+        R"("criteria":{"billing":"payment team","technical":"bug team"}}})");
+    syfox::Usage u;
+    auto ans = eng.decide("the invoice charged my card twice", q, u);
+    sfx::JV ev = eng.evidence_json("the invoice charged my card twice", q, ans);
+    CHECK(ev.at("contested").as_str() == "true", "evidence marks state contested");
+    CHECK(ev.at("contradictions").arr.size() == 1, "evidence carries the contradiction record");
+    // the disputed OLD binding carries counter-events (not silent overwrite)
+    bool saw_counter = false;
+    for (const auto& kv : ev.at("questions").obj) {
+        for (const auto& lane : kv.second.at("supporting_lanes").arr)
+            if (lane.at("counter_events").as_num() > 0.0) saw_counter = true;
+    }
+    CHECK(saw_counter, "disputed lanes show counter_events > 0");
+    // decisions remain deterministic in the presence of a conflict
+    auto ans2 = eng.decide("the invoice charged my card twice", q, u);
+    CHECK(ans[0].choice == ans2[0].choice &&
+          std::fabs(ans[0].confidence - ans2[0].confidence) < 1e-6f,
+          "decision deterministic despite conflict");
+}
+
+static void test_m3_evidence_ledger() {
+    std::cout << "[m3 evidence ledger]\n";
+    syfox::Engine eng;
+    eng.set_context("test-ledger");
+    eng.learn_example("laptop screen flickers on lid open", "route the ticket",
+                      "technical hardware team");
+    sfx::JV q = sfx::JV::parse(
+        R"({"route":{"type":"choice","instructions":"route the ticket",)"
+        R"("criteria":{"technical":"hardware team","billing":"payment team"}}})");
+    syfox::Usage u;
+    auto ans = eng.decide("laptop screen flickers on lid open", q, u);
+    sfx::JV ev = eng.evidence_json("laptop screen flickers on lid open", q, ans);
+    const sfx::JV& qe = ev.at("questions").at("route");
+    CHECK(qe.at("supporting_lane_total").as_num() > 0.0, "winning answer has supporting lanes");
+    bool ledger_ok = true;
+    for (const auto& lane : qe.at("supporting_lanes").arr) {
+        const double se = lane.at("support_events").as_num();
+        const double fs = lane.at("first_seq").as_num();
+        const double ls = lane.at("last_seq").as_num();
+        if (se < 1.0 || fs < 1.0 || ls < fs) ledger_ok = false;
+        if (!lane.has("generation") || !lane.has("weight") || lane.at("context").as_str() != "test-ledger")
+            ledger_ok = false;
+    }
+    CHECK(ledger_ok, "every lane carries support_events, seq window, generation, context");
+    // deferred answers appear in evidence with a reason and no lanes
+    auto ans2 = eng.decide("zzz qqq xxxttt", q, u);
+    sfx::JV ev2 = eng.evidence_json("zzz qqq xxxttt", q, ans2);
+    const sfx::JV& qe2 = ev2.at("questions").at("route");
+    CHECK(qe2.at("deferred").as_str() == "true" && qe2.has("reason"),
+          "deferred answer shows reason, not fabricated lanes");
+    CHECK(qe2.at("supporting_lane_total").as_num() == 0.0, "deferred carries zero supporting lanes");
+}
+
+static void test_m3_ledger_persistence() {
+    std::cout << "[m3 ledger persistence]\n";
+    const std::string dir = "build/test_m3_model";
+    std::string wipe = "rm -rf " + dir;
+    (void)std::system(wipe.c_str());
+    sfx::JV q = sfx::JV::parse(
+        R"({"route":{"type":"choice","instructions":"route the ticket",)"
+        R"("criteria":{"technical":"hardware team","billing":"payment team"}}})");
+    std::uint64_t sup_before = 0, conflicts_before = 0;
+    {
+        syfox::Engine eng;
+        eng.set_context("persist-probe");
+        eng.learn_example("laptop screen flickers on lid open", "route the ticket",
+                          "technical hardware team");
+        syfox::Usage u;
+        auto ans = eng.decide("laptop screen flickers on lid open", q, u);
+        // a contradiction so the audit trail has content to persist
+        eng.learn_example("laptop screen flickers on lid open", "route the ticket",
+                          "billing payment team");
+        conflicts_before = eng.conflicts().size();
+        CHECK(conflicts_before == 1, "conflict recorded before save");
+        // ledger snapshot taken AFTER the contradiction lesson (it too writes
+        // support rows: the contradicting lesson is real taught evidence)
+        sfx::JV evf = eng.evidence_json("laptop screen flickers on lid open", q, ans);
+        for (const auto& lane : evf.at("questions").at("route").at("supporting_lanes").arr)
+            sup_before += static_cast<std::uint64_t>(lane.at("support_events").as_num());
+        eng.save_model(dir);
+    }
+    syfox::Engine eng2;
+    eng2.load_model(dir);
+    CHECK(eng2.conflicts().size() == conflicts_before, "conflicts survive load");
+    CHECK(eng2.teach_events() >= 2, "teach counter survives load");
+    // re-deriving evidence on the loaded engine finds the same ledger rows
+    syfox::Usage u;
+    auto ans = eng2.decide("laptop screen flickers on lid open", q, u);
+    sfx::JV ev = eng2.evidence_json("laptop screen flickers on lid open", q, ans);
+    std::uint64_t sup_after = 0;
+    for (const auto& lane : ev.at("questions").at("route").at("supporting_lanes").arr)
+        sup_after += static_cast<std::uint64_t>(lane.at("support_events").as_num());
+    CHECK(sup_after == sup_before, "support_events identical after round-trip");
+    // a LATER learn invocation still detects contradictions against lessons
+    // taught in a previous process (the lessons_index contract)
+    eng2.learn_example("laptop screen flickers on lid open", "route the ticket",
+                       "sales pricing team");
+    CHECK(eng2.conflicts().size() == conflicts_before + 1,
+          "cross-process contradiction detected via lessons_index");
+    // and the loaded evidence still marks the state contested
+    auto ans3 = eng2.decide("laptop screen flickers on lid open", q, u);
+    sfx::JV ev3 = eng2.evidence_json("laptop screen flickers on lid open", q, ans3);
+    CHECK(ev3.at("contested").as_str() == "true", "loaded state contested in evidence");
+}
+
+static void test_m3_noul_contradiction() {
+    std::cout << "[m3 noul contradiction]\n";
+    syfox::Engine eng;
+    eng.set_context("test-noul-contradiction");
+    const std::string instr = "the command is irreversible or destructive";
+    // two clean true states + one clean false state establish separation;
+    // then the SAME destructive state as the first is taught false -> dispute
+    eng.learn_noul("command drop table database destroy data", instr, true);
+    eng.learn_noul("command list files show status read only", instr, false);
+    eng.learn_noul("command rm -rf wipe the disk force", instr, true);
+    eng.learn_noul("command rm -rf wipe the disk force", instr, false);   // contradiction
+    bool found = false;
+    for (const auto& c : eng.conflicts())
+        if (c.at("type").as_str() == "contradiction" &&
+            c.at("outcome_old").as_str() == "true" && c.at("outcome_new").as_str() == "false")
+            found = true;
+    CHECK(found, "opposite valence on same (state+instruction) recorded");
+    // physics untouched by the ledger: uncontested states still separate
+    sfx::JV q = sfx::JV::parse(
+        R"({"d":{"type":"noul","instructions":"the command is irreversible or destructive"}})");
+    syfox::Usage u;
+    float p_contested  = eng.decide("the command rm -rf will delete everything", q, u)[0].probability;
+    float p_clean_true = eng.decide("the command drop table destroyed the database", q, u)[0].probability;
+    float p_harmless   = eng.decide("the command lists open issues", q, u)[0].probability;
+    CHECK(p_clean_true > p_harmless, "uncontested valence separation intact");
+    // the contested binding does NOT confidently carry the newest label: the
+    // anti-Hebbian dispute weakens it below the clean same-valence binding
+    CHECK(p_contested < p_clean_true,
+          "contested state weakened, not silently overridden to newest label");
+    // and the dispute is VISIBLE in the evidence for that state
+    sfx::JV q2 = sfx::JV::parse(
+        R"({"d":{"type":"noul","instructions":"the command is irreversible or destructive"}})");
+    auto ans = eng.decide("command rm -rf wipe the disk force", q2, u);
+    sfx::JV ev = eng.evidence_json("command rm -rf wipe the disk force", q2, ans);
+    CHECK(ev.at("contested").as_str() == "true", "contested noul state flagged in evidence");
+}
+
+// ============================================================================
+// v3 Milestone 4 — adversarial suite invariants
+//   The suite must (a) hold the honest-silence contract under unknown
+//   vocabulary, (b) always surface contradictions (no silent override),
+//   (c) replay bit-identically.
+// ============================================================================
+static void test_m4_adversarial() {
+    std::cout << "[m4 adversarial]\n";
+    syfox::Engine eng;
+    eng.set_context("test-m4");
+    // a small three-way routing fabric
+    for (int i = 0; i < 4; ++i) {
+        eng.learn_example("my invoice charged the card twice again", "route the ticket",
+                          "billing payment team");
+        eng.learn_example("the app crashes when i open the settings page", "route the ticket",
+                          "technical bug team");
+        eng.learn_example("i want to upgrade my plan to premium", "route the ticket",
+                          "sales pricing team");
+    }
+    std::vector<sfx::JV> rows;
+    for (const char* s : {"my invoice was charged three times",
+                          "the settings page crashes the whole app",
+                          "interested in upgrading to the premium plan"}) {
+        rows.push_back(sfx::JV::parse(std::string(R"({"state":")") + s + R"(",)"
+            R"("questions":{"route":{"type":"choice","instructions":"route the ticket",)"
+            R"("criteria":{"billing":"payment team","technical":"bug team","sales":"pricing team"}}},)"
+            R"("labels":{"route":"billing"}})"));
+    }
+    // fix the gold labels to match the states
+    rows[0].obj["labels"] = sfx::JV::parse(R"({"route":"billing"})");
+    rows[1].obj["labels"] = sfx::JV::parse(R"({"route":"technical"})");
+    rows[2].obj["labels"] = sfx::JV::parse(R"({"route":"sales"})");
+    const auto rep = syfox::bench::adversarial_suite(eng, rows, {});
+    // honest silence: unknown vocabulary defers 100%, zero false confidence
+    const syfox::bench::AdvFamilyResult* unknown = nullptr;
+    for (const auto& f : rep.families)
+        if (f.name == "unknown_concepts") unknown = &f;
+    CHECK(unknown && unknown->n > 0, "unknown-concept probes generated");
+    CHECK(unknown && unknown->defer_rate() == 1.0, "unknown vocabulary defers at 100%");
+    CHECK(unknown && unknown->false_conf_rate() == 0.0, "unknown vocabulary never answers");
+    // conflicting lessons: always detected, always contested, deterministic
+    CHECK(rep.conflicts.taught > 0, "conflict sub-suite ran");
+    CHECK(rep.conflicts.detected == rep.conflicts.taught, "every contradiction detected");
+    CHECK(rep.conflicts.contested_flagged == rep.conflicts.checked,
+          "every contradicted state flagged contested");
+    CHECK(rep.conflicts.deterministic_after, "decisions deterministic after conflicts");
+    CHECK(rep.conflicts.detected != rep.conflicts.taught ||
+          rep.conflicts.contested_flagged != rep.conflicts.checked
+              ? false : true, "silent_override flag false");
+    // bit-identical replay
+    const auto rep2 = syfox::bench::adversarial_suite(eng, rows, {});
+    CHECK(rep.to_json().dump() == rep2.to_json().dump(), "suite replays bit-identically");
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -751,6 +973,11 @@ int main() {
     test_mass_guard();
     test_multilingual_e2e();
     test_typo_corruption();
+    test_m3_contradiction();
+    test_m3_evidence_ledger();
+    test_m3_ledger_persistence();
+    test_m3_noul_contradiction();
+    test_m4_adversarial();
     test_field_physics();
     test_salience_mechanics();
     test_hebbian_choice();

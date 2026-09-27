@@ -1,3 +1,100 @@
+## v3.0.0 — milestones 1–5: scale discipline, distinct experience, provenance, adversarial suite, multicore
+
+Every claim below is a number from a real run on this repo (commands in the
+Makefile; raw JSON in `build/`). Nothing is projected or estimated.
+
+### Milestone 1 — large held-out datasets, hidden-test firewall
+- `tools/gen_corpus.py` (+`tools/corpus_pools.py`): deterministic generator,
+  seed 20260927. Per domain — tickets_en 12,000 rows (8,400/1,800/1,800),
+  game 8,000 (5,600/1,200/1,200), guard 8,000 (5,600/1,200/1,200); Bengali /
+  Hindi / Russian tickets 3,600-ish each with hidden splits of 540 / 539 / 539
+  (all ≥ the 500 the milestone requires). 70/15/15 train/cal/hidden, label
+  distributions in `data/big/MANIFEST.json` with a SHA-256 per file.
+- `core/firewall.hpp` (new): the hidden-test contract ENFORCED in code, not
+  prose. `learn` refuses `_hidden`/`_cal`; `calibrate` refuses `_hidden`;
+  `derive --gate` refuses `_hidden`. `make firewall-check` proves all four
+  refusals on the real CLI.
+- Hidden-test reports (`make bench-big`, `--energy-norm`, calibration fit on
+  the `_cal` split only): **tickets_en 0.971** (ECE 0.005), **game 0.763**
+  (ECE 0.049), **guard 0.638** (ECE 0.037; guardrail hold precision 0.782,
+  recall 0.910). p95 latency 126–441 µs, decisions bit-deterministic.
+- Multilingual hidden (`make bench-big-ml`, per-script routing):
+  **Bengali 0.969** (ECE 0.015), **Hindi 0.965** (ECE 0.020),
+  **Russian 0.970** (ECE 0.011).
+- Coverage-vs-accuracy on the hidden tests (`make coverage-big`), all three
+  operating points feasible: tickets 96.4%@53% / 90.1%@73% / 83.0%@93%;
+  game 94.3%@52% / 86.7%@76% / 80.2%@91%; guard 76.2%@54% / 68.1%@80% /
+  65.8%@90%. Dose-response (`make scale-probe`): 0.603@250 → 0.825@8,400
+  distinct rows — distinct experience keeps paying at scale.
+
+### Milestone 2 — distinct experience beats repeated phrasings (measured)
+- `learn --dedup`: exact-duplicate lessons skipped, auditable via
+  `dedup_skipped` in the learn report.
+- The A/B at EQUAL lesson counts (25,200 each; `make ab-distinct`):
+  **8,400 distinct rows 0.825** (39,158 lanes, 1,898 nodes) vs **1,050 rows
+  re-taught 8× 0.782** (18,633 lanes, 530 nodes). Distinct experience wins
+  and builds a 2.1× denser fabric. B-dedup (duplicates skipped) lands at
+  0.609 with dedup_skipped=22,050 — consistent with the dose-response curve
+  at ~1,000 rows, cross-checking both measurements.
+- `--novelty` per-lesson novelty weighting: measured NEUTRAL at floor 0.90
+  (0.827 vs 0.825 baseline) — ships OFF; dedup is the mechanism that pays.
+
+### Milestone 3 — contradiction handling and machine-auditable evidence
+- Every lane carries an evidence ledger: support events, counter events
+  (anti-Hebbian dissolutions), generation, first/last teach seq, substrate
+  context. `decide --evidence` prints it per channel — e.g. `department`
+  resolved with 62 supporting lanes, top lane `the -> problem` w=0.2896,
+  10,870 support events, seq window [1, 25198].
+- Contradictions (same state+question taught with a different outcome) are
+  DETECTED, counted in the learn report, and recorded — never silently
+  overridden. Live test: teach `a` ×3 then `b` ×3 → decide keeps `a`,
+  `contested: true`, contradiction record carries old/new outcome, both seqs,
+  state hash; lanes show counter events. The ledger is read-only: lane
+  weights drive the field, the ledger never does.
+
+### Milestone 4 — adversarial/OOD suite (`bench --adversarial`, `make adv-big`)
+Deterministic families on the hidden tests, honest per-family metrics:
+- tickets: reorder 0.971, padding 0.968, typos 0.968, intensifiers 0.976,
+  self-contradiction 0.969, negation 0.974, double-negation 0.942 (weakest),
+  near-miss 0.933, cross-domain 0.908; **unknown concepts defer 100%**
+  (zero false confidence — honest silence under attack).
+- Conflicting-lessons attack (40 real contradictions taught post-hoc, with a
+  control arm re-taught at gold to isolate the teach-event cost):
+  silent_override = FALSE on all three domains, contested 40/40, decisions
+  bit-deterministic after. Contradiction-specific damage on untouched rows
+  (tickets): 0.7193 → 0.6517 vs control 0.7027 — the anti-Hebbian law costs
+  ~5.1 pts beyond generic re-teaching, now measured instead of guessed.
+
+### Milestone 5 — multicore settle, batched throughput, the GPU gate
+- CSR mirror of the lane fabric (contiguous offsets/targets/weights, lazily
+  rebuilt, order-preserving — every float sum keeps its exact operand order).
+- OpenMP build (`make omp`, same sources, `-fopenmp`): parallel settle with
+  static partitioning + per-thread scatter buffers combined in fixed thread
+  order. **Bit-identity proven**: `make omp-identity` — sequential and
+  `--threads 2` produce identical routing/calibration/honesty/guardrail
+  blocks at 0.971 on the hidden test. `syfox-test-omp` all-pass.
+- Honest performance note: at this fabric size on a 2-core sandbox the
+  deterministic parallel settle is SLOWER (p50 620 µs vs 415 µs) — thread
+  coordination exceeds the gain below ~10k nodes. It exists for dense
+  fabrics; the numbers say when to use it.
+- Batched multicore throughput (`bench --throughput N`, private engine per
+  worker, checksum proves real work): 2,390 → 3,714 decisions/sec
+  (**1.554×** on 2 cores) on the 3,518-node tickets fabric.
+- GPU gate measured (`make density`): per-fabric density 0.0067 (tickets,
+  3,518 nodes / 82,655 lanes, degree 23.5) — the SoA/CSR layout is in place;
+  a GPU port stays DESIGN-ONLY until substrates are dense enough to justify
+  it. No GPU claims.
+
+### Fixed in v3 (found by running the milestones, not by reading)
+- `si_substrate.hpp`: Substrate class was left unclosed by an interrupted
+  edit (build broken); CSR cache members needed `mutable`.
+- Parallel settle segfault: per-thread scatter buffers were constructed
+  EMPTY (n vectors of size 0) → out-of-bounds combine. Now sized n.
+- `omp-identity`/`throughput`/`density` targets silently measured an EMPTY
+  fabric (missing `--lang auto` on a per-script-routed model) — the "ok"
+  was vacuous. All three now load real substrates; identity re-proven at
+  0.971, throughput checksum non-zero.
+
 ## v2.2.0 — multilingual boundary, trigram bridges, active learning
 
 The language barrier was at the tokenizer: v2.1's byte-level `std::isalnum`

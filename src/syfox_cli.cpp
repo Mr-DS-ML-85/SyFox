@@ -7,8 +7,10 @@
 #include "core/bench.hpp"
 #include "core/gate.hpp"
 #include "core/recall.hpp"
+#include "core/firewall.hpp"
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -16,7 +18,11 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace {
 
@@ -46,6 +52,18 @@ struct Args {
     std::string deferrals;           // decide --log-deferrals FILE.jsonl (active-learning loop)
     std::string out;                 // active --out FILE.jsonl (labeling worksheet)
     long min_count = 1;              // active --min-count N
+    bool dedup = false;              // learn --dedup: skip exact duplicate lessons (M2)
+    bool novelty = false;            // learn --novelty: per-lesson dose by novelty (M2)
+    float novelty_floor = 0.25f;     // learn --novelty-floor F (A/B knob)
+    bool energy_norm = false;        // decide-side energy gain for big-corpus fabrics (M1)
+    bool evidence = false;           // decide --evidence: machine-auditable evidence JSON (M3)
+    bool adversarial = false;        // bench --adversarial: M4 stress suite (read-only)
+    std::string mix;                 // bench --mix FILE: cross-domain vocabulary source (M4)
+    long threads = 0;                // --threads N: OMP settle threads (1 = sequential; 0 = default)
+    long throughput = 0;             // bench --throughput N: batched multicore decisions/sec (M5)
+    long epochs = 1;                 // learn --epochs N: consolidation passes (see lane_decay)
+    long latency_reps = 20;          // bench --latency-reps N (timing repeats per probe)
+    long replays = 2;                // bench --replays N (determinism double-run count)
     bool state_file = false, questions_file = false;
     // SI-faithful selection modes (off by default; never persisted into the model)
     bool salience_gating = false, miller_window = false;
@@ -55,6 +73,15 @@ struct Args {
 // substrate.bin stays untouched, flags live only for this process.
 void apply_modes(syfox::Engine& eng, const Args& a) {
     eng.substrate().set_source_modes(a.salience_gating, a.miller_window);
+    // v3 Milestone 5: --threads N controls deterministic parallel settle on
+    // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
+    // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
+    if (a.threads > 0) {
+#if defined(_OPENMP)
+        omp_set_num_threads(static_cast<int>(a.threads));
+#endif
+        eng.substrate().set_parallel_settle(a.threads != 1);
+    }
 }
 
 std::string read_file(const std::string& path) {
@@ -135,7 +162,30 @@ std::string route_model(const Args& a, const std::string& state_text,
 }
 
 void cmd_learn(const Args& a) {
+    // Milestone-1 firewall: hidden/calibration splits never teach the fabric.
+    if (!syfox::firewall::learn_may_read(a.examples)) {
+        std::cerr << "syfox: firewall: " << a.examples << " is a "
+                  << syfox::firewall::role_name(syfox::firewall::role_of_path(a.examples))
+                  << " split — learn is refused (hidden rows never train, calibrate, "
+                     "derive, or select models)\n";
+        std::exit(2);
+    }
     auto rows = load_jsonl(a.examples);
+    const syfox::LearnPolicy lp{a.dedup, a.novelty, a.novelty_floor};
+    long lessons = 0, skipped = 0;
+    // v3: consolidation passes. The substrate's own forgetting law decays
+    // every lane 0.995x per lesson, so a 25k-lesson SINGLE pass is
+    // recency-truncated (early lanes are decayed away before training ends).
+    // --epochs N re-teaches the same distinct lessons N times — measured on
+    // game/guard hidden tests this recovers early knowledge (deterministically,
+    // unlike accidental incremental accumulation). Distinctness still rules
+    // per lesson: see the Milestone-2 A/B.
+    const std::vector<const sfx::JV*> epoch_rows = [&]() {
+        std::vector<const sfx::JV*> v;
+        for (long e = 0; e < a.epochs; ++e)
+            for (const auto& r : rows) v.push_back(&r);
+        return v;
+    }();
     if (!a.lang.empty()) {
         // v2.2 --lang: route every lesson by its script family into a
         // per-script substrate (<model>-<slug>). Latin gets its own substrate
@@ -156,7 +206,8 @@ void cmd_learn(const Args& a) {
                 ? (a.ngrams_mode == 1) : (g.first != "latin");
             syfox::Engine eng;
             eng.load_model(dir);                              // incremental if exists
-            for (const auto* exp : g.second) {
+            eng.set_context(dir);                             // audit context tag (M3)
+            for (const auto* exp : epoch_rows) {
                 const sfx::JV& qs = exp->at("questions");
                 const sfx::JV& labels = exp->at("labels");
                 const std::string state = exp->at("state").as_str();
@@ -164,53 +215,83 @@ void cmd_learn(const Args& a) {
                     const sfx::JV& q = qkv.second;
                     std::string type = q.at("type").as_str();
                     std::string label = labels.at(qkv.first).as_str();
+                    bool learned = false;
                     if (type == "choice" || type == "score")
                         eng.learn_example(state, q.at("instructions").as_str(),
-                                          outcome_text(q, label), a.augment);
+                                          outcome_text(q, label), a.augment, lp, &learned);
                     else if (type == "noul")
                         eng.learn_noul(state, q.at("instructions").as_str(),
-                                       label == "true", a.augment);
+                                       label == "true", a.augment, lp, &learned);
+                    ++lessons;
+                    if (!learned) ++skipped;
                 }
             }
             eng.save_model(dir);
             routed.push_back(sfx::JV(sfx::JVObj{
                 {"script", sfx::JV(g.first)}, {"model", sfx::JV(dir)},
                 {"lessons", static_cast<double>(g.second.size())},
+                {"dedup_skipped", static_cast<double>(0)},
+                {"contradictions", static_cast<double>(eng.conflicts().size())},
                 {"nodes", static_cast<double>(eng.substrate().node_count())},
                 {"lanes", static_cast<double>(eng.substrate().lane_count())}}));
         }
         std::cout << sfx::JV(sfx::JVObj{
             {"command", sfx::JV("learn")}, {"examples", sfx::JV(a.examples)},
             {"lang", sfx::JV(a.lang)}, {"augment", sfx::JV(a.augment)},
+            {"dedup", sfx::JV(a.dedup)}, {"novelty", sfx::JV(a.novelty)},
+            {"epochs", static_cast<double>(a.epochs)},
+            {"lessons", static_cast<double>(lessons)},
+            {"dedup_skipped", static_cast<double>(skipped)},
             {"routed", sfx::JV(routed)},
             {"note", sfx::JV("lessons routed per script family: one SI substrate per script")}}).dump() << "\n";
         return;
     }
     syfox::Engine eng;
     eng.load_model(a.model);                                    // incremental if model exists
-    for (const auto& ex : rows) {
-        std::string state = ex.at("state").as_str();
-        const sfx::JV& qs = ex.at("questions");
-        const sfx::JV& labels = ex.at("labels");
+    eng.set_context(a.model);                                   // audit context tag (M3)
+    for (const auto* exp : epoch_rows) {
+        std::string state = exp->at("state").as_str();
+        const sfx::JV& qs = exp->at("questions");
+        const sfx::JV& labels = exp->at("labels");
         for (const auto& qkv : qs.obj) {
             const sfx::JV& q = qkv.second;
             std::string type = q.at("type").as_str();
             std::string label = labels.at(qkv.first).as_str();
+            bool learned = false;
             if (type == "choice" || type == "score")
                 eng.learn_example(state, q.at("instructions").as_str(),
-                                  outcome_text(q, label), a.augment);
+                                  outcome_text(q, label), a.augment, lp, &learned);
             else if (type == "noul")
                 eng.learn_noul(state, q.at("instructions").as_str(),
-                               label == "true", a.augment);
+                               label == "true", a.augment, lp, &learned);
+            ++lessons;
+            if (!learned) ++skipped;
         }
     }
     eng.save_model(a.model);
-    std::cout << "syfox: learned " << rows.size() << " lessons -> " << a.model
-              << " (nodes=" << eng.substrate().node_count()
-              << ", lanes=" << eng.substrate().lane_count() << ")\n";
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("learn")}, {"examples", sfx::JV(a.examples)},
+        {"model", sfx::JV(a.model)}, {"augment", sfx::JV(a.augment)},
+        {"dedup", sfx::JV(a.dedup)}, {"novelty", sfx::JV(a.novelty)},
+        {"epochs", static_cast<double>(a.epochs)},
+        {"lessons", static_cast<double>(lessons)},
+        {"dedup_skipped", static_cast<double>(skipped)},
+        {"nodes", static_cast<double>(eng.substrate().node_count())},
+        {"lanes", static_cast<double>(eng.substrate().lane_count())},
+        {"contradictions", static_cast<double>(eng.conflicts().size())},
+        {"note", sfx::JV(a.dedup
+            ? "exact duplicate lessons skipped (Milestone-2 distinct-experience policy)"
+            : "every lesson taught (legacy behavior)")}}).dump() << "\n";
 }
 
 void cmd_calibrate(const Args& a) {
+    // Milestone-1 firewall: the hidden test never sets a calibration scalar.
+    if (!syfox::firewall::calibrate_may_read(a.examples)) {
+        std::cerr << "syfox: firewall: " << a.examples << " is a HIDDEN test split"
+                  << " — calibrate is refused (hidden rows never participate in "
+                     "calibration, training, derivation, or model selection)\n";
+        std::exit(2);
+    }
     // v2.2 --lang: calibrate the substrate the examples route to (fitting a
     // different script's substrate would set scalars on a fabric that never
     // saw the rows — meaningless). Dominant script over the file's states.
@@ -224,6 +305,7 @@ void cmd_calibrate(const Args& a) {
     }
     syfox::Engine eng;
     eng.load_model(model_dir);
+    if (a.energy_norm) eng.set_energy_norm(true);
     auto rows = load_jsonl(a.examples);
     auto calib_rows = eng.harvest_rows(rows);
     // v2.1 (P6): report calibration honestly — MULTI-CLASS ECE on the fit
@@ -305,11 +387,16 @@ void cmd_decide(const Args& a) {
     syfox::Engine eng;
     eng.load_model(model_dir);
     apply_modes(eng, a);
+    if (a.energy_norm) eng.set_energy_norm(true);   // Milestone-1 gain knob
     syfox::Usage u;
     auto answers = eng.decide(state, questions, u);
     u.calibrated = eng.calibration().fitted;   // decide() resets Usage; set after
     sfx::JV out = answers_to_json(answers, u);
     if (!lang_note.empty()) out.obj["lang_note"] = sfx::JV(lang_note);
+    // v3 Milestone 3: machine-auditable evidence — supporting lanes with
+    // provenance, plus any contradiction records for this exact state.
+    if (a.evidence)
+        out.obj["evidence"] = eng.evidence_json(state, questions, answers);
     // v2.2 active-learning loop, step 1: log deferrals for human labeling.
     // Each row carries the state + the FULL question schema, so a labeled
     // row is directly teachable with `syfox learn` — no reconstruction step.
@@ -401,6 +488,9 @@ void cmd_stats(const Args& a) {
     std::cout << sfx::JV(sfx::JVObj{
         {"nodes", static_cast<double>(eng.substrate().node_count())},
         {"lanes", static_cast<double>(eng.substrate().lane_count())},
+        {"fabric_density", std::round(eng.substrate().fabric_density() * 1e6) / 1e6},
+        {"mean_out_degree", std::round(eng.substrate().mean_out_degree() * 1e3) / 1e3},
+        {"parallel_settle", sfx::JV(eng.substrate().parallel_settle_enabled())},
         {"calibrated", sfx::JV(eng.calibration().fitted)},
         {"choice_temperature", eng.calibration().choice_temperature},
         {"noul_a", eng.calibration().noul_a},
@@ -422,6 +512,8 @@ void cmd_stats(const Args& a) {
 void cmd_bench(const Args& a) {
     syfox::Engine eng;
     eng.load_model(a.model);
+    apply_modes(eng, a);                            // --threads (M5 OMP settle), SI modes
+    if (a.energy_norm) eng.set_energy_norm(true);   // Milestone-1 gain knob
     std::string eval_path = !a.eval.empty() ? a.eval : a.examples;
     std::string split_note;
     if (!a.split.empty()) {
@@ -451,6 +543,74 @@ void cmd_bench(const Args& a) {
     }
     auto rows = load_jsonl(eval_path);
     if (rows.empty()) { std::cerr << "syfox: no eval rows in " << eval_path << "\n"; std::exit(2); }
+
+    // v3 Milestone 5 --throughput N: batched multicore decisions over N worker
+    // threads, each owning a PRIVATE engine copy (decisions mutate the field,
+    // so workers never share a substrate). The metric is decisions/sec — a
+    // PERFORMANCE axis, not an accuracy headline: a checksum proves the work
+    // happened, argmaxes are not scored here. Determinism/accuracy numbers
+    // come only from the default sequential (or --threads OMP) runs.
+    if (a.throughput > 0) {
+        const std::size_t T = static_cast<std::size_t>(a.throughput);
+        auto probes = syfox::bench::eval_probes(rows);
+        if (probes.empty()) { std::cerr << "syfox: no probes for throughput\n"; std::exit(2); }
+        // single-thread in-process baseline (same probe order, same machine)
+        long base_count = 0;
+        double base_ck = 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (const auto& p : probes) {
+            syfox::Usage u;
+            auto ans = eng.decide(p.state, p.questions, u);
+            base_ck += ans.empty() ? 0.0 : static_cast<double>(ans[0].confidence);
+            ++base_count;
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        const double base_s = std::chrono::duration<double>(t1 - t0).count();
+        // T workers, round-robin probe assignment, private engine copies
+        std::vector<syfox::Engine> engines(T);
+        for (auto& e : engines) e = eng;
+        std::vector<long> counts(T, 0);
+        std::vector<double> checks(T, 0.0);
+        std::vector<std::thread> workers;
+        const auto p0 = std::chrono::steady_clock::now();
+        for (std::size_t t = 0; t < T; ++t) {
+            workers.emplace_back([&engines, &probes, &counts, &checks, t]() {
+                long c = 0; double ck = 0.0;
+                for (std::size_t i = t; i < probes.size(); i += engines.size()) {
+                    syfox::Usage u;
+                    auto ans = engines[t].decide(probes[i].state, probes[i].questions, u);
+                    ck += ans.empty() ? 0.0 : static_cast<double>(ans[0].confidence);
+                    ++c;
+                }
+                counts[t] = c; checks[t] = ck;
+            });
+        }
+        for (auto& w : workers) w.join();
+        const auto p1 = std::chrono::steady_clock::now();
+        const double par_s = std::chrono::duration<double>(p1 - p0).count();
+        long total = 0; double ck = 0.0;
+        for (std::size_t t = 0; t < T; ++t) { total += counts[t]; ck += checks[t]; }
+        const double base_rate = base_s > 0 ? base_count / base_s : 0.0;
+        const double par_rate  = par_s  > 0 ? total      / par_s  : 0.0;
+        sfx::JVObj o;
+        o["command"] = sfx::JV("bench");
+        o["mode"] = sfx::JV("throughput");
+        o["model"] = sfx::JV(a.model);
+        o["eval_source"] = sfx::JV(eval_path);
+        o["rows"] = static_cast<double>(rows.size());
+        o["decisions"] = static_cast<double>(total);
+        o["workers"] = static_cast<double>(T);
+        o["sequential_decisions_per_sec"] = std::round(base_rate * 10.0) / 10.0;
+        o["batched_decisions_per_sec"] = std::round(par_rate * 10.0) / 10.0;
+        o["speedup"] = std::round((base_rate > 0 ? par_rate / base_rate : 0.0) * 1000.0) / 1000.0;
+        o["work_checksum"] = std::round(ck * 1e6) / 1e6;
+        o["note"] = sfx::JV("performance axis only: workers own private substrates, so "
+                            "per-decision results are not comparable to the sequential "
+                            "residue chain; accuracy headlines come from deterministic runs");
+        if (!a.lang.empty()) o["lang_note"] = sfx::JV("throughput runs the base model; --lang routing is a read-path concern");
+        std::cout << sfx::JV(o).dump() << "\n";
+        return;
+    }
     // v2.2 --lang: route the WHOLE eval to the substrate its dominant script
     // belongs to (per-row re-settling across engines would make the latency
     // axis meaningless). One honest note carries the routing decision.
@@ -461,6 +621,38 @@ void cmd_bench(const Args& a) {
         const std::string model_dir = route_model(a, agg, lang_note, false);
         if (model_dir != a.model) eng.load_model(model_dir);
     }
+    // v3 Milestone 4 --adversarial: the stress suite over the eval rows.
+    // Read-only for the model under test; conflicts run on a throwaway copy.
+    if (a.adversarial) {
+        std::vector<sfx::JV> mix_rows;
+        if (!a.mix.empty()) {
+            mix_rows = load_jsonl(a.mix);
+            if (mix_rows.empty()) {
+                std::cerr << "syfox: no --mix rows in " << a.mix << "\n";
+                std::exit(2);
+            }
+        }
+        const std::string pool_src = a.mix.empty() ? a.model : a.mix;
+        // pool provenance is recorded: builtin per-domain words, or --mix rows
+        const std::vector<std::string> pool = a.mix.empty()
+            ? syfox::bench::adv_builtin_pool(a.model)
+            : syfox::bench::adv_pool_from_rows(mix_rows);
+        auto rep = syfox::bench::adversarial_suite(eng, rows, pool);
+        auto j = rep.to_json();
+        j.obj["command"] = sfx::JV("bench");
+        j.obj["mode"] = sfx::JV("adversarial");
+        j.obj["model"] = sfx::JV(a.model);
+        j.obj["eval_source"] = sfx::JV(eval_path);
+        j.obj["rows"] = static_cast<double>(rows.size());
+        j.obj["pool_source"] = sfx::JV(pool_src);
+        j.obj["pool_words"] = static_cast<double>(pool.size());
+        if (!lang_note.empty()) j.obj["lang_note"] = sfx::JV(lang_note);
+        if (!split_note.empty()) j.obj["eval_split_note"] = sfx::JV(split_note);
+        j.obj["firewall_note"] = sfx::JV("eval rows may be a _hidden split: bench is the "
+                                         "only command allowed to read it, and it never teaches");
+        std::cout << j.dump() << "\n";
+        return;
+    }
     // v2.2 --typos P: the measured typo-robustness claim. Same eval rows,
     // same engine, states deterministically corrupted (deletion / swap /
     // duplication chosen by word hash). Reports BOTH sides + the delta.
@@ -470,6 +662,8 @@ void cmd_bench(const Args& a) {
             if (r.is_obj() && r.has("state"))
                 r.obj["state"] = sfx::JV(syfox::bench::corrupt_state(r.at("state").as_str(), a.typos));
         syfox::bench::BenchConfig bc;
+        bc.latency_reps = static_cast<int>(a.latency_reps);
+        bc.determinism_runs = static_cast<int>(a.replays);
         auto rep_c = syfox::bench::run(eng, rows, eval_path, bc, a.model);
         auto rep_t = syfox::bench::run(eng, corrupted, eval_path, bc, a.model);
         sfx::JVObj o;
@@ -519,6 +713,8 @@ void cmd_bench(const Args& a) {
     }
 
     syfox::bench::BenchConfig bc;
+    bc.latency_reps = static_cast<int>(a.latency_reps);
+    bc.determinism_runs = static_cast<int>(a.replays);
     syfox::bench::BenchReport rep =
         syfox::bench::run(eng, rows,
                           split_note.empty() ? eval_path
@@ -637,6 +833,13 @@ void cmd_derive(const Args& a) {
         // and after; any argmax flip reverts the fabric bit-for-bit.
         // v2.1 (P5): the gate rows are usually the HELD-OUT split, so the
         // report also carries gold-labelled accuracy before/after derivation.
+        // Milestone-1 firewall: hidden rows never steer derivation.
+        if (!syfox::firewall::derive_gate_may_read(a.gate)) {
+            std::cerr << "syfox: firewall: " << a.gate << " is a HIDDEN test split"
+                      << " — derive --gate is refused (hidden rows never participate "
+                         "in derivation or model selection)\n";
+            std::exit(2);
+        }
         auto gate_rows = load_jsonl(a.gate);
         const auto acc_before = syfox::bench::labelled_accuracy(eng, gate_rows);
         std::vector<std::vector<std::string>> replay;
@@ -819,9 +1022,10 @@ void usage_exit() {
         "  syfox promote   --model DIR\n"
         "  syfox analogs   --model DIR --concept WORD\n"
         "  syfox bench     --model DIR (--eval FILE.jsonl | --split train|heldout)\n"
-        "                  [--coverage-curve]   (Jev-parity eval suite; the curve\n"
-        "                                        sweeps tau 0.0->1.0 and reports\n"
-        "                                        coverage %% vs accuracy-within)\n"
+        "                  [--coverage-curve] [--latency-reps N] [--replays N]\n"
+        "                  (Jev-parity eval suite; the curve sweeps tau 0.0->1.0;\n"
+        "                   --latency-reps/--replays size the timing/determinism\n"
+        "                   passes — lower them for fast probes on large evals)\n"
         "  syfox recall    --model DIR --state '...' (--memories FILE.jsonl | --examples FILE.jsonl) [--topk N]\n"
         "  syfox active    --deferrals FILE.jsonl --out FILE.jsonl [--min-count N]\n"
         "  syfox version\neval-split honesty (v2.1): --split heldout scores data/<domain>_heldout.jsonl\n"
@@ -835,11 +1039,46 @@ void usage_exit() {
         "  automatically (typo routing); --ngrams on|off overrides explicitly.\n"
         "variant lessons (v2.2): learn --augment re-teaches paraphrase/variant rows\n"
         "  WITHOUT mass re-deposition (lanes strengthen, acoustic mass unchanged).\n"
+        "distinct-experience policy (v3, Milestone 2): learn --dedup skips exact\n"
+        "  duplicate lessons; learn --novelty scales each lesson's Hebbian dose by\n"
+        "  how much of its vocabulary is new (floor 0.25). Measured: distinct\n"
+        "  experience scales, repetition does not — see the dose-response table.\n"
         "typo robustness (v2.2): bench --typos P corrupts P% of words deterministically\n"
         "  and reports clean vs corrupted accuracy.\n"
         "active learning (v2.2): decide --log-deferrals FILE records every deferral\n"
         "  with its question schema; syfox active turns the log into a labeling\n"
         "  worksheet; label it and re-learn. Deploy -> log -> label -> retrain.\n"
+        "hidden-test firewall (v3): files ending _hidden.jsonl are bench-only —\n"
+        "  learn, calibrate and derive --gate REFUSE them; _cal.jsonl fits\n"
+        "  calibration scalars only. The 70/15/15 splits live in data/big/.\n"
+        "energy normalization (v3, Milestone 1): --energy-norm scales the\n"
+        "  decide-side injection dose by the mean sqrt(mass) of the state's\n"
+        "  known tokens — a measurement gain for big-corpus fabrics where\n"
+        "  acoustic mass would otherwise whisper below the silence floor.\n"
+        "  Off by default; seed-model numbers are unchanged.\n"
+        "auditable evidence (v3, Milestone 3): decide --evidence prints the\n"
+        "  supporting lanes (weight, generation, support/counter events,\n"
+        "  provenance window, context) and any contradiction records for the\n"
+        "  exact state; learn writes conflicts.jsonl + lessons_index.jsonl.\n"
+        "  Contradictory lessons NEVER silently override — they surface.\n"
+        "adversarial suite (v3, Milestone 4): bench --adversarial [--mix FILE]\n"
+        "  runs nine deterministic stress families (reorder, padding, typos,\n"
+        "  intensifiers, self-contradiction, negation, double negation, unknown\n"
+        "  concepts, near-miss / cross-domain) plus a conflicting-lessons attack\n"
+        "  on a throwaway engine copy; reports accuracy, defer rate,\n"
+        "  conf-when-wrong and false-confidence per family.\n"
+        "multicore (v3, Milestone 5): --threads N runs the deterministic\n"
+        "  parallel settle on OMP builds (per-thread scatter buffers combined\n"
+        "  in fixed thread order — bit-identical to sequential, test-verified;\n"
+        "  N=1 forces sequential). bench --throughput N measures batched\n"
+        "  decisions/sec over N workers with private substrates — a\n"
+        "  PERFORMANCE axis, not an accuracy headline. stats prints the fabric\n"
+        "  density / mean out-degree that gate the GPU design (ARCHITECTURE\n"
+        "  S15): no GPU claims without the density gate.\n"
+        "consolidation (v3): learn --epochs N re-teaches the same distinct\n"
+        "  lessons N times — the forgetting law (0.995x per lesson) makes a\n"
+        "  single 25k-lesson pass recency-truncated; N passes recover early\n"
+        "  knowledge deterministically.\n"
         "selection modes (SI-faithful, off by default, not saved into the model):\n"
         "  --salience-gating   rank settle sources by salience (motion history)\n"
         "                      instead of raw energy\n"
@@ -881,7 +1120,19 @@ int main(int argc, char** argv) {
         else if (k == "--out") need(a.out);
         else if (k == "--min-count") { if (i + 1 >= argc) usage_exit(); a.min_count = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--typos") { if (i + 1 >= argc) usage_exit(); a.typos = std::strtof(argv[++i], nullptr); }
+        else if (k == "--latency-reps") { if (i + 1 >= argc) usage_exit(); a.latency_reps = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--replays") { if (i + 1 >= argc) usage_exit(); a.replays = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--augment") a.augment = true;
+        else if (k == "--dedup") a.dedup = true;
+        else if (k == "--novelty") a.novelty = true;
+        else if (k == "--energy-norm") a.energy_norm = true;
+        else if (k == "--evidence") a.evidence = true;
+        else if (k == "--adversarial") a.adversarial = true;
+        else if (k == "--mix") { if (i + 1 >= argc) usage_exit(); a.mix = argv[++i]; }
+        else if (k == "--threads") { if (i + 1 >= argc) usage_exit(); a.threads = std::strtol(argv[++i], nullptr, 10); if (a.threads < 0) usage_exit(); }
+        else if (k == "--throughput") { if (i + 1 >= argc) usage_exit(); a.throughput = std::strtol(argv[++i], nullptr, 10); if (a.throughput < 1) usage_exit(); }
+        else if (k == "--epochs") { if (i + 1 >= argc) usage_exit(); a.epochs = std::strtol(argv[++i], nullptr, 10); if (a.epochs < 1) usage_exit(); }
+        else if (k == "--novelty-floor") { if (i + 1 >= argc) usage_exit(); a.novelty_floor = std::strtof(argv[++i], nullptr); }
         else if (k == "--ngrams") {
             if (i + 1 >= argc) usage_exit();
             const std::string v = argv[++i];

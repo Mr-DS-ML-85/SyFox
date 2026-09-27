@@ -1,0 +1,194 @@
+{
+ "files": {
+  "game_cal.jsonl": {
+   "label_dist": {
+    "dig_in": 395,
+    "fight": 401,
+    "flee": 404
+   },
+   "role": "cal",
+   "rows": 1200,
+   "sha256": "490e6bcf56fb4915c87e0d54b1d49e569c01c2ad2852f34ad1badd52cb331ffa"
+  },
+  "game_hidden.jsonl": {
+   "label_dist": {
+    "dig_in": 395,
+    "fight": 401,
+    "flee": 404
+   },
+   "role": "hidden",
+   "rows": 1200,
+   "sha256": "ae3846dae388ec9ce0455cce91a1f3e6f38834d68efc348162e8c844826eb752"
+  },
+  "game_train.jsonl": {
+   "label_dist": {
+    "dig_in": 1843,
+    "fight": 1874,
+    "flee": 1883
+   },
+   "role": "train",
+   "rows": 5600,
+   "sha256": "2bc821219c0b5227ee59c283ea7e6ed1db842af77b5c42aa534621269ea37c3f"
+  },
+  "guard_cal.jsonl": {
+   "label_dist": {
+    "false": 759,
+    "true": 441
+   },
+   "role": "cal",
+   "rows": 1200,
+   "sha256": "ac6d8cb05ad0e82b0548a7d6188d8c5ba7997b30cf6cb11f1c10915b7943ba1c"
+  },
+  "guard_hidden.jsonl": {
+   "label_dist": {
+    "false": 759,
+    "true": 441
+   },
+   "role": "hidden",
+   "rows": 1200,
+   "sha256": "dc918ae0ee6f0a1de99538c6bfeb899b5fa5f9e5f3d8dceaad39e41b64e141fb"
+  },
+  "guard_train.jsonl": {
+   "label_dist": {
+    "false": 3540,
+    "true": 2060
+   },
+   "role": "train",
+   "rows": 5600,
+   "sha256": "7dfcb4f126542a78f25a11bc1c8c155a6eca1717994e00ed080551d206f86b3a"
+  },
+  "tickets_bn_cal.jsonl": {
+   "label_dist": {
+    "billing": 180,
+    "sales": 183,
+    "technical": 177
+   },
+   "role": "cal",
+   "rows": 540,
+   "sha256": "1e3c0088b596deecc6e6b3c5d89f2766422138ab152e6581f57cd4c724891158"
+  },
+  "tickets_bn_hidden.jsonl": {
+   "label_dist": {
+    "billing": 180,
+    "sales": 183,
+    "technical": 177
+   },
+   "role": "hidden",
+   "rows": 540,
+   "sha256": "7c6594c25e2017d9382e9dfe17570b440013ba92047fc13459b686c6de2ca256"
+  },
+  "tickets_bn_train.jsonl": {
+   "label_dist": {
+    "billing": 842,
+    "sales": 855,
+    "technical": 823
+   },
+   "role": "train",
+   "rows": 2520,
+   "sha256": "dd95f1547ac96918bdf1910dc8758af95f0b20afdb167df2a3b3a25e2fdec46b"
+  },
+  "tickets_en_cal.jsonl": {
+   "label_dist": {
+    "billing": 609,
+    "sales": 593,
+    "technical": 598
+   },
+   "role": "cal",
+   "rows": 1800,
+   "sha256": "98b6926f34a53a3931040df8e08ca5b2f562cca51a8f6979ecb5c9bd448e639a"
+  },
+  "tickets_en_hidden.jsonl": {
+   "label_dist": {
+    "billing": 609,
+    "sales": 593,
+    "technical": 598
+   },
+   "role": "hidden",
+   "rows": 1800,
+   "sha256": "cb09726e773ea29135614184733fdeee95706735c1243206abb396bbe0fabb1e"
+  },
+  "tickets_en_train.jsonl": {
+   "label_dist": {
+    "billing": 2845,
+    "sales": 2767,
+    "technical": 2788
+   },
+   "role": "train",
+   "rows": 8400,
+   "sha256": "4e81ec053cb54ecc166cf1e609009835d31481c9ec917732e257c9474fcba9d2"
+  },
+  "tickets_hi_cal.jsonl": {
+   "label_dist": {
+    "billing": 177,
+    "sales": 186,
+    "technical": 176
+   },
+   "role": "cal",
+   "rows": 539,
+   "sha256": "a4c06e334c1c89a423346ab8f9ab944d083114f12d4204e3badcf42c7b9b3603"
+  },
+  "tickets_hi_hidden.jsonl": {
+   "label_dist": {
+    "billing": 177,
+    "sales": 186,
+    "technical": 176
+   },
+   "role": "hidden",
+   "rows": 539,
+   "sha256": "5b7ef7352e6dfecce96b332d4c77a82127f89c7e02e40970182c36a5a01cae96"
+  },
+  "tickets_hi_train.jsonl": {
+   "label_dist": {
+    "billing": 828,
+    "sales": 870,
+    "technical": 824
+   },
+   "role": "train",
+   "rows": 2522,
+   "sha256": "89236b8425d4e06e37c57c8430d07fdaec7a3a4850cf9c9aa47643a72f826508"
+  },
+  "tickets_ru_cal.jsonl": {
+   "label_dist": {
+    "billing": 183,
+    "sales": 184,
+    "technical": 172
+   },
+   "role": "cal",
+   "rows": 539,
+   "sha256": "41a0dc20eae0ddeeae0e53e07d4d8d781d7488030877ee921ddaff325ea66c71"
+  },
+  "tickets_ru_hidden.jsonl": {
+   "label_dist": {
+    "billing": 183,
+    "sales": 184,
+    "technical": 172
+   },
+   "role": "hidden",
+   "rows": 539,
+   "sha256": "565e4b945f5de92705cfd5e29877acbb8d7e2420bf00983ee80f3f37fb451d1d"
+  },
+  "tickets_ru_train.jsonl": {
+   "label_dist": {
+    "billing": 854,
+    "sales": 862,
+    "technical": 806
+   },
+   "role": "train",
+   "rows": 2522,
+   "sha256": "2c6dbac0ecd7167d8c96deffe5f893fa5ca3700e3f3be3e6f02860d2c131256a"
+  }
+ },
+ "firewall": {
+  "cal": "calibration only (syfox calibrate); never learned from",
+  "hidden": "bench only; NEVER taught, calibrated, derived or used for model selection (enforced in core/firewall.hpp)",
+  "train": "learnable (syfox learn)"
+ },
+ "generator": "tools/gen_corpus.py",
+ "schema": "state/questions/labels (house format, unchanged)",
+ "seed": 20260927,
+ "splits": {
+  "cal": 0.15,
+  "hidden": 0.15,
+  "train": 0.7
+ }
+}

@@ -429,6 +429,109 @@ infrastructure; memory footprint is a binary model directory
 `jev_reference` in each report carries the published figures for side-by-side
 reading; no parity is claimed beyond sharing the axes.
 
+## v3 milestones — scale, distinct experience, provenance, adversarial, multicore
+
+All numbers below come from real runs on this repo (targets in the Makefile,
+raw reports in `build/`, corpus manifest with SHA-256 per file in
+`data/big/MANIFEST.json`). Generator: `tools/gen_corpus.py`, seed 20260927.
+
+### Hidden-test discipline, enforced in code (M1)
+
+`core/firewall.hpp` refuses the splits that must never steer a build:
+`learn` rejects `_hidden`/`_cal` files, `calibrate` rejects `_hidden`,
+`derive --gate` rejects `_hidden`. `make firewall-check` proves all four
+refusals on the live CLI. The corpus (`make models-big`): tickets_en 12,000
+rows, game 8,000, guard 8,000 — each split 70/15/15 into
+train/calibration/hidden, calibration fitting 2–3 scalars on `_cal` only,
+hidden scored once by bench.
+
+Hidden-test results (`make bench-big`, `--energy-norm`):
+
+| domain | hidden accuracy | choice ECE | note |
+|---|---|---|---|
+| tickets_en | **0.971** (n=1800) | 0.005 | p95 441 µs |
+| game | **0.763** (n=1200) | 0.049 | 3-way game verbs |
+| guard | **0.638** (n=1200) | 0.037 | hold precision 0.782, recall 0.910 |
+
+Multilingual hidden splits ≥500 rows each (`make bench-big-ml`):
+**Bengali 0.969** (n=540, ECE 0.015), **Hindi 0.965** (n=539, ECE 0.020),
+**Russian 0.970** (n=539, ECE 0.011) — routed to per-script substrates.
+
+Coverage-vs-accuracy on hidden (`make coverage-big`), all operating points
+feasible: tickets 96.4%@53% / 90.1%@73% / 83.0%@93%; game 94.3%@52% /
+86.7%@76% / 80.2%@91%; guard 76.2%@54% / 68.1%@80% / 65.8%@90%.
+
+### Distinct experience > repeated phrasings — the M2 A/B (measured)
+
+At EQUAL lesson counts (25,200 each; `make ab-distinct`):
+
+| arm | rows | lessons | hidden acc | lanes | nodes |
+|---|---|---|---|---|---|
+| A distinct | 8,400 | 25,200 | **0.825** | 39,158 | 1,898 |
+| B repeated ×8 | 1,050 | 25,200 | 0.782 | 18,633 | 530 |
+| B + `--dedup` | 1,050 | 3,150 | 0.609 | 18,736 | 530 |
+
+Repetition adds almost no lanes (same words, same bridges) — distinct
+experience builds a 2.1× denser fabric and wins by +4.3 pts. B-dedup skips
+exactly 22,050 duplicate lessons (`dedup_skipped` in the report) and its
+accuracy matches the dose-response curve at ~1,000 rows — two independent
+measurements agreeing. `--novelty` weighting measured neutral (0.827 vs
+0.825 at floor 0.90) and ships OFF; dedup is the mechanism that pays.
+
+### Evidence and contradictions (M3)
+
+`decide --evidence` prints a machine-auditable ledger for every channel:
+each supporting lane with weight, generation, support/counter events,
+first/last teach seq, and the substrate that owns it. Example on the big
+tickets model — `department` resolved from 62 supporting lanes, top lane
+`the -> problem` (w=0.2896, 10,870 support events, seq window [1, 25198]).
+
+Contradictions cannot silently override: re-teaching a state with a
+different outcome surfaces `contradictions: N` in the learn report, records
+a contested flag with the old/new outcomes and both seqs, marks counter
+lanes (anti-Hebbian dissolution), and the field keeps whichever binding the
+PHYSICS supports — verified live: teach `a` ×3 then `b` ×3, decide still
+answers `a` with the dispute on the record. The ledger is read-only; lane
+weights drive the field, the ledger never does.
+
+### Adversarial / OOD suite (M4)
+
+`bench --adversarial` (`make adv-big`) runs deterministic perturbation
+families over the hidden tests and reports accuracy, defer rate,
+false-confidence and confidence-when-wrong per family. On tickets:
+reorder 0.971, padding 0.968, typos 0.968, intensifiers 0.976,
+self-contradiction 0.969, negation 0.974, **double-negation 0.942
+(weakest family — known limit)**, near-miss 0.933, cross-domain 0.908 —
+and **unknown concepts defer 100%** (accuracy 0 BY DESIGN: the model
+refuses rather than guesses; false-confidence 0.000).
+
+The conflicting-lessons attack teaches 40 real contradictions into a copy
+of the model, with a control arm re-teaching the same states at gold (same
+teach-event count, no dispute) to isolate contradiction-specific damage:
+**silent_override = false on all three domains**, contested 40/40,
+decisions bit-deterministic afterwards. Untouched-row accuracy on tickets
+moves 0.7193 → 0.6517 under attack vs 0.7027 control — the anti-Hebbian
+law's blast radius is now a measured number (~5.1 pts), not a guess.
+
+### Multicore and the GPU gate (M5)
+
+- CSR mirror: the settle hot path reads contiguous offsets/targets/weights
+  buffers, rebuilt lazily and order-preserving — bit-identical floats.
+- `make omp` builds the same sources with `-fopenmp`. Parallel settle
+  partitions sources statically and combines per-thread scatter buffers in
+  fixed thread order. `make omp-identity` proves sequential == `--threads 2`
+  on the full report (routing/calibration/honesty/guardrail identical at
+  0.971). `syfox-test-omp` passes the whole suite.
+- Honest scaling numbers on this 2-core sandbox: deterministic parallel
+  settle is SLOWER at this fabric size (p50 620 µs vs 415 µs sequential —
+  coordination beats the gain below ~10k nodes); batched throughput with
+  private per-worker engines is FASTER: 2,390 → 3,714 decisions/sec
+  (**1.554×**, `bench --throughput 2`, checksum non-zero).
+- GPU gate (`make density`): tickets fabric 3,518 nodes / 82,655 lanes /
+  density 0.0067 / degree 23.5; game 0.0458; guard 0.0485. The SoA/CSR
+  layout is GPU-shaped; a port happens only when substrates are dense
+  enough to pay for it. Design only — no GPU claims.
+
 ## Recall — associative memory in energy space
 
 `syfox recall` retrieves stored experiences the way the physics allows: settle

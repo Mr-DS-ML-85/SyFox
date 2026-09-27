@@ -37,6 +37,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -47,7 +50,27 @@ namespace si {
 using NodeId = std::uint32_t;
 
 // ---------------------------------------------------------------------------
-// Physics constants — the substrate's constitution.
+// v3 Milestone 3 — the lane evidence ledger (audit surface, NOT physics).
+// A lane's WEIGHT drives the field (settle/readout) exactly as before; the
+// ledger records HOW a lane earned its weight, so every decision can show
+// its evidence and every derived relation can be audited:
+//   support_events  — lessons that strengthened this lane (Hebbian binds)
+//   counter_events  — anti-Hebbian weakenings (disconfirming evidence)
+//   first_seq/last_seq — the teach-event window that touched the lane
+//                        (provenance; full per-lesson ids live in the
+//                        model's conflicts/ledger files)
+//   context         — the engine context tag at last touch (model/domain)
+// The ledger never feeds back into settle/readout: it is bookkeeping over
+// the physics, the way a lab notebook accompanies an experiment.
+// ---------------------------------------------------------------------------
+struct LaneEvidence {
+    std::uint32_t support_events = 0;
+    std::uint32_t counter_events = 0;
+    std::uint64_t first_seq = 0;
+    std::uint64_t last_seq  = 0;
+    std::string   context;
+};
+
 // ---------------------------------------------------------------------------
 struct SubstrateConfig {
     float decay          = 0.82f;  // per-pass energy retention (damping)
@@ -94,6 +117,7 @@ public:
         // energy/sqrt(mass) and Hebbian bind strength scales by 1/sqrt(mass),
         // so heavy concepts move less.
         nodes_.push_back(Node{concept, 1.0f, 0.0f, 0.0f});
+        csr_dirty_ = true;                       // node count changed (M5 CSR mirror)
         return id;
     }
 
@@ -120,9 +144,10 @@ public:
     void add_lane(NodeId a, NodeId b, float w) {
         auto& lanes = out_[a];
         for (auto& l : lanes)
-            if (l.first == b) { l.second = std::min(4.0f, std::max(0.0f, l.second + w)); return; }
+            if (l.first == b) { l.second = std::min(4.0f, std::max(0.0f, l.second + w)); csr_dirty_ = true; return; }
         if (w > 0.0f) {
             lanes.emplace_back(b, w);
+            csr_dirty_ = true;
             if (lanes.size() > cfg_.lane_cap) {          // evict weakest lane
                 auto weakest = std::min_element(lanes.begin(), lanes.end(),
                     [](const auto& x, const auto& y){ return x.second < y.second; });
@@ -140,6 +165,7 @@ public:
             if (lanes[i].first == b) {
                 lanes[i].second = std::max(0.0f, lanes[i].second + dw);
                 if (lanes[i].second <= 0.0f) lanes.erase(lanes.begin() + static_cast<std::ptrdiff_t>(i));
+                csr_dirty_ = true;
                 return;
             }
     }
@@ -187,6 +213,26 @@ public:
         std::vector<float> next(nodes_.size(), 0.0f);
         std::vector<std::size_t> active;
 
+        // M5: build/refresh the CSR mirror if the fabric moved. The build is
+        // order-preserving (per-source vector copied verbatim), so switching
+        // between map iteration and CSR iteration cannot change a single float.
+        if (csr_dirty_) build_csr();
+
+        // M5: parallel-settle buffers. Allocated once per call, reused across
+        // passes. Determinism contract: static schedule partitions sources
+        // into contiguous ascending chunks; per-thread scatter buffers are
+        // combined in ascending thread order; therefore every next[i]
+        // accumulates contributions in ascending SOURCE order — exactly the
+        // sequential order. Bit-identical, test-verified.
+        int nthreads = 1;
+#if defined(_OPENMP)
+        if (parallel_settle_) nthreads = omp_get_max_threads();
+        if (nthreads > static_cast<int>(nodes_.size())) nthreads = nodes_.size() > 0 ? static_cast<int>(nodes_.size()) : 1;
+#endif
+        std::vector<std::vector<float>> thread_bufs(
+            static_cast<std::size_t>(nthreads > 1 ? nthreads : 0),
+            std::vector<float>(nodes_.size(), 0.0f));  // each buffer is n floats, zeroed
+
         // Live source cap (TSDA live_cap lineage): when miller_window is on,
         // the working set is drawn from [source_cap-4, source_cap] each
         // decision instead of being pinned — narrow focus some decisions,
@@ -201,14 +247,16 @@ public:
         }
         last_cap_ = cap;
         const std::size_t cap_n = static_cast<std::size_t>(cap);
+        const std::size_t n = nodes_.size();
         for (int pass = 0; pass < cfg_.k_settle; ++pass) {
             float total_before = 0.0f;
-            for (const auto& n : nodes_) total_before += n.energy;
+            for (const auto& nd : nodes_) total_before += nd.energy;
             if (total_before <= 0.0f) return;             // nothing to settle
 
             std::fill(next.begin(), next.end(), 0.0f);
+            for (auto& tb : thread_bufs) std::fill(tb.begin(), tb.end(), 0.0f);
             active.clear();
-            for (std::size_t i = 0; i < nodes_.size(); ++i)
+            for (std::size_t i = 0; i < n; ++i)
                 if (nodes_[i].energy > 1e-7f) active.push_back(i);
 
             // source gating: at most `cap` sources per pass (ties break by
@@ -222,39 +270,65 @@ public:
                                          : nodes_[a].energy   > nodes_[b].energy; });
                 active.resize(cap_n);
             }
-            std::vector<char> is_source(nodes_.size(), 0);
+            std::vector<char> is_source(n, 0);
             for (std::size_t i : active) is_source[i] = 1;
 
-            for (std::size_t i = 0; i < nodes_.size(); ++i) {
-                const Node& n = nodes_[i];
-                if (n.energy <= 0.0f) continue;
-                if (!is_source[i]) { next[i] += n.energy * cfg_.decay; continue; }  // gated: decay only
-                const auto it = out_.find(static_cast<NodeId>(i));
-                float out_w = 0.0f;
-                if (it != out_.end())
-                    for (const auto& lane : it->second) out_w += lane.second;
-                float retained = (out_w > 0.0f) ? (1.0f - cfg_.diffusion) : 1.0f;
-                next[i] += n.energy * cfg_.decay * retained;   // damped self-retention
-                if (it != out_.end() && out_w > 0.0f) {
-                    float flow = n.energy * cfg_.decay * cfg_.diffusion;
-                    for (const auto& lane : it->second)
-                        next[lane.first] += flow * (lane.second / out_w);
+            // -- diffusion pass (CSR slices; optional deterministic OMP) ----
+#if defined(_OPENMP)
+#pragma omp parallel if (nthreads > 1) num_threads(nthreads)
+#endif
+            {
+                float* mybuf = nullptr;
+#if defined(_OPENMP)
+                const int tid = omp_get_thread_num();
+                if (nthreads > 1) mybuf = thread_bufs[static_cast<std::size_t>(tid)].data();
+#pragma omp for schedule(static)
+#endif
+                for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
+                    const std::size_t i = static_cast<std::size_t>(ii);
+                    const Node& nd = nodes_[i];
+                    if (nd.energy <= 0.0f) continue;
+                    float* scatter = mybuf ? mybuf : next.data();
+                    if (!is_source[i]) { scatter[i] += nd.energy * cfg_.decay; continue; }  // gated: decay only
+                    const std::size_t b = csr_off_[i], e = csr_off_[i + 1];
+                    float out_w = 0.0f;
+                    for (std::size_t k = b; k < e; ++k) out_w += csr_w_[k];
+                    float retained = (out_w > 0.0f) ? (1.0f - cfg_.diffusion) : 1.0f;
+                    scatter[i] += nd.energy * cfg_.decay * retained;   // damped self-retention
+                    if (out_w > 0.0f) {
+                        const float flow = nd.energy * cfg_.decay * cfg_.diffusion;
+                        for (std::size_t k = b; k < e; ++k)
+                            scatter[csr_dst_[k]] += flow * (csr_w_[k] / out_w);
+                    }
                 }
+            }
+            if (nthreads > 1) {                       // fixed thread-order combine
+                for (const auto& tb : thread_bufs)
+                    for (std::size_t i = 0; i < n; ++i) next[i] += tb[i];
             }
             // SI cavity salience integrator: s = tanh(s·decay + gain·|ΔE|).
             // Motion proxy is how much energy moved through the node this
             // pass. Updated before the energies are committed, so the next
-            // pass's source ranking sees it.
-            for (std::size_t i = 0; i < nodes_.size(); ++i) {
+            // pass's source ranking sees it. Element-wise (no accumulation):
+            // parallel-safe without touching the determinism contract.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (nthreads > 1)
+#endif
+            for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
+                const std::size_t i = static_cast<std::size_t>(ii);
                 if (nodes_[i].energy <= 0.0f && next[i] <= 0.0f) continue;
-                float motion = std::fabs(next[i] - nodes_[i].energy);
+                const float motion = std::fabs(next[i] - nodes_[i].energy);
                 nodes_[i].salience = std::tanh(nodes_[i].salience * cfg_.salience_decay
                                              + cfg_.salience_gain * motion);
             }
-            for (std::size_t i = 0; i < nodes_.size(); ++i) nodes_[i].energy = next[i];
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (nthreads > 1)
+#endif
+            for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii)
+                nodes_[ii].energy = next[ii];
 
             float total_after = 0.0f;
-            for (const auto& n : nodes_) total_after += n.energy;
+            for (const auto& nd : nodes_) total_after += nd.energy;
             if (total_before - total_after < cfg_.eps) break;  // relaxed
         }
     }
@@ -361,6 +435,31 @@ public:
         enforce_lane_decay();
     }
 
+    // -- LANE EVIDENCE LEDGER (v3 Milestone 3; bookkeeping, not physics) ------
+    // record_support / record_counter: called by the ENGINE around its teach
+    // events. seq = the engine's monotonic teach counter; context = engine tag.
+    void record_support(NodeId a, NodeId b, std::uint64_t seq, const std::string& context) {
+        LaneEvidence& e = lane_evidence_[lane_key(a, b)];
+        ++e.support_events;
+        e.last_seq = seq;
+        if (e.first_seq == 0) e.first_seq = seq;
+        e.context = context;
+    }
+    void record_counter(NodeId a, NodeId b, std::uint64_t seq, const std::string& context) {
+        LaneEvidence& e = lane_evidence_[lane_key(a, b)];
+        ++e.counter_events;
+        e.last_seq = seq;
+        if (e.first_seq == 0) e.first_seq = seq;
+        e.context = context;
+    }
+    bool evidence_of(NodeId a, NodeId b, LaneEvidence& out) const {
+        auto it = lane_evidence_.find(lane_key(a, b));
+        if (it == lane_evidence_.end()) return false;
+        out = it->second;
+        return true;
+    }
+    std::size_t evidence_count() const { return lane_evidence_.size(); }
+
     // -- persistence (binary, deterministic) -------------------------------------
     void save(const std::string& path) const {
         std::ofstream f(path, std::ios::binary);
@@ -391,12 +490,29 @@ public:
             f.write(reinterpret_cast<const char*>(&b), 4);
             f.write(reinterpret_cast<const char*>(&kv.second), 4);
         }
+        // v3 evidence tail — v2 files end here; load() detects EOF.
+        std::uint32_t ec = static_cast<std::uint32_t>(lane_evidence_.size());
+        f.write(reinterpret_cast<const char*>(&ec), 4);
+        for (const auto& kv : lane_evidence_) {
+            std::uint32_t a = static_cast<std::uint32_t>(kv.first >> 32);
+            std::uint32_t b = static_cast<std::uint32_t>(kv.first & 0xffffffffull);
+            f.write(reinterpret_cast<const char*>(&a), 4);
+            f.write(reinterpret_cast<const char*>(&b), 4);
+            f.write(reinterpret_cast<const char*>(&kv.second.support_events), 4);
+            f.write(reinterpret_cast<const char*>(&kv.second.counter_events), 4);
+            f.write(reinterpret_cast<const char*>(&kv.second.first_seq), 8);
+            f.write(reinterpret_cast<const char*>(&kv.second.last_seq), 8);
+            std::uint32_t clen = static_cast<std::uint32_t>(kv.second.context.size());
+            f.write(reinterpret_cast<const char*>(&clen), 4);
+            if (clen) f.write(kv.second.context.data(), clen);
+        }
     }
 
     void load(const std::string& path) {
         std::ifstream f(path, std::ios::binary);
         if (!f) return;
         nodes_.clear(); index_.clear(); out_.clear();
+        csr_dirty_ = true;
         std::uint32_t n = 0; f.read(reinterpret_cast<char*>(&n), 4);
         nodes_.reserve(n);
         for (std::uint32_t i = 0; i < n; ++i) {
@@ -425,6 +541,27 @@ public:
                 derived_gen_.emplace(lane_key(static_cast<NodeId>(a), static_cast<NodeId>(b)), g);
             }
         }
+        // v3 evidence tail (optional): v2 files hit EOF here and stay clean.
+        std::uint32_t ec = 0;
+        if (f.read(reinterpret_cast<char*>(&ec), 4)) {
+            for (std::uint32_t i = 0; i < ec; ++i) {
+                std::uint32_t a = 0, b = 0, sup = 0, cnt = 0, clen = 0;
+                std::uint64_t fs = 0, ls = 0;
+                if (!f.read(reinterpret_cast<char*>(&a), 4)) break;
+                if (!f.read(reinterpret_cast<char*>(&b), 4)) break;
+                if (!f.read(reinterpret_cast<char*>(&sup), 4)) break;
+                if (!f.read(reinterpret_cast<char*>(&cnt), 4)) break;
+                if (!f.read(reinterpret_cast<char*>(&fs), 8)) break;
+                if (!f.read(reinterpret_cast<char*>(&ls), 8)) break;
+                if (!f.read(reinterpret_cast<char*>(&clen), 4)) break;
+                std::string ctx(clen, '\0');
+                if (clen && !f.read(ctx.data(), clen)) break;
+                LaneEvidence e;
+                e.support_events = sup; e.counter_events = cnt;
+                e.first_seq = fs; e.last_seq = ls; e.context = ctx;
+                lane_evidence_[lane_key(static_cast<NodeId>(a), static_cast<NodeId>(b))] = e;
+            }
+        }
     }
 
     const SubstrateConfig& config() const { return cfg_; }
@@ -451,6 +588,7 @@ public:
             if (l.first == b) {
                 if (w <= 0.0f) { dissolve_lane(a, b); return; }
                 l.second = std::min(4.0f, w);
+                csr_dirty_ = true;
                 // keep symmetry: the mirror lane tracks the same evidence
                 auto mit = out_.find(b);
                 if (mit != out_.end())
@@ -473,6 +611,7 @@ public:
         if (mit != out_.end()) erase_one(mit->second, a);
         derived_gen_.erase(lane_key(a, b));
         derived_gen_.erase(lane_key(b, a));
+        csr_dirty_ = true;
     }
 
     std::uint32_t generation_of(NodeId a, NodeId b) const {
@@ -526,6 +665,7 @@ public:
         for (std::size_t a = 0; a < snap.adj.size(); ++a)
             if (!snap.adj[a].empty()) out_[static_cast<NodeId>(a)] = snap.adj[a];
         derived_gen_ = snap.gen;
+        csr_dirty_ = true;
     }
 
     void lanes_of(NodeId a, std::vector<std::pair<NodeId, float>>& out_lanes) const {
@@ -565,12 +705,13 @@ private:
         auto& lanes = out_[a];
         for (auto& l : lanes) {
             if (l.first == b) {
-                if (w > l.second) l.second = std::min(4.0f, w);
+                if (w > l.second) { l.second = std::min(4.0f, w); csr_dirty_ = true; }
                 derived_gen_.emplace(lane_key(a, b), gen);  // keep first (lowest) grade
                 return;
             }
         }
         lanes.emplace_back(b, w);
+        csr_dirty_ = true;
         derived_gen_.emplace(lane_key(a, b), gen);
         if (lanes.size() > cfg_.lane_cap) {              // evict weakest lane
             auto weakest = std::min_element(lanes.begin(), lanes.end(),
@@ -583,6 +724,7 @@ private:
     void enforce_lane_decay() {
         for (auto& kv : out_)
             for (auto& l : kv.second) l.second *= cfg_.lane_decay;
+        csr_dirty_ = true;
     }
 
     SubstrateConfig cfg_;
@@ -591,8 +733,70 @@ private:
     std::unordered_map<NodeId, std::vector<std::pair<NodeId, float>>> out_;
     // Derivation provenance: lane key -> generation (sparse; observed lanes absent = 0)
     std::unordered_map<std::uint64_t, std::uint32_t> derived_gen_;
+    // v3 Milestone 3: audit ledger (support/counter events, provenance window)
+    std::unordered_map<std::uint64_t, LaneEvidence> lane_evidence_;
     std::uint64_t state_hash_ = 0;   // decision fingerprint for Miller sampling
     float last_cap_ = 0.0f;          // cap used by the last settle()
+
+    // -- M5: CSR MIRROR of the out-lane fabric (settle hot path) -------------
+    // Flattened contiguous buffers (offsets + targets + weights) built lazily
+    // from out_ and invalidated by every lane/node mutation above. The build
+    // copies each source's lane vector VERBATIM, so per-source iteration order
+    // is exactly the map order settle() used before: every float sum keeps its
+    // exact operand order and results stay bit-identical. This is the
+    // cache-friendly layout the GPU design generalizes (ARCHITECTURE.md S15).
+    // mutable: a lazy cache — logically const rebuild inside const settle paths.
+    mutable std::vector<std::size_t> csr_off_;   // nodes_.size()+1
+    mutable std::vector<NodeId>      csr_dst_;
+    mutable std::vector<float>       csr_w_;
+    mutable bool csr_dirty_ = true;
+    bool parallel_settle_ = true;        // OMP builds honor this; sequential builds ignore it
+
+    void build_csr() const {
+        const std::size_t n = nodes_.size();
+        csr_off_.assign(n + 1, 0);
+        for (std::size_t i = 0; i < n; ++i) {
+            auto it = out_.find(static_cast<NodeId>(i));
+            csr_off_[i + 1] = csr_off_[i] + (it == out_.end() ? 0 : it->second.size());
+        }
+        csr_dst_.resize(csr_off_[n]);
+        csr_w_.resize(csr_off_[n]);
+        for (std::size_t i = 0; i < n; ++i) {
+            auto it = out_.find(static_cast<NodeId>(i));
+            if (it == out_.end()) continue;
+            std::size_t k = csr_off_[i];
+            for (const auto& lane : it->second) {
+                csr_dst_[k] = lane.first;
+                csr_w_[k]   = lane.second;
+                ++k;
+            }
+        }
+        csr_dirty_ = false;
+    }
+
+public:
+    // parallel settle toggle (M5): on OMP builds, >1 threads use per-thread
+    // scatter buffers combined in fixed thread order — bit-identical to the
+    // sequential path (test-verified). Off builds always run sequential.
+    void set_parallel_settle(bool on) { parallel_settle_ = on; }
+    bool parallel_settle_enabled() const {
+#if defined(_OPENMP)
+        return parallel_settle_;
+#else
+        return false;
+#endif
+    }
+    // fabric density for the GPU-gate report (M5): edges / possible directed
+    // edges, plus mean out-degree. Pure measurements, no claims.
+    double fabric_density() const {
+        const double n = static_cast<double>(nodes_.size());
+        if (n < 2.0) return 0.0;
+        return static_cast<double>(lane_count()) / (n * (n - 1.0));
+    }
+    double mean_out_degree() const {
+        const double n = static_cast<double>(nodes_.size());
+        return n > 0.0 ? static_cast<double>(lane_count()) / n : 0.0;
+    }
 };
 
 // ---------------------------------------------------------------------------

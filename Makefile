@@ -8,13 +8,22 @@ all: build/syfox build/syfox-test build/libsyfox_core.so
 build:
 	mkdir -p build
 
-CORE_HDRS := core/syfox.hpp core/si_substrate.hpp core/normalize.hpp core/ngram.hpp core/script.hpp core/derive.hpp core/bench.hpp core/gate.hpp core/recall.hpp core/json.hpp
+CORE_HDRS := core/syfox.hpp core/si_substrate.hpp core/normalize.hpp core/ngram.hpp core/script.hpp core/derive.hpp core/bench.hpp core/gate.hpp core/recall.hpp core/json.hpp core/firewall.hpp
 
 build/syfox: src/syfox_cli.cpp $(CORE_HDRS) | build
 	$(CXX) $(CXXFLAGS) -I. $< -o $@
 
 build/syfox-test: src/syfox_test.cpp $(CORE_HDRS) | build
 	$(CXX) $(CXXFLAGS) -I. $< -o $@
+
+# v3 Milestone 5: deterministic parallel-settle build (OpenMP, fixed
+# reduction order). Bit-identical to the sequential build by construction and
+# by test (syfox-test-omp proves it on the probe fabric).
+build/syfox-omp: src/syfox_cli.cpp $(CORE_HDRS) | build
+	$(CXX) $(CXXFLAGS) -fopenmp -I. $< -o $@
+
+build/syfox-test-omp: src/syfox_test.cpp $(CORE_HDRS) | build
+	$(CXX) $(CXXFLAGS) -fopenmp -I. $< -o $@
 
 build/libsyfox_core.so: src/syfox_core.cpp $(CORE_HDRS) | build
 	$(CXX) $(CXXFLAGS) -fPIC -shared -I. $< -o $@
@@ -184,4 +193,134 @@ serve: build/syfox models
 clean:
 	rm -rf build
 
-.PHONY: all models models-augmented models-vast models-vast-full models-multilingual bench-multilingual typos bench-extra heldout-gate test bench bench-heldout coverage demo serve clean
+.PHONY: all models models-augmented models-vast models-vast-full models-multilingual bench-multilingual typos bench-extra heldout-gate test bench bench-heldout coverage demo serve omp adv-big throughput density clean
+
+# ---------------------------------------------------------------------------
+# v3 Milestone 1 — big-corpus models (data/big, 70/15/15 splits).
+#   learn    reads ONLY *_train.jsonl   (firewall refuses _cal/_hidden)
+#   calibrate fits on *_cal.jsonl       (firewall refuses _hidden)
+#   hidden   scored by bench-big only   (never taught/calibrated/derived)
+# Milestone-2 policy: --dedup skips exact duplicate lessons (auditable via
+# dedup_skipped; 0 on the distinct corpus). --novelty measured slightly
+# negative at floor 0.25 (-1.0pt), neutral at 0.90 — ships OFF; the A/B
+# target below reproduces the measurement.
+# ---------------------------------------------------------------------------
+models-big: build/syfox
+	rm -rf model-tickets-big model-tickets-big-latin model-tickets-big-bengali \
+	        model-tickets-big-devanagari model-tickets-big-cyrillic \
+	        model-game-big model-game-big-latin model-guard-big model-guard-big-latin
+	./build/syfox learn --ngrams on --dedup --lang auto --model model-tickets-big --examples data/big/tickets_en_train.jsonl
+	./build/syfox learn --ngrams on --dedup --lang auto --model model-game-big --examples data/big/game_train.jsonl
+	./build/syfox learn --ngrams on --dedup --lang auto --model model-guard-big --examples data/big/guard_train.jsonl
+	./build/syfox calibrate --energy-norm --lang auto --model model-tickets-big --examples data/big/tickets_en_cal.jsonl
+	./build/syfox calibrate --energy-norm --lang auto --model model-game-big --examples data/big/game_cal.jsonl
+	./build/syfox calibrate --energy-norm --lang auto --model model-guard-big --examples data/big/guard_cal.jsonl
+
+# Bengali / Hindi / Russian substrates (routed per script family); each
+# hidden split carries 540 rows (>= the 500 the milestone requires).
+models-big-ml: models-big
+	./build/syfox learn --lang auto --dedup --model model-tickets-big --examples data/big/tickets_bn_train.jsonl
+	./build/syfox learn --lang auto --dedup --model model-tickets-big --examples data/big/tickets_hi_train.jsonl
+	./build/syfox learn --lang auto --dedup --model model-tickets-big --examples data/big/tickets_ru_train.jsonl
+	./build/syfox calibrate --energy-norm --lang auto --model model-tickets-big --examples data/big/tickets_bn_cal.jsonl
+	./build/syfox calibrate --energy-norm --lang auto --model model-tickets-big --examples data/big/tickets_hi_cal.jsonl
+	./build/syfox calibrate --energy-norm --lang auto --model model-tickets-big --examples data/big/tickets_ru_cal.jsonl
+
+# Milestone-1 headline: HIDDEN-TEST report, full timing/determinism settings.
+bench-big: models-big
+	./build/syfox bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl | tee build/bench-hidden-tickets-en.json
+	./build/syfox bench --energy-norm --lang auto --model model-game-big --eval data/big/game_hidden.jsonl | tee build/bench-hidden-game.json
+	./build/syfox bench --energy-norm --lang auto --model model-guard-big --eval data/big/guard_hidden.jsonl | tee build/bench-hidden-guard.json
+
+bench-big-ml: models-big-ml
+	./build/syfox bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_bn_hidden.jsonl | tee build/bench-hidden-tickets-bn.json
+	./build/syfox bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_hi_hidden.jsonl | tee build/bench-hidden-tickets-hi.json
+	./build/syfox bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_ru_hidden.jsonl | tee build/bench-hidden-tickets-ru.json
+
+# Coverage-vs-accuracy on the hidden tests (the headline metric).
+coverage-big: models-big
+	./build/syfox bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl --coverage-curve | tee build/coverage-hidden-tickets-en.txt
+	./build/syfox bench --energy-norm --lang auto --model model-game-big --eval data/big/game_hidden.jsonl --coverage-curve | tee build/coverage-hidden-game.txt
+	./build/syfox bench --energy-norm --lang auto --model model-guard-big --eval data/big/guard_hidden.jsonl --coverage-curve | tee build/coverage-hidden-guard.txt
+
+# ---------------------------------------------------------------------------
+# v3 Milestone 2 — the distinct-vs-repeated A/B (equal lesson counts).
+#   A: 8,400 distinct rows (25,200 lessons)      -> hidden choice acc
+#   B: 1,050 rows re-taught 8x (25,200 lessons)  -> hidden choice acc
+#   B-dedup: the same file with duplicate lessons skipped (dedup_skipped
+#   reports 7/8 of B's lessons as zero-information).
+# ---------------------------------------------------------------------------
+ab-distinct: build/syfox
+	@head -n 1050 data/big/tickets_en_train.jsonl > build/ab-repeat-src.jsonl
+	@for i in 1 2 3 4 5 6 7 8; do cat build/ab-repeat-src.jsonl; done > build/ab-repeat.jsonl
+	rm -rf model-ab
+	./build/syfox learn --ngrams on --dedup --model model-ab --examples data/big/tickets_en_train.jsonl | tee build/ab-A-learn.json
+	./build/syfox calibrate --model model-ab --examples data/big/tickets_en_cal.jsonl > /dev/null
+	./build/syfox bench --model model-ab --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 | tee build/ab-A-distinct.json
+	rm -rf model-ab
+	./build/syfox learn --ngrams on --model model-ab --examples build/ab-repeat.jsonl | tee build/ab-B-learn.json
+	./build/syfox calibrate --model model-ab --examples data/big/tickets_en_cal.jsonl > /dev/null
+	./build/syfox bench --model model-ab --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 | tee build/ab-B-repeated.json
+	rm -rf model-ab
+	./build/syfox learn --ngrams on --dedup --model model-ab --examples build/ab-repeat.jsonl | tee build/ab-Bd-learn.json
+	./build/syfox calibrate --model model-ab --examples data/big/tickets_en_cal.jsonl > /dev/null
+	./build/syfox bench --model model-ab --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 | tee build/ab-B-dedup.json
+	rm -rf model-ab build/ab-repeat-src.jsonl
+	@echo "A/B complete: build/ab-A-distinct.json vs ab-B-repeated.json vs ab-B-dedup.json"
+
+# Milestone-1b: the dose-response probe (does distinct experience scale?).
+scale-probe: build/syfox
+	tools/scale_probe.sh
+
+# Milestone-1: prove the firewall refuses hidden/calibration reads.
+firewall-check: build/syfox
+	@! ./build/syfox learn --model model-x --examples data/big/tickets_en_hidden.jsonl 2>/dev/null
+	@echo "ok  learn refuses _hidden"
+	@! ./build/syfox learn --model model-x --examples data/big/tickets_en_cal.jsonl 2>/dev/null
+	@echo "ok  learn refuses _cal"
+	@! ./build/syfox calibrate --model model-x --examples data/big/tickets_en_hidden.jsonl 2>/dev/null
+	@echo "ok  calibrate refuses _hidden"
+	@! ./build/syfox derive --model model-tickets --gate data/big/game_hidden.jsonl 2>/dev/null
+	@echo "ok  derive --gate refuses _hidden"
+
+# ---------------------------------------------------------------------------
+# v3 Milestone 4 — the adversarial suite on the big hidden tests.
+#   Deterministic stress families + conflicting-lessons attack; honest
+#   per-family metrics (accuracy / defer / conf-when-wrong / false-conf).
+# ---------------------------------------------------------------------------
+adv-big: build/syfox
+	./build/syfox bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl --adversarial | tee build/adv-tickets.json
+	./build/syfox bench --energy-norm --lang auto --model model-game-big --eval data/big/game_hidden.jsonl --adversarial | tee build/adv-game.json
+	./build/syfox bench --energy-norm --lang auto --model model-guard-big --eval data/big/guard_hidden.jsonl --adversarial | tee build/adv-guard.json
+
+# ---------------------------------------------------------------------------
+# v3 Milestone 5 — multicore: deterministic OMP settle + batched throughput.
+#   omp          builds the -fopenmp binaries (same sources, no code forks)
+#   omp-identity proves parallel settle == sequential settle BIT-IDENTICAL
+#   throughput   batched decisions/sec, 1 worker vs N workers (private
+#                substrates per worker; performance axis, not accuracy)
+#   density      the measured GPU gate (nodes / lanes / density / degree)
+# ---------------------------------------------------------------------------
+omp: build/syfox-omp build/syfox-test-omp
+
+omp-identity: omp models-big
+	@./build/syfox     bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 | python3 -c "import json,sys; print(json.load(sys.stdin)['routing']['choice_accuracy'])" > build/omp-seq-acc.txt
+	@./build/syfox-omp bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 --threads 2 | python3 -c "import json,sys; print(json.load(sys.stdin)['routing']['choice_accuracy'])" > build/omp-par-acc.txt
+	@./build/syfox-omp bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 --threads 2 > build/omp-par-full.json
+	@./build/syfox     bench --energy-norm --lang auto --model model-tickets-big --eval data/big/tickets_en_hidden.jsonl --latency-reps 1 --replays 0 > build/omp-seq-full.json
+	@python3 tools/check_omp_identity.py
+
+throughput: build/syfox models-big
+	@# NOTE: the BASE model dir holds only routing state (--lang auto teaches
+	@# into <model>-<script> dirs), so throughput must load a real substrate:
+	@# model-tickets-big-latin. workers own private engine copies; the metric
+	@# is decisions/sec (checksum non-zero proves real decisions ran).
+	./build/syfox bench --energy-norm --model model-tickets-big-latin --eval data/big/tickets_en_hidden.jsonl --throughput 2 | tee build/throughput-tickets.json
+
+density: build/syfox models-big
+	@echo "GPU gate (design only — no GPU in this sandbox):"
+	@echo "per-script substrate fabrics (--lang auto routes lessons into"
+	@echo "<model>-<script>; the base dir holds only routing state):"
+	@ls -d model-*-big-* 2>/dev/null | while read d; do \
+	        ./build/syfox stats --model "$$d" | python3 -c "import json,sys; d=json.load(sys.stdin); print('%6d nodes %7d lanes density=%.5f degree=%.2f  %s' % (d.get('nodes',0), d.get('lanes',0), d.get('fabric_density',0), d.get('mean_out_degree',0), sys.argv[1]))" "$$d"; \
+	done

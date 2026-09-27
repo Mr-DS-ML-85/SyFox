@@ -94,3 +94,38 @@
       makes every number mean more without code changes.
 - [ ] Character n-gram concept lanes (carried from v0.2): typo robustness —
       now measurable on the held-out split.
+
+## v3.0 — milestones 1–5 (this release)
+- [x] M1 large held-out datasets: deterministic generator (seed 20260927),
+      12k/8k/8k rows per domain at 70/15/15 train/cal/hidden; hidden test
+      quarantined by core/firewall.hpp (learn/calibrate/derive--gate refuse
+      it — `make firewall-check`); hidden reports tickets 0.971 (ECE 0.005),
+      game 0.763 (ECE 0.049), guard 0.638 (ECE 0.037); Bengali 0.969 /
+      Hindi 0.965 / Russian 0.970 on hidden splits of 540/539/539; coverage
+      curves feasible at all three operating points on every domain.
+- [x] M2 distinct experience: `--dedup` (auditable `dedup_skipped`);
+      A/B at equal lesson counts — 8,400 distinct rows 0.825 vs 1,050 rows
+      ×8 repeats 0.782, with 2.1× the lanes; novelty weighting measured
+      neutral and shipped OFF.
+- [x] M3 contradiction + provenance: per-lane evidence ledger (support /
+      counter events, generation, seq window, context) persisted and
+      projected by `decide --evidence`; contradictions detected, recorded,
+      never silently overriding (adversarial suite: silent_override=false
+      on all domains).
+- [x] M4 adversarial/OOD suite: `bench --adversarial` with deterministic
+      families (reorder, padding, typos, intensifiers, self-contradiction,
+      negation, double negation, unknown concepts, near-miss, cross-domain,
+      conflicting lessons) and per-family accuracy / defer / false-conf /
+      conf-when-wrong. Weakest family documented (double negation).
+- [x] M5 multicore → GPU gate: CSR mirror (order-preserving, bit-identical),
+      OpenMP deterministic parallel settle PROVEN bit-identical
+      (`make omp-identity` at 0.971), batched throughput 1.554× on 2 cores
+      with private per-worker engines, GPU gate measured per fabric
+      (`make density`) and a port kept design-only until substrates are
+      dense enough. `--deterministic` and `--throughput` modes both
+      preserved.
+- [ ] GPU port proper: gated on fabric density (see `make density`); the
+      SoA/CSR layout is the only GPU-specific preparation in the core.
+- [ ] Guard-domain deepening: hold precision 0.782 has headroom; the
+      contradiction blast-radius measurement (~5.1 pts on tickets) suggests
+      curriculum ordering (teach disputes late) as a measurable lever.

@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SyFox — the open System One decision engine</title>
+<meta name="description" content="SyFox: a dependency-free C++ decision engine running on SI substrate physics. No transformer, no neural network, no pattern matching — decisions collapse out of dynamics. Hidden-test verified, bit-deterministic, 100+ languages.">
+<meta property="og:title" content="SyFox — decisions that collapse out of physics">
+<meta property="og:description" content="Open System One decision engine on SI substrate physics. Hidden-test verified, bit-deterministic, 100+ languages.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="%23ffb56b"/><stop offset="1" stop-color="%23ff6d3f"/></linearGradient></defs><polygon points="24,44 5,25 9,4 21,15 27,15 39,4 43,25" fill="url(%23g)"/><circle cx="17" cy="26" r="2.4" fill="%23070b18"/><circle cx="31" cy="26" r="2.4" fill="%23070b18"/><polygon points="24,31 20,35 24,38 28,35" fill="%23070b18"/></svg>'>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#070b18;
+  --bg2:#0a1024;
+  --ink:#eef2ff;
+  --ink-dim:#9aa7c7;
+  --ink-faint:#5d6a8e;
+  --fox:#ff6d3f;
+  --fox2:#ffb56b;
+  --cyan:#37e0f5;
+  --violet:#8b7bff;
+  --mint:#4ade9e;
+  --glass:rgba(255,255,255,.055);
+  --glass-hi:rgba(255,255,255,.10);
+  --stroke:rgba(255,255,255,.115);
+  --radius:18px;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --disp:'Space Grotesk','Inter',sans-serif;
+  --body:'Inter',system-ui,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.65;
+  overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:rgba(255,109,63,.35);color:#fff}
+::-webkit-scrollbar{width:10px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:8px;border:2px solid var(--bg)}
+
+/* aurora */
+.sky{position:fixed;inset:0;z-index:-2;overflow:hidden;background:
+  radial-gradient(ellipse 120% 70% at 50% -20%, #101a3a 0%, var(--bg) 55%)}
+.orb{position:absolute;border-radius:50%;filter:blur(90px);opacity:.55;will-change:transform}
+.orb.o1{width:620px;height:620px;left:-140px;top:-160px;background:radial-gradient(circle at 35% 35%,rgba(124,58,237,.55),transparent 65%);animation:drift1 26s ease-in-out infinite alternate}
+.orb.o2{width:540px;height:540px;right:-120px;top:6%;background:radial-gradient(circle at 40% 40%,rgba(34,211,238,.38),transparent 65%);animation:drift2 31s ease-in-out infinite alternate}
+.orb.o3{width:700px;height:700px;left:28%;top:56%;background:radial-gradient(circle at 45% 45%,rgba(255,109,63,.30),transparent 62%);animation:drift3 36s ease-in-out infinite alternate}
+.orb.o4{width:460px;height:460px;right:14%;bottom:-8%;background:radial-gradient(circle at 45% 45%,rgba(139,123,255,.34),transparent 65%);animation:drift1 29s ease-in-out infinite alternate-reverse}
+@keyframes drift1{from{transform:translate(0,0) scale(1)}to{transform:translate(70px,46px) scale(1.12)}}
+@keyframes drift2{from{transform:translate(0,0) scale(1)}to{transform:translate(-64px,58px) scale(.92)}}
+@keyframes drift3{from{transform:translate(0,0) scale(1)}to{transform:translate(52px,-60px) scale(1.08)}}
+.grid-overlay{position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:linear-gradient(rgba(255,255,255,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px);
+  background-size:56px 56px;
+  -webkit-mask-image:radial-gradient(ellipse 90% 62% at 50% 0%,#000 30%,transparent 78%);
+          mask-image:radial-gradient(ellipse 90% 62% at 50% 0%,#000 30%,transparent 78%);
+}
+
+/* glass */
+.glass{
+  background:linear-gradient(135deg,var(--glass-hi),var(--glass));
+  -webkit-backdrop-filter:blur(22px) saturate(160%);
+  backdrop-filter:blur(22px) saturate(160%);
+  border:1px solid var(--stroke);
+  border-radius:var(--radius);
+  box-shadow:0 10px 40px rgba(2,5,16,.45),inset 0 1px 0 rgba(255,255,255,.09);
+}
+@supports not (backdrop-filter:blur(1px)){
+  .glass{background:rgba(14,20,42,.88)}
+}
+
+/* layout */
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px}
+section{padding:100px 0}
+.eyebrow{font-family:var(--mono);font-size:.75rem;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:var(--cyan);display:inline-flex;align-items:center;gap:10px;margin-bottom:18px}
+.eyebrow::before{content:"";width:26px;height:1px;background:linear-gradient(90deg,var(--cyan),transparent)}
+h2{font-family:var(--disp);font-size:clamp(1.9rem,3.6vw,2.85rem);font-weight:700;line-height:1.14;letter-spacing:-.02em;margin-bottom:18px}
+h2 .grad,.grad{background:linear-gradient(92deg,var(--fox2),var(--fox) 55%,#ff4f8b);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
+.lead{color:var(--ink-dim);max-width:640px;font-size:1.06rem}
+.sub{color:var(--ink-dim);font-size:.95rem}
+
+/* nav */
+nav{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:50;width:min(1120px,calc(100% - 32px));border-radius:16px;padding:12px 22px;display:flex;align-items:center;gap:26px;transition:box-shadow .3s,background .3s}
+nav.scrolled{box-shadow:0 14px 44px rgba(2,5,16,.6)}
+.brand{display:flex;align-items:center;gap:11px;text-decoration:none;color:var(--ink);font-family:var(--disp);font-weight:700;font-size:1.14rem;letter-spacing:-.01em}
+.brand svg{width:30px;height:30px;filter:drop-shadow(0 2px 10px rgba(255,109,63,.45))}
+.brand .ver{font-family:var(--mono);font-size:.62rem;font-weight:600;color:var(--fox2);background:rgba(255,109,63,.12);border:1px solid rgba(255,109,63,.3);padding:2.5px 8px;border-radius:99px;letter-spacing:.06em}
+.nav-links{display:flex;gap:24px;margin-left:auto}
+.nav-links a{color:var(--ink-dim);text-decoration:none;font-size:.88rem;font-weight:500;transition:color .2s}
+.nav-links a:hover{color:var(--ink)}
+.gh-btn{display:inline-flex;align-items:center;gap:8px;padding:9px 18px;border-radius:12px;text-decoration:none;font-size:.86rem;font-weight:600;color:#fff;background:linear-gradient(120deg,#ff8a4d,#ff5a36);box-shadow:0 6px 22px rgba(255,90,54,.35);transition:transform .2s,box-shadow .2s;white-space:nowrap}
+.gh-btn:hover{transform:translateY(-1px);box-shadow:0 10px 28px rgba(255,90,54,.45)}
+.gh-btn.ghost{background:linear-gradient(135deg,var(--glass-hi),var(--glass));border:1px solid var(--stroke);box-shadow:none}
+.gh-btn.ghost:hover{box-shadow:0 8px 24px rgba(2,5,16,.4)}
+.gh-btn svg{width:16px;height:16px;fill:currentColor}
+
+/* focus */
+a:focus-visible,.gh-btn:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+
+/* hero */
+.hero{padding:190px 0 80px;position:relative}
+.hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+.badge{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);font-size:.72rem;font-weight:500;letter-spacing:.08em;color:var(--ink-dim);padding:8px 16px;border-radius:99px;margin-bottom:26px}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 12px var(--mint);animation:pulse 2.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+h1{font-family:var(--disp);font-size:clamp(2.5rem,5.3vw,3.9rem);font-weight:700;line-height:1.07;letter-spacing:-.03em;margin-bottom:22px}
+.hero .lead{font-size:1.12rem;margin-bottom:34px}
+.cta-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:40px}
+.cta-row .gh-btn{padding:14px 26px;font-size:.95rem;border-radius:14px}
+.hero-note{display:flex;flex-wrap:wrap;gap:10px 22px;color:var(--ink-faint);font-size:.82rem;font-family:var(--mono)}
+.hero-note span{display:inline-flex;align-items:center;gap:7px}
+.hero-note svg{width:13px;height:13px;stroke:var(--mint);fill:none;stroke-width:2.4}
+
+/* terminal */
+.term{position:relative;border-radius:18px;overflow:hidden;font-family:var(--mono)}
+.term-bar{display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid var(--stroke);background:rgba(255,255,255,.03)}
+.term-bar i{width:11px;height:11px;border-radius:50%;display:block}
+.term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+.term-bar b{margin-left:10px;font-size:.72rem;font-weight:500;color:var(--ink-faint);letter-spacing:.05em}
+.term-body{padding:22px 22px 26px;font-size:.78rem;line-height:1.75;color:#c4cee8;overflow-x:auto}
+.term-body .cmd{color:#8be9c3}
+.term-body .key{color:#82aaff}
+.term-body .str{color:#ffcf8b}
+.term-body .num{color:#ff8b8b}
+.term-body .dim{color:var(--ink-faint)}
+.cursor{display:inline-block;width:8px;height:15px;background:var(--cyan);vertical-align:-2px;animation:pulse 1.1s steps(2) infinite}
+.float-chip{position:absolute;display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:14px;font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);animation:floaty 7s ease-in-out infinite}
+.float-chip b{color:var(--ink);font-size:.86rem}
+.float-chip.fc1{top:-26px;right:-14px}
+.float-chip.fc2{bottom:-22px;left:-20px;animation-delay:-3.2s}
+@keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-11px)}}
+.float-chip .ic{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;font-size:.8rem}
+.fc1 .ic{background:rgba(74,222,158,.14);color:var(--mint)}
+.fc2 .ic{background:rgba(55,224,245,.13);color:var(--cyan)}
+
+/* metrics */
+.metrics{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;margin-top:8px}
+.metric{padding:26px 20px;text-align:left;transition:transform .25s,border-color .25s}
+.metric:hover{transform:translateY(-4px);border-color:rgba(255,109,63,.35)}
+.metric .v{font-family:var(--disp);font-size:1.75rem;font-weight:700;letter-spacing:-.02em;background:linear-gradient(92deg,#fff,#ffd9c4);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.metric .k{color:var(--ink-faint);font-size:.76rem;margin-top:6px;line-height:1.45}
+
+/* physics pipeline */
+.pipe{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-top:44px}
+.step{padding:28px 24px;position:relative;transition:transform .25s}
+.step:hover{transform:translateY(-5px)}
+.step .n{font-family:var(--mono);font-size:.7rem;color:var(--fox2);letter-spacing:.18em;margin-bottom:14px;display:block}
+.step h3{font-family:var(--disp);font-size:1.18rem;font-weight:600;margin-bottom:10px}
+.step p{color:var(--ink-dim);font-size:.875rem}
+.step .consts{margin-top:16px;display:flex;flex-wrap:wrap;gap:6px}
+.consts i{font-style:normal;font-family:var(--mono);font-size:.66rem;color:var(--cyan);background:rgba(55,224,245,.09);border:1px solid rgba(55,224,245,.22);padding:3px 9px;border-radius:99px}
+.step::after{content:"→";position:absolute;right:-16px;top:50%;transform:translateY(-50%);color:var(--ink-faint);font-size:1.1rem;z-index:2}
+.step:last-child::after{content:""}
+.core-banner{margin-top:28px;padding:26px 32px;display:flex;align-items:center;gap:22px;border-color:rgba(255,109,63,.28)}
+.core-banner .x{flex:none;width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:rgba(255,109,63,.13);border:1px solid rgba(255,109,63,.3)}
+.core-banner .x svg{width:22px;height:22px;stroke:var(--fox2);fill:none;stroke-width:2}
+.core-banner p{color:var(--ink-dim);font-size:.95rem}
+.core-banner b{color:var(--ink)}
+
+/* comparison table */
+.cmp{margin-top:44px;overflow-x:auto}
+table.cmp-table{width:100%;border-collapse:collapse;font-size:.9rem;min-width:640px}
+table.cmp-table th{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);text-align:left;padding:0 16px 14px;font-weight:500}
+table.cmp-table th.hl{color:var(--fox2)}
+table.cmp-table td{padding:14px 16px;border-top:1px solid rgba(255,255,255,.08);color:var(--ink-dim)}
+table.cmp-table td:first-child{color:var(--ink);font-weight:500}
+table.cmp-table td.hl{color:var(--fox2);font-weight:600}
+table.cmp-table tr:hover td{background:rgba(255,255,255,.02)}
+
+/* milestones */
+.mgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:44px}
+.ms{padding:28px 26px;display:flex;flex-direction:column;transition:transform .25s,border-color .25s}
+.ms:hover{transform:translateY(-5px);border-color:rgba(139,123,255,.4)}
+.ms .tag{font-family:var(--mono);font-size:.66rem;font-weight:600;letter-spacing:.16em;color:var(--violet);background:rgba(139,123,255,.11);border:1px solid rgba(139,123,255,.28);padding:4px 11px;border-radius:99px;align-self:flex-start;margin-bottom:16px}
+.ms h3{font-family:var(--disp);font-size:1.15rem;font-weight:600;margin-bottom:10px}
+.ms p{color:var(--ink-dim);font-size:.86rem;flex:1}
+.ms .res{margin-top:18px;padding-top:16px;border-top:1px dashed rgba(255,255,255,.13)}
+.ms .res b{font-family:var(--disp);font-size:1.25rem;color:var(--fox2)}
+.ms .res span{display:block;color:var(--ink-faint);font-size:.74rem;margin-top:3px;font-family:var(--mono)}
+
+/* evidence */
+.ev-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:44px}
+.ev-card{padding:30px}
+.ev-card h3{font-family:var(--disp);font-size:1.2rem;font-weight:600;margin-bottom:18px}
+table.ops{width:100%;border-collapse:collapse;font-size:.85rem}
+table.ops th{font-family:var(--mono);font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);text-align:left;padding:0 12px 12px;font-weight:500}
+table.ops td{padding:13px 12px;border-top:1px solid rgba(255,255,255,.08)}
+table.ops td:first-child{color:var(--ink)}
+table.ops td b{font-family:var(--mono);color:var(--mint)}
+.ev-list{list-style:none;display:flex;flex-direction:column;gap:16px}
+.ev-list li{display:flex;gap:14px;color:var(--ink-dim);font-size:.9rem}
+.ev-list .chk{flex:none;width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:rgba(74,222,158,.12);border:1px solid rgba(74,222,158,.3);margin-top:2px}
+.ev-list .chk svg{width:12px;height:12px;stroke:var(--mint);fill:none;stroke-width:3}
+.ev-list b{color:var(--ink)}
+code.inl{font-family:var(--mono);font-size:.8em;color:var(--fox2);background:rgba(255,109,63,.1);padding:2px 7px;border-radius:7px;border:1px solid rgba(255,109,63,.18)}
+
+/* languages */
+.lang-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:18px;margin-top:44px}
+.script-cloud{padding:32px;display:flex;flex-wrap:wrap;gap:12px;align-content:flex-start}
+.script-cloud span{font-size:1.2rem;padding:10px 18px;border-radius:14px;background:linear-gradient(135deg,var(--glass-hi),var(--glass));border:1px solid var(--stroke);transition:transform .2s,border-color .2s}
+.script-cloud span:hover{transform:translateY(-3px) scale(1.04);border-color:rgba(55,224,245,.4)}
+.script-cloud .lt{font-family:var(--disp);font-weight:600;font-size:.92rem}
+.lang-facts{padding:32px;display:flex;flex-direction:column;gap:14px}
+.lang-facts .row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:15px 18px;border-radius:14px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.07)}
+.lang-facts .row b{font-family:var(--mono);font-size:.95rem;color:var(--fox2)}
+.lang-facts .row span{color:var(--ink-dim);font-size:.85rem}
+.lang-facts p.note{color:var(--ink-faint);font-size:.8rem;margin-top:4px}
+
+/* quickstart */
+.qs{margin-top:44px;overflow:hidden}
+.qs .term-body{font-size:.82rem;padding:26px 28px}
+.qs .cmt{color:var(--ink-faint)}
+
+/* footer */
+footer{padding:56px 0 46px;border-top:1px solid rgba(255,255,255,.07)}
+.foot{display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap}
+.foot .brand{font-size:1.02rem}
+.foot p{color:var(--ink-faint);font-size:.8rem;font-family:var(--mono)}
+.foot a{color:var(--ink-dim);text-decoration:none}
+.foot a:hover{color:var(--ink)}
+
+/* reveal */
+.reveal{opacity:0;transform:translateY(26px);transition:opacity .75s cubic-bezier(.22,.8,.3,1),transform .75s cubic-bezier(.22,.8,.3,1)}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001s!important;transition-duration:.001s!important}
+  html{scroll-behavior:auto}
+  .reveal{opacity:1;transform:none}
+}
+
+/* responsive */
+@media (max-width:1020px){
+  .hero-grid{grid-template-columns:1fr;gap:56px}
+  .metrics{grid-template-columns:repeat(3,1fr)}
+  .pipe{grid-template-columns:repeat(2,1fr)}
+  .step::after{content:""}
+  .mgrid{grid-template-columns:repeat(2,1fr)}
+  .ev-grid,.lang-grid{grid-template-columns:1fr}
+  .nav-links{display:none}
+}
+@media (max-width:640px){
+  section{padding:72px 0}
+  .hero{padding:150px 0 56px}
+  .metrics{grid-template-columns:repeat(2,1fr)}
+  .pipe,.mgrid{grid-template-columns:1fr}
+  .float-chip{display:none}
+  nav{gap:14px;padding:10px 16px}
+  .wrap{padding:0 20px}
+  .orb{opacity:.35;filter:blur(60px)}
+}
+</style>
+</head>
+<body>
+<div class="sky">
+  <div class="orb o1"></div>
+  <div class="orb o2"></div>
+  <div class="orb o3"></div>
+  <div class="orb o4"></div>
+</div>
+<div class="grid-overlay"></div>
+
+<nav class="glass" id="nav">
+  <a href="#" class="brand">
+    <svg viewBox="0 0 48 48" fill="none"><defs><linearGradient id="fg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb56b"/><stop offset="1" stop-color="#ff6d3f"/></linearGradient></defs><polygon points="24,44 5,25 9,4 21,15 27,15 39,4 43,25" fill="url(#fg)"/><circle cx="17" cy="26" r="2.4" fill="#070b18"/><circle cx="31" cy="26" r="2.4" fill="#070b18"/><polygon points="24,31 20,35 24,38 28,35" fill="#070b18"/></svg>
+    SyFox <span class="ver">v2.2</span>
+  </a>
+  <div class="nav-links">
+    <a href="#physics">Physics</a>
+    <a href="#compare">Compare</a>
+    <a href="#results">Results</a>
+    <a href="#languages">Languages</a>
+    <a href="#quickstart">Quickstart</a>
+  </div>
+  <a class="gh-btn" href="https://github.com/Mr-DS-ML-85/SyFox" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div>
+        <div class="badge glass">
+          <span class="dot"></span>
+          OPEN SOURCE · C++17 · ZERO DEPENDENCIES
+        </div>
+        <h1>Decisions that<br><span class="grad">collapse out of physics</span></h1>
+        <p class="lead">SyFox is an open System One decision engine. State in. Typed decisions out. No text generation. Ever. Built on Synthetic-Intelligence substrate physics — not transformers, not neural nets, not pattern matching.</p>
+        <div class="cta-row">
+          <a class="gh-btn" href="https://github.com/Mr-DS-ML-85/SyFox" target="_blank" rel="noopener">View on GitHub</a>
+          <a class="gh-btn ghost" href="#quickstart">Quickstart</a>
+        </div>
+        <div class="hero-note">
+          <span>
+            <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            Bit-deterministic
+          </span>
+          <span>
+            <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            Honest silence
+          </span>
+          <span>
+            <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            100+ languages
+          </span>
+          <span>
+            <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            CPU microseconds
+          </span>
+        </div>
+      </div>
+
+      <div class="term glass">
+        <div class="term-bar">
+          <i></i><i></i><i></i>
+          <b>syfox decide</b>
+        </div>
+        <div class="term-body">
+          <span class="dim">$</span> <span class="cmd">./build/syfox decide</span> <span class="key">--model</span> model-tickets \<br>
+          &nbsp;&nbsp;<span class="key">--state</span> <span class="str">"You charged me twice, please refund"</span> \<br>
+          &nbsp;&nbsp;<span class="key">--questions</span> <span class="str">'{"department":{"type":"choice",...}}'</span><br><br>
+          <span class="dim">{</span><br>
+          &nbsp;&nbsp;<span class="key">"department"</span>: {<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"choice"</span>: <span class="str">"billing"</span>,<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"confidence"</span>: <span class="num">0.204</span>,<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"deferred"</span>: <span class="num">false</span><br>
+          &nbsp;&nbsp;},<br>
+          &nbsp;&nbsp;<span class="key">"settled_energy"</span>: <span class="num">0.83</span>,<br>
+          &nbsp;&nbsp;<span class="key">"lanes"</span>: <span class="num">5786</span><br>
+          }<span class="cursor"></span>
+        </div>
+        <div class="float-chip glass fc1">
+          <div class="ic">µs</div>
+          <div><b>~40 µs</b><br>p50 latency</div>
+        </div>
+        <div class="float-chip glass fc2">
+          <div class="ic">✓</div>
+          <div><b>1.00</b><br>OOD defer rate</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="metrics">
+      <div class="metric glass reveal">
+        <div class="v">0</div>
+        <div class="k">Transformers<br>Neural nets</div>
+      </div>
+      <div class="metric glass reveal">
+        <div class="v">~40µs</div>
+        <div class="k">p50 decision<br>latency</div>
+      </div>
+      <div class="metric glass reveal">
+        <div class="v">1.00</div>
+        <div class="k">OOD defer<br>rate</div>
+      </div>
+      <div class="metric glass reveal">
+        <div class="v">100+</div>
+        <div class="k">Languages<br>supported</div>
+      </div>
+      <div class="metric glass reveal">
+        <div class="v">0</div>
+        <div class="k">Dependencies<br>Runtime cost</div>
+      </div>
+      <div class="metric glass reveal">
+        <div class="v">C++17</div>
+        <div class="k">Pure physics<br>substrate</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="physics">
+  <div class="wrap">
+    <div class="eyebrow reveal">How it works</div>
+    <h2 class="reveal">One settle pass.<br><span class="grad">Decisions emerge.</span></h2>
+    <p class="lead reveal">State tokens inject energy into a ConceptField. The field settles through dissipative diffusion along Hebbian lanes. Typed answers are read out from the same settled field. Unknown vocabulary produces honest silence.</p>
+
+    <div class="pipe">
+      <div class="step glass reveal">
+        <span class="n">01 — INJECT</span>
+        <h3>Energy in</h3>
+        <p>State tokens deposit energy onto concept nodes. Acoustic mass and source-cap keep the working set bounded.</p>
+        <div class="consts"><i>source_cap=24</i><i>1/√mass</i></div>
+      </div>
+      <div class="step glass reveal">
+        <span class="n">02 — SETTLE</span>
+        <h3>Diffuse & damp</h3>
+        <p>Energy propagates along Hebbian lanes. Dissipation + cavity salience sparsify the field. Optional Miller window.</p>
+        <div class="consts"><i>K_settle</i><i>tanh salience</i></div>
+      </div>
+      <div class="step glass reveal">
+        <span class="n">03 — READOUT</span>
+        <h3>Typed answers</h3>
+        <p>Choice, score, and noul questions read resonance from the identical settled field. Flat marginal latency.</p>
+        <div class="consts"><i>specific</i><i>support</i></div>
+      </div>
+      <div class="step glass reveal">
+        <span class="n">04 — SILENCE</span>
+        <h3>Honest defer</h3>
+        <p>Nothing settled above floor? Defer. Never invent an answer. Unknown words stay dark.</p>
+        <div class="consts"><i>energy floor</i><i>no guess</i></div>
+      </div>
+    </div>
+
+    <div class="core-banner glass reveal">
+      <div class="x">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <p><b>Core = SI physics only.</b> No transformer, no neural network, no pattern-matching classifier. Tools around the core (JSON, CLI, HTTP) are ordinary engineering. The substrate itself is pure energy dynamics.</p>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <div class="eyebrow reveal">Why it matters</div>
+    <h2 class="reveal">Not another model.<br><span class="grad">A different substrate.</span></h2>
+    <p class="lead reveal">SyFox will never generalize like a foundation model. It sees only what you taught it — inspectable lane by lane. The trade is deliberate: narrow, fully ownable, auditable, offline, and free.</p>
+
+    <div class="cmp glass reveal">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>LLM (System 2)</th>
+            <th>Jev</th>
+            <th class="hl">SyFox</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Output</td>
+            <td>prose to parse</td>
+            <td>typed values</td>
+            <td class="hl">typed values</td>
+          </tr>
+          <tr>
+            <td>Compute</td>
+            <td>token by token</td>
+            <td>one parallel pass</td>
+            <td class="hl">one settle pass</td>
+          </tr>
+          <tr>
+            <td>Can hallucinate text</td>
+            <td>yes</td>
+            <td>no (schema-bound)</td>
+            <td class="hl">no + honest silence</td>
+          </tr>
+          <tr>
+            <td>Core</td>
+            <td>transformer</td>
+            <td>trained foundation model</td>
+            <td class="hl">energy-field physics (SI)</td>
+          </tr>
+          <tr>
+            <td>Weights</td>
+            <td>billions, opaque</td>
+            <td>opaque</td>
+            <td class="hl">your lanes, inspectable</td>
+          </tr>
+          <tr>
+            <td>Runs offline</td>
+            <td>maybe</td>
+            <td>no</td>
+            <td class="hl">yes, zero dependencies</td>
+          </tr>
+          <tr>
+            <td>Cost per decision</td>
+            <td>$$</td>
+            <td>very low</td>
+            <td class="hl">~0 (CPU µs)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <div class="eyebrow reveal">Evidence</div>
+    <h2 class="reveal">Measured on held-out data.<br><span class="grad">Not resubstitution.</span></h2>
+    <p class="lead reveal">v2.1 introduced a real 70/30 held-out split. Coverage-vs-accuracy is the headline metric. Derivation is gated so it cannot silently regress taught knowledge.</p>
+
+    <div class="ev-grid">
+      <div class="ev-card glass reveal">
+        <h3>Held-out operating points</h3>
+        <table class="ops">
+          <thead>
+            <tr>
+              <th>Coverage</th>
+              <th>Accuracy</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>100%</td>
+              <td><b>83.3%</b></td>
+              <td><span class="cov" style="width:83%"></span></td>
+            </tr>
+            <tr>
+              <td>≥70%</td>
+              <td><b>90.0%</b></td>
+              <td><span class="cov" style="width:90%"></span></td>
+            </tr>
+            <tr>
+              <td>≥50%</td>
+              <td><b>100%</b></td>
+              <td><span class="cov" style="width:100%"></span></td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="sub" style="margin-top:18px;font-size:.85rem">Tickets domain. Confident subset is trustworthy by measurement.</p>
+      </div>
+
+      <div class="ev-card glass reveal">
+        <h3>What the harness enforces</h3>
+        <ul class="ev-list">
+          <li>
+            <div class="chk"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div><b>No-regression gate</b> — any taught-row argmax flip or manufactured certainty on ambiguous probes reverts the fabric bit-exactly.</div>
+          </li>
+          <li>
+            <div class="chk"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div><b>Honest silence</b> — OOD / unknown vocabulary defers at rate 1.00. Never invents.</div>
+          </li>
+          <li>
+            <div class="chk"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div><b>Calibration on held-out</b> — multi-class NLL + adoption guard. Tickets ECE 0.665 → 0.012.</div>
+          </li>
+          <li>
+            <div class="chk"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div><b>Bit-deterministic</b> — same state produces the same settled field on every machine.</div>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="mgrid" style="margin-top:18px">
+      <div class="ms glass reveal">
+        <span class="tag">v2.2</span>
+        <h3>Multilingual + trigrams</h3>
+        <p>UTF-8 script routing across 35 families. Traction-gated character trigram bridges for typo robustness. Active-learning loop.</p>
+        <div class="res"><b>1.00</b><span>Bengali held-out routing</span></div>
+      </div>
+      <div class="ms glass reveal">
+        <span class="tag">v2.1</span>
+        <h3>Held-out methodology</h3>
+        <p>Real 70/30 split, coverage curve, multi-class calibration, Porter + synonyms at the boundary.</p>
+        <div class="res"><b>0.012</b><span>Tickets ECE after fit</span></div>
+      </div>
+      <div class="ms glass reveal">
+        <span class="tag">v0.2</span>
+        <h3>Derivation & gate</h3>
+        <p>Compose + harvest, dreamer, analogs. Transactional no-regression gate with bit-exact snapshot/restore.</p>
+        <div class="res"><b>PASS</b><span>Game model ships derived</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="languages">
+  <div class="wrap">
+    <div class="eyebrow reveal">Boundary</div>
+    <h2 class="reveal">100+ languages.<br><span class="grad">One physics core.</span></h2>
+    <p class="lead reveal">v2.2 rebuilt the input boundary. Pure-ASCII keeps the original path. Non-ASCII routes by Unicode script family into separate substrates. The SI core stays byte-identical.</p>
+
+    <div class="lang-grid">
+      <div class="script-cloud glass reveal">
+        <span class="lt">Latin</span>
+        <span>বাংলা</span>
+        <span>हिन्दी</span>
+        <span>Русский</span>
+        <span>العربية</span>
+        <span>中文</span>
+        <span>日本語</span>
+        <span>한국어</span>
+        <span>Ελληνικά</span>
+        <span>עברית</span>
+        <span>ไทย</span>
+        <span>Tiếng Việt</span>
+        <span class="lt">+ 20 more families</span>
+      </div>
+      <div class="lang-facts glass reveal">
+        <div class="row">
+          <span>Script families</span>
+          <b>35</b>
+        </div>
+        <div class="row">
+          <span>Bengali held-out routing</span>
+          <b>1.000</b>
+        </div>
+        <div class="row">
+          <span>OOD defer (all scripts)</span>
+          <b>1.00</b>
+        </div>
+        <div class="row">
+          <span>Trigram bridges</span>
+          <b>traction-gated</b>
+        </div>
+        <p class="note">Legitimate unseen words stay dark. Corrupted forms can recover only when ≥25% of their trigrams already exist in the fabric.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <div class="eyebrow reveal">Get started</div>
+    <h2 class="reveal">Build. Teach. Decide.</h2>
+    <p class="lead reveal">Zero dependencies. One <code class="inl">make</code>. Your data stays yours.</p>
+
+    <div class="qs term glass reveal">
+      <div class="term-bar">
+        <i></i><i></i><i></i>
+        <b>terminal</b>
+      </div>
+      <div class="term-body">
+        <span class="cmt"># clone & build</span><br>
+        <span class="dim">$</span> <span class="cmd">git clone</span> https://github.com/Mr-DS-ML-85/SyFox.git && <span class="cmd">cd</span> SyFox<br>
+        <span class="dim">$</span> <span class="cmd">make</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cmt"># builds syfox + tests</span><br>
+        <span class="dim">$</span> <span class="cmd">make test</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cmt"># physics + honesty checks</span><br>
+        <span class="dim">$</span> <span class="cmd">make models</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cmt"># teach the three seed domains</span><br><br>
+        <span class="cmt"># decide</span><br>
+        <span class="dim">$</span> <span class="cmd">./build/syfox decide</span> <span class="key">--model</span> model-tickets \<br>
+        &nbsp;&nbsp;<span class="key">--state</span> <span class="str">"charged twice for the same invoice"</span> \<br>
+        &nbsp;&nbsp;<span class="key">--questions</span> <span class="str">'{"department":{"type":"choice","criteria":{...}}}'</span><br><br>
+        <span class="cmt"># optional HTTP (Jev-compatible shape)</span><br>
+        <span class="dim">$</span> <span class="cmd">make serve</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="cmt"># http://127.0.0.1:8010</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <a href="#" class="brand">
+        <svg viewBox="0 0 48 48" width="26" height="26" fill="none"><defs><linearGradient id="fg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb56b"/><stop offset="1" stop-color="#ff6d3f"/></linearGradient></defs><polygon points="24,44 5,25 9,4 21,15 27,15 39,4 43,25" fill="url(#fg2)"/><circle cx="17" cy="26" r="2.4" fill="#070b18"/><circle cx="31" cy="26" r="2.4" fill="#070b18"/><polygon points="24,31 20,35 24,38 28,35" fill="#070b18"/></svg>
+        SyFox
+      </a>
+      <p>Open System One on SI substrate physics · <a href="https://github.com/Mr-DS-ML-85/SyFox" target="_blank" rel="noopener">GitHub</a> · Not affiliated with TypeSafe / Jev</p>
+    </div>
+  </div>
+</footer>
+
+<script>
+// nav scroll state
+const nav = document.getElementById('nav');
+window.addEventListener('scroll', () => {
+  nav.classList.toggle('scrolled', window.scrollY > 20);
+}, {passive:true});
+
+// reveal on scroll
+const io = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('in'); });
+}, {threshold: 0.12});
+document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+</script>
+</body>
+</html>

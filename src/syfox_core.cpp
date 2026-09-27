@@ -9,6 +9,8 @@
 //    v2.2 trigram lane policy              -> syfox_engine_set_ngrams
 //    v2.2 script routing                   -> syfox_detect_script
 //    M3  machine-auditable evidence        -> syfox_decide_ex(opts.evidence)
+//    v3.2 semantic layer + retrieval + hierarchy -> set_semantics / set_retrieval /
+//            set_retrieval_topk / set_retrieval_dose / set_hierarchy + opts keys
 //
 //  No transformer, no classifier, no physics changes: si_substrate.hpp is
 //  untouched; every knob here exists because the CLI exposes it too.
@@ -69,6 +71,27 @@ void syfox_engine_set_ngrams(SyFoxHandle* h, int on) {
     si::norm::grams_enabled() = (on != 0);            // v2.2 trigram lanes
 }
 
+// -- v3.2 semantic layer / retrieval-by-default / hierarchy knobs -------------
+void syfox_engine_set_semantics(SyFoxHandle* h, int on) {
+    if (h) h->eng->substrate().set_semantics(on != 0);
+}
+
+void syfox_engine_set_retrieval(SyFoxHandle* h, int on) {
+    if (h) h->eng->set_retrieval(on != 0);
+}
+
+void syfox_engine_set_retrieval_topk(SyFoxHandle* h, int topk) {
+    if (h) h->eng->set_retrieval_topk(topk);
+}
+
+void syfox_engine_set_retrieval_dose(SyFoxHandle* h, double dose) {
+    if (h) h->eng->set_retrieval_dose(static_cast<float>(dose));
+}
+
+void syfox_engine_set_hierarchy(SyFoxHandle* h, int on) {
+    if (h) h->eng->set_hierarchy(on != 0);
+}
+
 // -- script detection (v2.2 --lang auto) ------------------------------------
 // Returns a malloc'd slug ("latin", "bengali", ...) or "unknown".
 char* syfox_detect_script(const char* text) {
@@ -124,6 +147,14 @@ static std::string decide_json(SyFoxHandle* h, const char* state,
             {"calibrated", sfx::JV(u.calibrated)},
             {"engine", std::string("syfox-") + syfox::VERSION},
             {"core", "si-substrate"}};
+        if (!u.retrieved.empty()) {
+            sfx::JVArr ret;
+            for (const auto& r : u.retrieved)
+                ret.push_back(sfx::JV(sfx::JVObj{
+                    {"label", sfx::JV(r.first)},
+                    {"resonance", std::round(r.second * 1000.0f) / 1000.0f}}));
+            usage["retrieval"] = sfx::JV(ret);        // v3.2: priming memories
+        }
         sfx::JVObj root{{"answers", sfx::JV(ans)}, {"usage", sfx::JV(usage)}};
         if (want_evidence)   // M3: supporting lanes + provenance + contradictions
             root["evidence"] = h->eng->evidence_json(state, q, answers);
@@ -146,7 +177,9 @@ char* syfox_decide(SyFoxHandle* h, const char* state, const char* questions_json
 }
 
 // opts_json: {"evidence":bool, "energy_norm":bool, "salience_gating":bool,
-//             "miller_window":bool, "ngrams":"on"|"off"}
+//             "miller_window":bool, "ngrams":"on"|"off",
+//             "semantics":bool, "retrieval":bool, "retrieval_topk":int,
+//             "retrieval_dose":num, "hierarchy":bool}
 // Absent keys leave the current engine state untouched (sticky, CLI-equal).
 char* syfox_decide_ex(SyFoxHandle* h, const char* state, const char* questions_json,
                       const char* opts_json) {
@@ -167,6 +200,11 @@ char* syfox_decide_ex(SyFoxHandle* h, const char* state, const char* questions_j
                     if (g == "on")  si::norm::grams_enabled() = true;
                     if (g == "off") si::norm::grams_enabled() = false;
                 }
+                if (o.has("semantics"))       h->eng->substrate().set_semantics(truthy(o.at("semantics")));
+                if (o.has("retrieval"))       h->eng->set_retrieval(truthy(o.at("retrieval")));
+                if (o.has("retrieval_topk"))  h->eng->set_retrieval_topk(static_cast<int>(o.at("retrieval_topk").as_num(5)));
+                if (o.has("retrieval_dose"))  h->eng->set_retrieval_dose(static_cast<float>(o.at("retrieval_dose").as_num(0.30)));
+                if (o.has("hierarchy"))       h->eng->set_hierarchy(truthy(o.at("hierarchy")));
             }
         } catch (...) { /* opts are optional; a bad opts object is ignored */ }
     }
@@ -185,6 +223,11 @@ char* syfox_engine_info(SyFoxHandle* h) {
         {"lanes", static_cast<double>(h->eng->substrate().lane_count())},
         {"evidence_records", static_cast<double>(h->eng->substrate().evidence_count())},
         {"calibrated", sfx::JV(h->eng->calibration().fitted)},
+        {"semantics", sfx::JV(h->eng->substrate().has_semantics())},
+        {"sem_edges", static_cast<double>(h->eng->substrate().resonance_edge_count())},
+        {"lane_contexts", static_cast<double>(h->eng->substrate().lane_context_count())},
+        {"retrieval_memories", static_cast<double>(h->eng->memories().size())},
+        {"hierarchy", sfx::JV(h->eng->hierarchy_on())},
         {"version", std::string(syfox::VERSION)},
         {"core", "si-substrate"}};
     const std::string s = sfx::JV(o).dump();

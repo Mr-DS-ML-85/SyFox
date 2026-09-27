@@ -1,0 +1,336 @@
+{
+ "email_spam": {
+  "accuracy": 1.0,
+  "rows": [
+   {
+    "state": "Congratulations you are our lucky winner click thi",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.977,
+    "deferred": false
+   },
+   {
+    "state": "Urgent your account will be suspended verify your ",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.978,
+    "deferred": false
+   },
+   {
+    "state": "Win a free holiday click here offer expires today ",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.994,
+    "deferred": false
+   },
+   {
+    "state": "Hi team the invoice for this month is attached ple",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.989,
+    "deferred": false
+   },
+   {
+    "state": "Can we move the meeting to tomorrow morning and ad",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.611,
+    "deferred": false
+   },
+   {
+    "state": "Thanks for your help with the refund the money arr",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.999,
+    "deferred": false
+   }
+  ]
+ },
+ "email_spam_sem": {
+  "accuracy": 1.0,
+  "rows": [
+   {
+    "state": "Congratulations you are our lucky winner click thi",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.958,
+    "deferred": false
+   },
+   {
+    "state": "Urgent your account will be suspended verify your ",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.913,
+    "deferred": false
+   },
+   {
+    "state": "Win a free holiday click here offer expires today ",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.918,
+    "deferred": false
+   },
+   {
+    "state": "Hi team the invoice for this month is attached ple",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.957,
+    "deferred": false
+   },
+   {
+    "state": "Can we move the meeting to tomorrow morning and ad",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.639,
+    "deferred": false
+   },
+   {
+    "state": "Thanks for your help with the refund the money arr",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.985,
+    "deferred": false
+   }
+  ]
+ },
+ "sms_spam": {
+  "accuracy": 0.833,
+  "rows": [
+   {
+    "state": "FREE entry to win 1000 cash prize text WIN to the ",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.228,
+    "deferred": false
+   },
+   {
+    "state": "Your mobile prize is waiting claim your reward cli",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.999,
+    "deferred": false
+   },
+   {
+    "state": "Hey are we still meeting at the pub tonight let me",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.76,
+    "deferred": false
+   },
+   {
+    "state": "Running late sorry be there in ten minutes see you",
+    "expected": "ham",
+    "picked": "spam",
+    "conf": 0.103,
+    "deferred": false
+   },
+   {
+    "state": "Can you send me the photos from the weekend thanks",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.985,
+    "deferred": false
+   },
+   {
+    "state": "Your account balance is low top up now to avoid ch",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.281,
+    "deferred": false
+   }
+  ]
+ },
+ "sms_spam_sem": {
+  "accuracy": 0.833,
+  "rows": [
+   {
+    "state": "FREE entry to win 1000 cash prize text WIN to the ",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.154,
+    "deferred": false
+   },
+   {
+    "state": "Your mobile prize is waiting claim your reward cli",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.999,
+    "deferred": false
+   },
+   {
+    "state": "Hey are we still meeting at the pub tonight let me",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.15,
+    "deferred": false
+   },
+   {
+    "state": "Running late sorry be there in ten minutes see you",
+    "expected": "ham",
+    "picked": "spam",
+    "conf": 0.075,
+    "deferred": false
+   },
+   {
+    "state": "Can you send me the photos from the weekend thanks",
+    "expected": "ham",
+    "picked": "ham",
+    "conf": 0.846,
+    "deferred": false
+   },
+   {
+    "state": "Your account balance is low top up now to avoid ch",
+    "expected": "spam",
+    "picked": "spam",
+    "conf": 0.25,
+    "deferred": false
+   }
+  ]
+ },
+ "snake": {
+  "accuracy": 0.125,
+  "rows": [
+   {
+    "state": "snake game the food is directly ahead of the head ",
+    "expected": "right",
+    "picked": "right",
+    "conf": 0.16,
+    "deferred": false
+   },
+   {
+    "state": "snake game a wall is directly ahead moving right h",
+    "expected": "up/down",
+    "picked": "right",
+    "conf": 0.044,
+    "deferred": false
+   },
+   {
+    "state": "snake game the body blocks the right side so right",
+    "expected": "up/down/left",
+    "picked": "right",
+    "conf": 0.248,
+    "deferred": false
+   },
+   {
+    "state": "snake game the food is behind while the head moves",
+    "expected": "up/down",
+    "picked": "right",
+    "conf": 0.064,
+    "deferred": false
+   },
+   {
+    "state": "snake game the food is at the wall and right is le",
+    "expected": "up/down",
+    "picked": "right",
+    "conf": 0.266,
+    "deferred": false
+   },
+   {
+    "state": "snake game long term survival avoid the walls keep",
+    "expected": "up",
+    "picked": "down",
+    "conf": 0.003,
+    "deferred": false
+   },
+   {
+    "state": "snake game only one safe move remains all others h",
+    "expected": "down",
+    "picked": "up",
+    "conf": 0.001,
+    "deferred": false
+   },
+   {
+    "state": "snake game shortest safe route to the food",
+    "expected": "up",
+    "picked": "right",
+    "conf": 0.014,
+    "deferred": false
+   }
+  ]
+ },
+ "snake_sem": {
+  "accuracy": 0.125,
+  "rows": [
+   {
+    "state": "snake game the food is directly ahead of the head ",
+    "expected": "right",
+    "picked": "right",
+    "conf": 0.233,
+    "deferred": false
+   },
+   {
+    "state": "snake game a wall is directly ahead moving right h",
+    "expected": "up/down",
+    "picked": "right",
+    "conf": 0.031,
+    "deferred": false
+   },
+   {
+    "state": "snake game the body blocks the right side so right",
+    "expected": "up/down/left",
+    "picked": "right",
+    "conf": 0.135,
+    "deferred": false
+   },
+   {
+    "state": "snake game the food is behind while the head moves",
+    "expected": "up/down",
+    "picked": "right",
+    "conf": 0.04,
+    "deferred": false
+   },
+   {
+    "state": "snake game the food is at the wall and right is le",
+    "expected": "up/down",
+    "picked": "right",
+    "conf": 0.199,
+    "deferred": false
+   },
+   {
+    "state": "snake game long term survival avoid the walls keep",
+    "expected": "up",
+    "picked": "right",
+    "conf": 0.001,
+    "deferred": false
+   },
+   {
+    "state": "snake game only one safe move remains all others h",
+    "expected": "down",
+    "picked": "up",
+    "conf": 0.001,
+    "deferred": false
+   },
+   {
+    "state": "snake game shortest safe route to the food",
+    "expected": "up",
+    "picked": "right",
+    "conf": 0.006,
+    "deferred": false
+   }
+  ]
+ },
+ "tictactoe": {
+  "accuracy": 0.0,
+  "rows": [
+   {
+    "state": "tic tac toe board positions 1 to 9 X holds 1 and 2",
+    "expected": "3",
+    "picked": "1",
+    "conf": 0,
+    "deferred": false
+   }
+  ]
+ },
+ "tictactoe_sem": {
+  "accuracy": 0.0,
+  "rows": [
+   {
+    "state": "tic tac toe board positions 1 to 9 X holds 1 and 2",
+    "expected": "3",
+    "picked": "1",
+    "conf": 0,
+    "deferred": false
+   }
+  ]
+ }
+}

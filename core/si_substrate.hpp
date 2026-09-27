@@ -43,11 +43,58 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace si {
 
 using NodeId = std::uint32_t;
+
+// ---------------------------------------------------------------------------
+// v3.2 SEMANTIC FIELD — the substrate's second field, deterministic, no ML.
+// Every concept node carries a 64-dim semantic vector built in two
+// deterministic steps (see build_semantics):
+//   1. LEXICAL LAYER   — signed character-trigram hashing of the concept
+//      string into 64 buckets ("card_arrival" and "card_delivery" share
+//      trigrams, so their base vectors align; unrelated words stay
+//      near-orthogonal). A fixed function of the string: no training.
+//   2. FABRIC GROUNDING — two smoothing passes over the Hebbian lanes
+//      (v_i <- normalize(v_i + beta * lane-weighted mean of v_j)). The
+//      fabric's own co-occurrence structure shapes the vectors — a
+//      deterministic diffusion of meaning along the lanes, not a fit.
+// From the vectors, per node:
+//   omega_semantic  — scalar projection onto one fixed direction (Stage 1
+//                     "concept frequency encoding"); close frequencies
+//                     resonate, like coupled oscillators detuned.
+//   resonance edges — top-k cosine neighbours (cos >= sem_theta), weight
+//                     = cos * frequency-match (Stage 4 "semantic field":
+//                     during settle, sources leak a small fraction of
+//                     their retained energy to semantically similar nodes
+//                     — energy is CONSERVED, the flow is one more
+//                     diffusion channel beside the Hebbian lanes).
+//   semantic type   — cos >= 0.82 reads as synonym-grade kin, >= 0.66 as
+//                     related (Option 2 typed lanes, derived from the
+//                     vectors, not from a hand-written table).
+// CONTEXT-SENSITIVE LANES (Stage 2): a lane may carry a context signature
+// (required/forbidden context words, learned from the co-occurrence
+// statistics of the lessons that laid it). At settle, the lane's flow is
+// damped when the current decision's injected tokens do not match the
+// signature: all required present -> full flow, missing -> ctx_missing,
+// any forbidden present -> ctx_forbidden. The same "card" can then route
+// toward card_arrival when arrive/receive are in the state and toward
+// card_delivery_estimate when estimate/how-long is — contextual
+// disambiguation as dampened coupling, not pattern matching.
+// Persistence: a v4 tail in substrate.bin. Models saved before v3.2 have no
+// tail: has_semantics() is false and every semantic code path is inert, so
+// old fabrics replay bit-for-bit. Runtime kill switch: set_semantics(false).
+// ---------------------------------------------------------------------------
+inline constexpr std::size_t SEM_DIMS = 64;
+
+// v3.2 context signature attached to a lane (read-side of Stage 2).
+struct LaneCtx {
+    std::vector<NodeId> required;    // all of these should be in the state
+    std::vector<NodeId> forbidden;   // any of these suppresses the lane
+};
 
 // ---------------------------------------------------------------------------
 // v3 Milestone 3 — the lane evidence ledger (audit surface, NOT physics).
@@ -91,6 +138,14 @@ struct SubstrateConfig {
     float lane_decay     = 0.995f; // per-lesson lane weight decay
     std::size_t lane_cap = 256;    // max lanes per node (weakest evicted)
     float hop_coupling   = 0.35f;  // 1-hop lane contribution at readout
+    // -- v3.2 semantic field constants ---------------------------------------
+    float sem_coupling  = 0.12f;  // resonance outflow fraction of retained energy
+    float sem_theta     = 0.50f;  // min cosine for a resonance edge
+    float sem_hop       = 0.10f;  // semantic-neighbour contribution at readout
+    float sem_beta      = 0.50f;  // fabric-grounding strength (vector smoothing)
+    int   sem_neighbors = 6;      // resonance edges per node
+    float ctx_missing   = 0.60f;  // lane flow factor when required context is absent
+    float ctx_forbidden = 0.20f;  // lane flow factor when forbidden context is present
 };
 
 inline float fnv1a_hash(const std::string& s) {  // deterministic token hash
@@ -110,6 +165,15 @@ public:
     NodeId intern(const std::string& concept) {
         auto it = index_.find(concept);
         if (it != index_.end()) { nodes_[it->second].mass += 1.0f; return it->second; }
+        // v3.2: the semantic field is a property of the WHOLE fabric — a new
+        // node changes every top-k neighbourhood, so the stored field is now
+        // stale. Invalidate rather than index out of bounds: the next
+        // save_model() rebuilds it over the grown fabric (and in-memory
+        // engines run lane-physics only until then — honest degradation).
+        if (!semvecs_.empty()) {
+            semvecs_.clear(); sem_edges_.clear(); sem_off_.clear();
+            sem_edge_count_ = 0;
+        }
         NodeId id = static_cast<NodeId>(nodes_.size());
         index_.emplace(concept, id);
         // occurrence mass: a LINEAR count of intern() calls (not log-compressed).
@@ -151,6 +215,7 @@ public:
             if (lanes.size() > cfg_.lane_cap) {          // evict weakest lane
                 auto weakest = std::min_element(lanes.begin(), lanes.end(),
                     [](const auto& x, const auto& y){ return x.second < y.second; });
+                drop_lane_ctx(a, weakest->first);        // v3.2: signature dies with its lane
                 lanes.erase(weakest);
             }
         }
@@ -164,7 +229,10 @@ public:
         for (std::size_t i = 0; i < lanes.size(); ++i)
             if (lanes[i].first == b) {
                 lanes[i].second = std::max(0.0f, lanes[i].second + dw);
-                if (lanes[i].second <= 0.0f) lanes.erase(lanes.begin() + static_cast<std::ptrdiff_t>(i));
+                if (lanes[i].second <= 0.0f) {
+                    drop_lane_ctx(a, b);                 // v3.2: signature dies with its lane
+                    lanes.erase(lanes.begin() + static_cast<std::ptrdiff_t>(i));
+                }
                 csr_dirty_ = true;
                 return;
             }
@@ -182,6 +250,7 @@ public:
             float mass_damp = 1.0f / std::sqrt(n.mass);   // heavy => less per-token
             n.energy += energy * mass_damp;
             n.salience = 1.0f;   // TSDA: spike to ceiling on touch
+            present_.insert(id);   // v3.2: context-lane visibility (until next reset)
             state_hash_ = state_hash_ * 1099511628211ull
                         + static_cast<std::uint64_t>(fnv1a_hash(t));  // decision fingerprint
         }
@@ -292,6 +361,33 @@ public:
                     if (!is_source[i]) { scatter[i] += nd.energy * cfg_.decay; continue; }  // gated: decay only
                     const std::size_t b = csr_off_[i], e = csr_off_[i + 1];
                     float out_w = 0.0f;
+                    if (sem_active() && !lane_ctx_.empty()) {
+                        // v3.2 Stage 2: context-sensitive lanes — each lane's
+                        // EFFECTIVE weight is w * factor(f). The node's total
+                        // outflow scales by (sum w*f / sum w): damped lanes
+                        // carry less, the energy stays home. All factors 1.0
+                        // reproduces the plain path bit-for-bit (same float
+                        // sum order, 1.0f multiplies are exact).
+                        float raw_w = 0.0f, eff_w = 0.0f;
+                        for (std::size_t k = b; k < e; ++k) {
+                            const float f = lane_flow_factor(i, csr_dst_[k]);
+                            raw_w += csr_w_[k];
+                            eff_w += csr_w_[k] * f;
+                        }
+                        if (raw_w > 0.0f && eff_w > 0.0f) {
+                            const float out_frac = cfg_.diffusion * (eff_w / raw_w);
+                            scatter[i] += nd.energy * cfg_.decay * (1.0f - out_frac);
+                            const float flow = nd.energy * cfg_.decay * out_frac;
+                            for (std::size_t k = b; k < e; ++k) {
+                                const float f = lane_flow_factor(i, csr_dst_[k]);
+                                if (f > 0.0f)
+                                    scatter[csr_dst_[k]] += flow * (csr_w_[k] * f / eff_w);
+                            }
+                        } else {
+                            scatter[i] += nd.energy * cfg_.decay;   // nothing flows
+                        }
+                        continue;
+                    }
                     for (std::size_t k = b; k < e; ++k) out_w += csr_w_[k];
                     float retained = (out_w > 0.0f) ? (1.0f - cfg_.diffusion) : 1.0f;
                     scatter[i] += nd.energy * cfg_.decay * retained;   // damped self-retention
@@ -305,6 +401,32 @@ public:
             if (nthreads > 1) {                       // fixed thread-order combine
                 for (const auto& tb : thread_bufs)
                     for (std::size_t i = 0; i < n; ++i) next[i] += tb[i];
+            }
+            // -- v3.2 SEMANTIC RESONANCE (Stage 4) ----------------------------
+            // Sequential by design (determinism contract): sources — and only
+            // sources, so the working-set cap stays meaningful — leak a small
+            // fraction (sem_coupling) of their POST-diffusion energy along
+            // their resonance edges, distributed proportionally to
+            // cos * frequency-match. Energy is conserved exactly (the pool is
+            // subtracted from the source, then distributed); decay applies
+            // next pass as always. A node with no resonance edges is an
+            // exact fixed point of this pass.
+            if (sem_active()) {
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (!is_source[i]) continue;
+                    const std::size_t sb = sem_off_[i], se = sem_off_[i + 1];
+                    if (sb == se) continue;
+                    float wsum = 0.0f;
+                    for (std::size_t k = sb; k < se; ++k)
+                        wsum += sem_edges_[k].second * freq_match(i, sem_edges_[k].first);
+                    if (wsum <= 0.0f) continue;
+                    const float pool = next[i] * cfg_.sem_coupling;
+                    next[i] -= pool;
+                    for (std::size_t k = sb; k < se; ++k) {
+                        const float fm = freq_match(i, sem_edges_[k].first);
+                        next[sem_edges_[k].first] += pool * (sem_edges_[k].second * fm / wsum);
+                    }
+                }
             }
             // SI cavity salience integrator: s = tanh(s·decay + gain·|ΔE|).
             // Motion proxy is how much energy moved through the node this
@@ -367,6 +489,15 @@ public:
                 for (const auto& lane : lane_it->second)
                     r += cfg_.hop_coupling * lane.second * nodes_[lane.first].energy;
             }
+            // v3.2 Stage 4: semantic-neighbour term — energy resting on
+            // semantically similar nodes counts for this probe even where no
+            // lane connects them. Weighted by the edge cosine; zero when the
+            // fabric carries no semantic field (pre-v3.2 models, or --no-semantics).
+            if (sem_active()) {
+                const std::size_t sb = sem_off_[it->second], se = sem_off_[it->second + 1];
+                for (std::size_t k = sb; k < se; ++k)
+                    r += cfg_.sem_hop * sem_edges_[k].second * nodes_[sem_edges_[k].first].energy;
+            }
         }
         return r;
     }
@@ -393,6 +524,7 @@ public:
     // -- HONEST SILENCE reset ---------------------------------------------------
     void reset_field() {
         for (auto& n : nodes_) { n.energy = 0.0f; n.salience = 0.0f; }
+        present_.clear();
         state_hash_ = 0;
     }
 
@@ -460,6 +592,147 @@ public:
     }
     std::size_t evidence_count() const { return lane_evidence_.size(); }
 
+    // =====================================================================
+    // v3.2 SEMANTIC FIELD API (deterministic; see the header comment block)
+    // =====================================================================
+
+    // Stage 2 learn-side accumulation: ctx_word co-occurred with lane (a,b)
+    // in the lesson that laid it. Counts live in a scratch table; only
+    // finalize_contexts() (called at save) promotes surviving counts into
+    // the lane's signature. Bookkeeping — nothing here touches the field.
+    void add_ctx_support(NodeId a, NodeId b, NodeId ctx_word) {
+        if (a == b || ctx_word == a || ctx_word == b) return;
+        lane_ctx_acc_[lane_key(a, b)][ctx_word] += 1.0f;
+    }
+
+    // Promote accumulated co-occurrence counts into per-lane signatures.
+    // Deterministic pruning over node-id-ascending iteration:
+    //   required  — top-4 context words with count >= 2 for this lane
+    //   forbidden — up to 2 words that are STRONG required context of the
+    //               same source node's lanes into a DIFFERENT target family
+    //               (count >= 3 there, absent-or-weak here). This is the
+    //               cross-class diff: the words that discriminate WHERE
+    //               this source node's energy should go.
+    // Idempotent: the scratch table is consumed; calling twice is a no-op.
+    void finalize_contexts() {
+        if (lane_ctx_acc_.empty()) return;
+        // gather per-source: which targets exist and each target's top context
+        for (auto& kv : lane_ctx_acc_) {
+            const std::uint64_t key = kv.first;
+            const NodeId a = static_cast<NodeId>(key >> 32);
+            const NodeId b = static_cast<NodeId>(key & 0xffffffffull);
+            // required: top-4 by (count, then node id ascending for ties)
+            std::vector<std::pair<float, NodeId>> cand;
+            for (const auto& cv : kv.second)
+                if (cv.second >= 2.0f) cand.emplace_back(cv.second, cv.first);
+            if (cand.empty()) continue;
+            std::sort(cand.begin(), cand.end(), [](const auto& x, const auto& y) {
+                return x.first != y.first ? x.first > y.first : x.second < y.second;
+            });
+            LaneCtx sig;
+            for (std::size_t i = 0; i < cand.size() && i < 4; ++i)
+                sig.required.push_back(cand[i].second);
+            lane_ctx_[key] = std::move(sig);
+            (void)a; (void)b;
+        }
+        // forbidden pass: for lane (a,b), words that dominate a sibling lane
+        // (a,b') with b' != b and are not in this lane's required set.
+        std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> by_source;
+        for (const auto& kv : lane_ctx_) {
+            const NodeId a = static_cast<NodeId>(kv.first >> 32);
+            by_source[a].push_back(kv.first);
+        }
+        for (auto& sv : by_source) {
+            auto& keys = sv.second;
+            std::sort(keys.begin(), keys.end());
+            for (std::size_t i = 0; i < keys.size(); ++i) {
+                // collect the strongest context words of the SIBLING lanes
+                std::unordered_map<NodeId, float> sibling_ctx;
+                for (std::size_t j = 0; j < keys.size(); ++j) {
+                    if (i == j) continue;
+                    auto it = lane_ctx_acc_.find(keys[j]);
+                    if (it == lane_ctx_acc_.end()) continue;   // consumed
+                    for (const auto& cv : it->second)
+                        if (cv.second >= 3.0f) sibling_ctx[cv.first] += cv.second;
+                }
+                if (sibling_ctx.empty()) continue;
+                // not already required here
+                const LaneCtx& mine = lane_ctx_[keys[i]];
+                auto is_req = [&](NodeId w) {
+                    for (NodeId r : mine.required) if (r == w) return true;
+                    return false;
+                };
+                std::vector<std::pair<float, NodeId>> fc;
+                for (const auto& cv : sibling_ctx)
+                    if (!is_req(cv.first)) fc.emplace_back(cv.second, cv.first);
+                if (fc.empty()) continue;
+                std::sort(fc.begin(), fc.end(), [](const auto& x, const auto& y) {
+                    return x.first != y.first ? x.first > y.first : x.second < y.second;
+                });
+                for (std::size_t k = 0; k < fc.size() && k < 2; ++k)
+                    lane_ctx_[keys[i]].forbidden.push_back(fc[k].second);
+            }
+        }
+        lane_ctx_acc_.clear();
+    }
+
+    bool has_semantics() const { return !semvecs_.empty(); }
+    void set_semantics(bool on) { sem_enabled_ = on; }
+    std::size_t resonance_edge_count() const { return sem_edge_count_; }
+    std::size_t lane_context_count() const { return lane_ctx_.size(); }
+
+    // semantic vector of a node (empty vector when semantics absent)
+    std::vector<float> sem_vector(NodeId id) const {
+        std::vector<float> v;
+        if (id >= node_count() || semvecs_.empty()) return v;
+        v.assign(semvecs_.begin() + static_cast<std::ptrdiff_t>(id * SEM_DIMS),
+                 semvecs_.begin() + static_cast<std::ptrdiff_t>((id + 1) * SEM_DIMS));
+        return v;
+    }
+
+    // Stage 1: omega_semantic — scalar projection of the semantic vector onto
+    // one FIXED deterministic direction, mapped to [0,1]. Fixed point of the
+    // frequency axis: same string -> same omega, always.
+    float semantic_freq(NodeId id) const {
+        if (id >= node_count() || semvecs_.empty()) return 0.0f;
+        float d = 0.0f;
+        for (std::size_t k = 0; k < SEM_DIMS; ++k)
+            d += semvecs_[id * SEM_DIMS + k] * omega_dir()[k];
+        return std::max(0.0f, std::min(1.0f, 0.5f + 0.5f * d));
+    }
+
+    // Option 2 typed-lane read: cos >= 0.82 synonym-grade kin,
+    //             cos >= 0.66 related; 0 = no semantic relation measured.
+    static const char* semantic_type(float cos) {
+        if (cos >= 0.82f) return "synonym";
+        if (cos >= 0.66f) return "related";
+        if (cos > 0.0f)   return "resonance";
+        return "none";
+    }
+
+    // resonance neighbours of a node (id, cosine) — empty when no semantics
+    const std::vector<std::pair<NodeId, float>>* resonance_of(NodeId id) const {
+        if (semvecs_.empty() || id >= node_count()) return nullptr;
+        static const std::vector<std::pair<NodeId, float>> kEmpty;
+        const std::size_t b = sem_off_[id], e = sem_off_[id + 1];
+        if (b == e) return &kEmpty;
+        // slices live in sem_edges_; return pointer into it (stable between builds)
+        static thread_local std::vector<std::pair<NodeId, float>> out;
+        out.assign(sem_edges_.begin() + static_cast<std::ptrdiff_t>(b),
+                   sem_edges_.begin() + static_cast<std::ptrdiff_t>(e));
+        return &out;
+    }
+
+    const LaneCtx* lane_context(NodeId a, NodeId b) const {
+        auto it = lane_ctx_.find(lane_key(a, b));
+        return it == lane_ctx_.end() ? nullptr : &it->second;
+    }
+
+    // Build the semantic field over the CURRENT fabric. Deterministic.
+    // Expensive once (O(n^2 * dims) neighbour search, OMP-parallel with a
+    // fixed per-row reduction); stored in the model from then on.
+    void build_semantics(int threads = 0);
+
     // -- persistence (binary, deterministic) -------------------------------------
     void save(const std::string& path) const {
         std::ofstream f(path, std::ios::binary);
@@ -505,6 +778,39 @@ public:
             std::uint32_t clen = static_cast<std::uint32_t>(kv.second.context.size());
             f.write(reinterpret_cast<const char*>(&clen), 4);
             if (clen) f.write(kv.second.context.data(), clen);
+        }
+        // v3.2 SEMANTIC TAIL — vectors + resonance edges + lane contexts.
+        // Magic-guarded: a truncated/garbage read leaves semantics off and the
+        // rest of the model fully usable (pre-v3.2 files simply end here).
+        const std::uint32_t sem_magic = 0x53454D34u;             // 'SEM4'
+        f.write(reinterpret_cast<const char*>(&sem_magic), 4);
+        const std::uint32_t has_sem = semvecs_.empty() ? 0u : 1u;
+        f.write(reinterpret_cast<const char*>(&has_sem), 4);
+        if (has_sem) {
+            f.write(reinterpret_cast<const char*>(semvecs_.data()),
+                    static_cast<std::streamsize>(semvecs_.size() * sizeof(float)));
+            const std::size_t n = nodes_.size();
+            std::uint32_t total = static_cast<std::uint32_t>(sem_edges_.size());
+            f.write(reinterpret_cast<const char*>(&total), 4);
+            for (std::size_t i = 0; i <= n; ++i) {
+                std::uint32_t off = static_cast<std::uint32_t>(sem_off_[i]);
+                f.write(reinterpret_cast<const char*>(&off), 4);
+            }
+            for (const auto& e : sem_edges_) {
+                f.write(reinterpret_cast<const char*>(&e.first), 4);
+                f.write(reinterpret_cast<const char*>(&e.second), 4);
+            }
+        }
+        const std::uint32_t ctxc = static_cast<std::uint32_t>(lane_ctx_.size());
+        f.write(reinterpret_cast<const char*>(&ctxc), 4);
+        for (const auto& kv : lane_ctx_) {
+            f.write(reinterpret_cast<const char*>(&kv.first), 8);
+            std::uint32_t rq = static_cast<std::uint32_t>(kv.second.required.size());
+            f.write(reinterpret_cast<const char*>(&rq), 4);
+            for (NodeId w : kv.second.required) f.write(reinterpret_cast<const char*>(&w), 4);
+            std::uint32_t fb = static_cast<std::uint32_t>(kv.second.forbidden.size());
+            f.write(reinterpret_cast<const char*>(&fb), 4);
+            for (NodeId w : kv.second.forbidden) f.write(reinterpret_cast<const char*>(&w), 4);
         }
     }
 
@@ -562,6 +868,62 @@ public:
                 lane_evidence_[lane_key(static_cast<NodeId>(a), static_cast<NodeId>(b))] = e;
             }
         }
+        // v3.2 semantic tail (optional, magic-guarded): pre-v3.2 files end at
+        // the evidence tail; the failed magic read leaves semantics absent.
+        std::uint32_t magic = 0;
+        if (f.read(reinterpret_cast<char*>(&magic), 4) && magic == 0x53454D34u) {
+            std::uint32_t has_sem = 0;
+            if (f.read(reinterpret_cast<char*>(&has_sem), 4) && has_sem == 1) {
+                const std::size_t n = nodes_.size();
+                semvecs_.assign(n * SEM_DIMS, 0.0f);
+                if (f.read(reinterpret_cast<char*>(semvecs_.data()),
+                           static_cast<std::streamsize>(semvecs_.size() * sizeof(float)))) {
+                    std::uint32_t total = 0;
+                    if (f.read(reinterpret_cast<char*>(&total), 4)) {
+                        sem_edges_.clear();
+                        sem_edges_.reserve(total);
+                        sem_off_.assign(n + 1, 0);
+                        bool ok = true;
+                        for (std::size_t i = 0; i <= n && ok; ++i) {
+                            std::uint32_t off = 0;
+                            ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&off), 4));
+                            sem_off_[i] = off;
+                        }
+                        for (std::uint32_t k = 0; k < total && ok; ++k) {
+                            std::uint32_t id = 0; float w = 0;
+                            ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&id), 4));
+                            if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&w), 4));
+                            if (ok) sem_edges_.emplace_back(id, w);
+                        }
+                        if (ok) sem_edge_count_ = total;
+                        else { sem_edges_.clear(); sem_off_.clear(); }
+                    }
+                }
+                if (sem_edges_.empty()) semvecs_.clear();   // torn tail: stay off
+            }
+            std::uint32_t ctxc = 0;
+            if (f.read(reinterpret_cast<char*>(&ctxc), 4)) {
+                bool ok = true;
+                for (std::uint32_t k = 0; k < ctxc && ok; ++k) {
+                    std::uint64_t key = 0; std::uint32_t rq = 0, fb = 0;
+                    ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&key), 8));
+                    if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&rq), 4));
+                    LaneCtx sig;
+                    for (std::uint32_t j = 0; j < rq && ok; ++j) {
+                        std::uint32_t w = 0;
+                        ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&w), 4));
+                        if (ok) sig.required.push_back(w);
+                    }
+                    if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&fb), 4));
+                    for (std::uint32_t j = 0; j < fb && ok; ++j) {
+                        std::uint32_t w = 0;
+                        ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&w), 4));
+                        if (ok) sig.forbidden.push_back(w);
+                    }
+                    if (ok) lane_ctx_[key] = std::move(sig);
+                }
+            }
+        }
     }
 
     const SubstrateConfig& config() const { return cfg_; }
@@ -611,6 +973,8 @@ public:
         if (mit != out_.end()) erase_one(mit->second, a);
         derived_gen_.erase(lane_key(a, b));
         derived_gen_.erase(lane_key(b, a));
+        drop_lane_ctx(a, b);                          // v3.2: signature dies with its lane
+        drop_lane_ctx(b, a);
         csr_dirty_ = true;
     }
 
@@ -717,6 +1081,7 @@ private:
             auto weakest = std::min_element(lanes.begin(), lanes.end(),
                 [](const auto& x, const auto& y){ return x.second < y.second; });
             derived_gen_.erase(lane_key(a, weakest->first));
+            drop_lane_ctx(a, weakest->first);            // v3.2: signature dies with its lane
             lanes.erase(weakest);
         }
     }
@@ -735,6 +1100,15 @@ private:
     std::unordered_map<std::uint64_t, std::uint32_t> derived_gen_;
     // v3 Milestone 3: audit ledger (support/counter events, provenance window)
     std::unordered_map<std::uint64_t, LaneEvidence> lane_evidence_;
+    // v3.2 semantic field state ------------------------------------------------
+    std::vector<float> semvecs_;                       // nodes_ * SEM_DIMS (row-major); empty = absent
+    std::vector<std::pair<NodeId, float>> sem_edges_;  // resonance edges, CSR payload
+    std::vector<std::size_t> sem_off_;                 // CSR offsets, nodes_.size()+1
+    std::size_t sem_edge_count_ = 0;
+    std::unordered_map<std::uint64_t, LaneCtx> lane_ctx_;            // final signatures
+    std::unordered_map<std::uint64_t, std::unordered_map<NodeId, float>> lane_ctx_acc_; // learn-time scratch
+    std::unordered_set<NodeId> present_;               // tokens injected since last reset_field()
+    bool sem_enabled_ = true;                          // runtime kill switch (--no-semantics)
     std::uint64_t state_hash_ = 0;   // decision fingerprint for Miller sampling
     float last_cap_ = 0.0f;          // cap used by the last settle()
 
@@ -751,6 +1125,57 @@ private:
     mutable std::vector<float>       csr_w_;
     mutable bool csr_dirty_ = true;
     bool parallel_settle_ = true;        // OMP builds honor this; sequential builds ignore it
+
+private:
+    // -- v3.2 semantic helpers --------------------------------------------------
+    bool sem_active() const {
+        return sem_enabled_ && !semvecs_.empty() && !sem_edges_.empty();
+    }
+
+    // fixed deterministic direction for omega_semantic (Stage 1); computed once
+    static const float* omega_dir() {
+        static const std::vector<float> dir = [] {
+            std::vector<float> d(SEM_DIMS, 0.0f);
+            for (std::size_t k = 0; k < SEM_DIMS; ++k) {
+                std::uint64_t h = 1469598103934665603ull;
+                const std::string seed = "syfox-omega-axis-" + std::to_string(k);
+                for (unsigned char c : seed) { h ^= c; h *= 1099511628211ull; }
+                d[k] = (static_cast<float>(h & 0xFFFFu) / 32767.5f) - 1.0f;  // [-1,1)
+            }
+            float n2 = 0.0f;
+            for (float v : d) n2 += v * v;
+            if (n2 > 0.0f) { const float inv = 1.0f / std::sqrt(n2); for (auto& v : d) v *= inv; }
+            return d;
+        }();
+        return dir.data();
+    }
+
+    // coupled-oscillator detuning: equal frequencies exchange fully, far ones don't
+    float freq_match(NodeId a, NodeId b) const {
+        return 1.0f - 0.5f * std::fabs(semantic_freq(a) - semantic_freq(b));
+    }
+
+    // Stage 2 settle-side factor: how much of a lane's weight flows this pass
+    float lane_flow_factor(NodeId a, NodeId b) const {
+        auto it = lane_ctx_.find(lane_key(a, b));
+        if (it == lane_ctx_.end()) return 1.0f;
+        const LaneCtx& sig = it->second;
+        for (const NodeId w : sig.forbidden)
+            if (present_.count(w)) return cfg_.ctx_forbidden;
+        if (sig.required.empty()) return 1.0f;
+        std::size_t matched = 0;
+        for (const NodeId w : sig.required)
+            if (present_.count(w)) ++matched;
+        if (matched == sig.required.size()) return 1.0f;
+        return cfg_.ctx_missing
+             + (1.0f - cfg_.ctx_missing)
+             * (static_cast<float>(matched) / static_cast<float>(sig.required.size()));
+    }
+
+    void drop_lane_ctx(NodeId a, NodeId b) {
+        lane_ctx_.erase(lane_key(a, b));
+        lane_ctx_acc_.erase(lane_key(a, b));
+    }
 
     void build_csr() const {
         const std::size_t n = nodes_.size();
@@ -798,6 +1223,134 @@ public:
         return n > 0.0 ? static_cast<double>(lane_count()) / n : 0.0;
     }
 };
+
+// ---------------------------------------------------------------------------
+// v3.2 build_semantics — defined outside the class for OMP clarity.
+// Deterministic end to end: lexical hashing is a pure function of the string;
+// the grounding passes iterate node ids ascending; the neighbour search
+// parallelizes over ROWS (each row's top-k depends only on that row), with
+// ties broken by (cosine desc, neighbour id asc).
+// ---------------------------------------------------------------------------
+inline void Substrate::build_semantics(int threads) {
+    const std::size_t n = node_count();
+    semvecs_.clear(); sem_edges_.clear(); sem_off_.clear(); sem_edge_count_ = 0;
+    if (n == 0) return;
+    // Cost guard: the neighbour search is O(n^2 * dims). Dedicated fabrics are
+    // 10^3..10^4 nodes (seconds); a 43k-node fabric is minutes once. Beyond
+    // 65k the build is refused — semantics stays absent, the model stays
+    // fully usable (honest scope, not silent failure).
+    if (n > 65000) return;
+    (void)threads;
+#if defined(_OPENMP)
+    if (threads > 0) omp_set_num_threads(threads);
+#endif
+
+    // Step 1 — LEXICAL LAYER: signed character-trigram hashing, L2-normalized.
+    semvecs_.assign(n * SEM_DIMS, 0.0f);
+    for (std::size_t i = 0; i < n; ++i) {
+        float* v = &semvecs_[i * SEM_DIMS];
+        const std::string& s = concept_of(static_cast<NodeId>(i));
+        auto bump = [&](const std::string& g, float w) {
+            std::uint64_t h = 1469598103934665603ull;
+            for (unsigned char c : g) { h ^= c; h *= 1099511628211ull; }
+            const std::size_t bucket = static_cast<std::size_t>(h % SEM_DIMS);
+            const float sign = ((h >> 40) & 1u) ? 1.0f : -1.0f;
+            v[bucket] += sign * w;
+        };
+        if (s.size() < 3) {
+            bump(s, 2.0f);
+        } else {
+            for (std::size_t p = 0; p + 3 <= s.size(); ++p) bump(s.substr(p, 3), 1.0f);
+            bump(s, 1.5f);                       // whole-token identity, too
+        }
+        float n2 = 0.0f;
+        for (std::size_t k = 0; k < SEM_DIMS; ++k) n2 += v[k] * v[k];
+        if (n2 > 0.0f) {
+            const float inv = 1.0f / std::sqrt(n2);
+            for (std::size_t k = 0; k < SEM_DIMS; ++k) v[k] *= inv;
+        }
+    }
+
+    // Step 2 — FABRIC GROUNDING: two smoothing passes over the Hebbian lanes.
+    // v_i <- normalize(v_i + beta * lane-weighted mean of v_j). This is how
+    // the fabric's own co-occurrence structure shapes the vectors — meaning
+    // diffusing along the lanes, not a fit.
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<float> nx(n * SEM_DIMS, 0.0f);
+        for (std::size_t i = 0; i < n; ++i) {
+            const float* v = &semvecs_[i * SEM_DIMS];
+            float* o = &nx[i * SEM_DIMS];
+            for (std::size_t k = 0; k < SEM_DIMS; ++k) o[k] = v[k];
+            auto it = out_.find(static_cast<NodeId>(i));
+            if (it != out_.end() && !it->second.empty()) {
+                float wsum = 0.0f;
+                float avg[SEM_DIMS];
+                for (std::size_t k = 0; k < SEM_DIMS; ++k) avg[k] = 0.0f;
+                for (const auto& l : it->second) {
+                    const float* u = &semvecs_[l.first * SEM_DIMS];
+                    for (std::size_t k = 0; k < SEM_DIMS; ++k) avg[k] += l.second * u[k];
+                    wsum += l.second;
+                }
+                if (wsum > 0.0f)
+                    for (std::size_t k = 0; k < SEM_DIMS; ++k)
+                        o[k] = v[k] + cfg_.sem_beta * (avg[k] / wsum);
+            }
+            float n2 = 0.0f;
+            for (std::size_t k = 0; k < SEM_DIMS; ++k) n2 += o[k] * o[k];
+            if (n2 > 0.0f) {
+                const float inv = 1.0f / std::sqrt(n2);
+                for (std::size_t k = 0; k < SEM_DIMS; ++k) o[k] *= inv;
+            }
+        }
+        semvecs_.swap(nx);
+    }
+    (void)omega_dir();   // materialize the fixed omega axis once
+
+    // Step 3 — RESONANCE EDGES: top-k cosine neighbours with cos >= theta.
+    const int kmax = std::max(1, cfg_.sem_neighbors);
+    std::vector<std::vector<std::pair<float, NodeId>>> per(n);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
+        const std::size_t i = static_cast<std::size_t>(ii);
+        const float* vi = &semvecs_[i * SEM_DIMS];
+        float vi2 = 0.0f;
+        for (std::size_t d = 0; d < SEM_DIMS; ++d) vi2 += vi[d] * vi[d];
+        if (vi2 <= 0.0f) continue;                       // dark node: no resonance
+        std::vector<std::pair<float, NodeId>> best;      // kept sorted: cos desc, id asc
+        best.reserve(static_cast<std::size_t>(kmax) + 1);
+        auto better = [](const std::pair<float, NodeId>& x, const std::pair<float, NodeId>& y) {
+            return x.first != y.first ? x.first > y.first : x.second < y.second;
+        };
+        for (std::size_t j = 0; j < n; ++j) {
+            if (j == i) continue;
+            const float* vj = &semvecs_[j * SEM_DIMS];
+            float dot = 0.0f;
+            for (std::size_t d = 0; d < SEM_DIMS; ++d) dot += vi[d] * vj[d];
+            if (dot < cfg_.sem_theta) continue;
+            if (best.size() < static_cast<std::size_t>(kmax)) {
+                best.emplace_back(dot, static_cast<NodeId>(j));
+                std::sort(best.begin(), best.end(), better);
+            } else if (better({dot, static_cast<NodeId>(j)}, best.back())) {
+                best.back() = {dot, static_cast<NodeId>(j)};
+                std::sort(best.begin(), best.end(), better);
+            }
+        }
+        per[i] = std::move(best);
+    }
+    sem_off_.assign(n + 1, 0);
+    std::size_t running = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        sem_off_[i] = running;
+        running += per[i].size();
+    }
+    sem_off_[n] = running;
+    sem_edges_.reserve(running);
+    for (std::size_t i = 0; i < n; ++i)
+        for (const auto& p : per[i]) sem_edges_.emplace_back(p.second, p.first);
+    sem_edge_count_ = running;
+}
 
 // ---------------------------------------------------------------------------
 // Tokenizer — plain lexical split (I/O concern, not pattern matching):

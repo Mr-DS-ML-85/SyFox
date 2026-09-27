@@ -14,3 +14,9 @@ data/giant/*
 !data/giant/MANIFEST.json
 data/hf_cache/
 data/hf_raw/
+data/b77_hier_chunks/
+data/bank77_hier_train.jsonl
+data/bank77_memories.jsonl
+data/bank77_hierarchy.json
+data/router16_train.jsonl
+data/router16_cal.jsonl

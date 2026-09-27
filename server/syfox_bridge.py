@@ -31,6 +31,11 @@ _LIB.syfox_engine_set_energy_norm.argtypes = [ctypes.c_void_p, ctypes.c_int]
 _LIB.syfox_engine_set_source_modes.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
 _LIB.syfox_engine_set_parallel_settle.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
 _LIB.syfox_engine_set_ngrams.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_LIB.syfox_engine_set_semantics.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_LIB.syfox_engine_set_retrieval.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_LIB.syfox_engine_set_retrieval_topk.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_LIB.syfox_engine_set_retrieval_dose.argtypes = [ctypes.c_void_p, ctypes.c_double]
+_LIB.syfox_engine_set_hierarchy.argtypes = [ctypes.c_void_p, ctypes.c_int]
 _LIB.syfox_core_version.restype = ctypes.c_char_p
 _LIB.syfox_string_free.argtypes = [ctypes.POINTER(ctypes.c_char)]
 
@@ -67,7 +72,13 @@ class SyFoxEngine:
             salience_gating bool   -> SI salience source mode
             miller_window   bool   -> SI Miller [cap-4,cap] window
             ngrams          "on"|"off" -> v2.2 trigram lane policy
+            semantics       bool   -> v3.2 semantic field (resonance + ctx lanes)
+            retrieval       bool   -> v3.2 retrieval-by-default priming
+            retrieval_topk  int    -> v3.2 memories to prime with (default 5)
+            retrieval_dose  float  -> v3.2 prime dose x inject (default 0.30)
+            hierarchy       bool   -> v3.2 Stage-3 category gating
         Returns (answers, usage) plus "evidence" key when requested.
+        usage carries "retrieval": [{label, resonance}] when priming fired.
         """
         payload = json.dumps(questions, ensure_ascii=False).encode()
         with self._lock:
@@ -98,6 +109,25 @@ class SyFoxEngine:
 
     def set_ngrams(self, on: bool):
         _LIB.syfox_engine_set_ngrams(self._h, int(on))
+
+    # -- v3.2 semantic layer / retrieval / hierarchy ------------------------
+
+    def set_semantics(self, on: bool):
+        """Runtime kill switch for the semantic field (v3.2)."""
+        _LIB.syfox_engine_set_semantics(self._h, int(on))
+
+    def set_retrieval(self, on: bool):
+        """Toggle retrieval-by-default priming (v3.2; inert without memories)."""
+        _LIB.syfox_engine_set_retrieval(self._h, int(on))
+
+    def set_retrieval_topk(self, topk: int):
+        _LIB.syfox_engine_set_retrieval_topk(self._h, int(topk))
+
+    def set_retrieval_dose(self, dose: float):
+        _LIB.syfox_engine_set_retrieval_dose(self._h, float(dose))
+
+    def set_hierarchy(self, on: bool):
+        _LIB.syfox_engine_set_hierarchy(self._h, int(on))
 
     def info(self) -> dict:
         raw = _LIB.syfox_engine_info(self._h)

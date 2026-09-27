@@ -1,3 +1,75 @@
+## v3.2.0 — the semantic layer (Stages 1-4), retrieval by default, the two-stage physics router, the dedicated bank77 fabric
+
+**The semantic field (core, deterministic, no ML).** Every concept node
+carries a 64-dim semantic vector: signed character-trigram hashing of the
+string (Stage 1 "concept frequency encoding" generalizes to a full vector)
+plus two fabric-grounding passes over the Hebbian lanes — meaning diffuses
+along the fabric, nothing is fitted. From the vectors: omega_semantic (fixed
+scalar projection), top-6 resonance edges (cos >= 0.50, persisted in a
+magic-guarded v4 substrate.bin tail), and typed reads (cos >= 0.82
+synonym-grade, >= 0.66 related — Option 2 derived from the vectors rather
+than a hand table). At settle, sources leak sem_coupling 0.12 of their
+post-diffusion energy along resonance edges, distributed by cos x
+frequency-match — ENERGY CONSERVED exactly (test-enforced); readout gains a
+semantic-neighbour term (sem_hop 0.10). **Context-sensitive lanes (Stage
+2)**: lanes accumulate required/forbidden context words from the lessons
+that laid them; at settle a mismatched lane carries less (forbidden x0.20,
+missing-required x0.60..1.0 by match count, all-1.0 bit-identical to the
+plain path) — contextual disambiguation as dampened coupling, not rules.
+**Stage 3 semantic hierarchy** ships as hierarchy.json (intents/categories/
+floor) and gates intent candidates by stage-1 category energies at readout.
+**Replay contract**: pre-v3.2 files end at the v3 tail, semantics inert,
+bit-for-bit replay (test-enforced); intern() invalidates a stale field
+(segfault fix caught by the M3 ledger test); --no-semantics is the runtime
+kill switch. **Retrieval by default**: a memories.jsonl in the model dir is
+fingerprinted once at load; every decide primes the field with the top-5
+resonating memories' outcomes at dose 0.30 x inject (deterministic,
+disclosed in usage.retrieval); --memories/--retrieval-topk/--retrieval-dose/
+--no-retrieval.
+
+**Dedicated bank77 fabric (the v3.0 architecture, now with physics that
+match it).** 9,000 opaque-anchor intent lessons + 9,000 category lessons
+(12 chunks, zero false contradictions after de-colliding the twins),
+1,648 nodes / 217,729 lanes / 7,728 resonance edges / 141,920 context-signed
+lanes / 256 retrieval memories. Hidden 3,080 rows scored once (energy-norm):
+**0.158 top-1** vs 0.081 (v3.1.0 dedicated+opaque) and 0.023 (77-way in the
+shared giant fabric). Ablations on cal (1,003): --no-semantics 0.039 (the
+semantic field is the jump), retrieval neutral, hierarchy gate
+measured-negative (floor 0.35: 0.111 vs gate-off 0.133; monotone in the
+floor sweep) — the shipped model carries floor 1.0 = gate off, documented.
+
+**Two-stage physics router.** tools/router_prepare.py carves a
+router-question-only sample (16 domains x 60 rows) into a dedicated small
+fabric: model-router16, 4,742 nodes, cal 16-way routing **0.444** (chance
+0.0625), ECE 0.380 -> 0.086. `decide --router model-router16 ...` settles
+the state on the router fabric, then the mapped domain fabric decides
+(router.json anchors/models); the route is disclosed as route:{anchor,
+confidence,top,model}. Bank77 queries route to the dedicated fabric; all
+other domains to the giant fabric.
+
+**Zero-shot re-run under v3.2** (docs/ZEROSHOT.md Part 4,
+tools/zeroshot_suite.py, data/zeroshot_v32_results.json): email spam on the
+tickets-only fabric 6/6 plain and 6/6 semantic-rebuild (conf 0.91-0.99);
+SMS spam 5/6 both (the error at conf 0.103 — honest low-conf disclosure);
+snake 1/8 both; tic-tac-toe picks cell 1 at conf 0 — multi-constraint
+composition fails exactly as in Part 1, and the semantic field does not
+fake it (honest scope: it moves trained discrimination, not symbolic
+reasoning).
+
+**Surface.** CLI: --router, --no-semantics, --no-retrieval, --no-hierarchy,
+--retrieval-topk, --retrieval-dose, decide --memories FILE; stats reports
+semantics/sem_edges/lane_contexts/retrieval/hierarchy. C API + HTTP bridge:
+set_semantics/set_retrieval/set_retrieval_topk/set_retrieval_dose/
+set_hierarchy + decide_ex opts keys + usage.retrieval + engine info fields.
+Tests: 4 new groups (semantic field determinism/conservation/round-trip/
+pre-v3.2 contract, context lanes learn+gate, retrieval-by-default +
+kill switch + inert-without-memories, hierarchy load+gate). Tools:
+bank77_hier.py, router_prepare.py, zeroshot_suite.py, rebuild_sem.cpp;
+Makefile b77-hier-data/b77-sem/b77-sem-bench/b77-sem-hidden/router-data/
+router16/router16-bench/zeroshot-sem/zeroshot. Core physics (injection,
+settle lane diffusion, Hebbian learning, honest silence) unchanged where
+the semantic tail is absent.
+
 ## v3.1.3 — routed-learn isolation bugfix; the 16-domain giant model + syfox-hf packaging
 
 **Bugfix (CLI, boundary layer):** `learn --lang auto` taught EVERY script

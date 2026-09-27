@@ -429,3 +429,128 @@ transfer costs pay for themselves — until then it stays design, and the
 SoA/CSR buffers above are the only GPU-specific preparation the core
 carries. No neural network enters the core at any point; the parallelism
 is the SAME physics, executed on more cores.
+
+## 16. v3.2 — the semantic field, context-sensitive lanes, retrieval by default, the two-stage router
+
+The largest boundary-layer addition since v3.0, and the first that adds a
+second field to the substrate. Everything below is deterministic, seeded by
+nothing, fitted to nothing — there is still no neural network, no
+transformer, and no pattern-matching classifier in the core.
+
+### Stage 1 + 4 — the semantic vector field (64-dim, resonance)
+
+Every concept node carries a 64-dim semantic vector built in two
+deterministic steps. The LEXICAL LAYER hashes the concept string's character
+trigrams into 64 buckets with FNV-1a-signed weights and L2-normalizes —
+"card_arrival" and "card_delivery" share trigrams, so their base vectors
+align; unrelated words stay near-orthogonal. FABRIC GROUNDING then runs two
+smoothing passes over the Hebbian lanes (v_i <- normalize(v_i + 0.5 *
+lane-weighted mean of v_j)): the fabric's own co-occurrence structure shapes
+the vectors, which is meaning diffusing along the lanes, not a fit. From the
+vectors, three derived quantities:
+
+- **omega_semantic** (Stage 1, "concept frequency encoding") — a scalar
+  projection onto one fixed deterministic direction, mapped to [0,1]. Two
+  nodes with close omega resonate harder, like coupled oscillators that are
+  nearly tuned; the fixed axis makes "card" map to the same omega in every
+  fabric.
+- **resonance edges** (Stage 4, "semantic field") — the top-6 cosine
+  neighbours with cos >= 0.50, stored as a CSR adjacency in the substrate's
+  v4 file tail. During settle, every SOURCE (and only sources — the working
+  set stays capped) leaks a fraction (sem_coupling 0.12) of its post-diffusion
+  energy along these edges, distributed proportionally to cos x
+  frequency-match. Energy is CONSERVED exactly: the pool is subtracted from
+  the source and distributed; decay applies next pass as always.
+- **typed reads** (Option 2) — cos >= 0.82 reads as synonym-grade kin, >=
+  0.66 as related; `syfox analogs` and the evidence surface expose the type.
+  The v2.1 synonym folding table remains the string-level canonicalization;
+  the vectors add the fabric-shaped layer above it.
+
+Readout gains a semantic-neighbour term (sem_hop 0.10 x cosine x neighbour
+energy): energy resting on semantically similar nodes counts for a probe
+even where no lane connects them.
+
+### Stage 2 — context-sensitive lanes
+
+A lane may carry a CONTEXT SIGNATURE: required and forbidden context words,
+learned from the co-occurrence statistics of the lessons that laid it
+(`add_ctx_support` accumulates counts at learn time; `finalize_contexts`
+promotes surviving counts — top-4 with count >= 2 — into required sets, and
+cross-lane diffs (strong in a sibling lane's context, absent here) into
+forbidden words, top-2). At settle, a lane's effective weight is
+w x factor: any forbidden word present in the decision's own injected
+tokens -> x0.20; required words missing -> x0.60..1.0 interpolated by match
+count; all present -> x1.0 (bit-identical to the plain path). The node's
+total outflow scales by sum(w x f)/sum(w), so damped lanes carry LESS and
+the energy stays home — context-mismatched routes fade physically instead of
+being pruned by a rule. The same "card" can now route toward card_arrival
+when arrive/receive are in the state and toward card_delivery_estimate when
+estimate/how-long is.
+
+### Persistence and the replay contract
+
+The semantic field, resonance edges and lane contexts live in a magic-
+guarded v4 tail of substrate.bin. Pre-v3.2 files simply end at the v3
+evidence tail: has_semantics() is false and every semantic code path is
+inert, so every v2/v3 model replays bit-for-bit under the new binary
+(test-enforced). `intern()` invalidates the field when the fabric grows —
+a stale top-k neighbourhood must never be indexed — and the next
+`save_model()` rebuilds it deterministically. `--no-semantics` /
+`set_semantics(false)` is the runtime kill switch.
+
+### Retrieval by default
+
+A model dir may ship `memories.jsonl` (rows {"label": ..., "state": ...}).
+load_model fingerprints each memory once (its own settled field, the
+recall.hpp Hopfield-style mechanism); every decide then ranks memories by
+settled-field cosine against the query and injects the top-5 outcomes at a
+faint dose (0.30 x inject_energy) BEFORE the state settles — a physical
+prior from lived experience, deterministic, bit-reproducible for the same
+state + memories. No memories file => the whole path is inert (pre-3.2
+behavior). Flags: --memories FILE (explicit store), --retrieval-topk,
+--retrieval-dose, --no-retrieval. usage.retrieval discloses what primed the
+decision, in the CLI, the C API and the HTTP bridge alike.
+
+### Stage 3 — the semantic hierarchy
+
+A model dir may ship `hierarchy.json` {"intents": {intent: category},
+"categories": {category: {"criteria": ...}}, "floor": 0.35}. Both levels are
+TRAINED anchors in one fabric; at decide, stage-1 category energies scale the
+stage-2 intent candidates by floor + (1-floor) x cat/max_cat — a readout-side
+two-stage classification. MEASURED on bank77 (cal, 1,003 rows): gate OFF
+0.133 > floor 0.85: 0.129 > 0.5: 0.113 > 0.35: 0.111 — the category readout
+is not additive on this fabric (consistent with the v3.1.0 finding that the
+hierarchical first-token split was measured-negative), so the shipped
+model-b77-sem carries floor 1.0 = gate off, kept as documentation. The
+mechanism stays available (--no-hierarchy to disable elsewhere).
+
+### The dedicated bank77 fabric + the two-stage router
+
+The v3.2 answer to high-cardinality collapse is ARCHITECTURAL, as the
+v3.0 design intended: a DEDICATED fabric per hard domain, routed by a small
+dedicated router fabric.
+
+- **model-b77-sem** (dedicated bank77): 9,000 intent lessons + 9,000
+  category lessons (12 chunks), 1,648 nodes / 217,729 lanes, 7,728 resonance
+  edges, 141,920 lane contexts, 256 retrieval memories, calibrated. Hidden
+  (3,080 rows, scored once, energy-norm): **0.158** — vs 0.081 (v3.1.0
+  dedicated+opaque) and 0.023 (77-way in the shared giant fabric). Ablations
+  on cal: --no-semantics 0.039 (the semantic field is the jump: 0.039 ->
+  0.133), retrieval neutral, hierarchy gate negative (above).
+- **model-router16** (two-stage, stage 1): a 4,742-node fabric trained ONLY
+  on router questions (16 anchors, one per giant domain, 60 rows/domain).
+  Cal 16-way routing 0.444 (chance 0.0625), ECE 0.380 -> 0.086.
+  `decide --router model-router16 ...` settles the state on the router
+  fabric, picks the domain anchor, then the mapped domain fabric (router.json
+  "models") decides the real questions; the route is disclosed in the output
+  as route:{anchor,confidence,top,model}. Physics-based routing, no
+  classifier — the two-stage architecture from the v3.0 design, now measured.
+
+### Zero-shot, re-measured under v3.2 (docs/ZEROSHOT.md Part 4)
+
+Email spam on the tickets-only fabric (never taught spam): 6/6 (plain) and
+6/6 (semantic rebuild). SMS spam: 5/6 both. Snake on the giant fabric: 1/8
+both; Tic-tac-toe: picks 1 at conf 0 — multi-constraint composition is
+still not a fabric property, and the semantic field does not fake it.
+Honest as ever: the semantic field moves TRAINED-discrimination and
+vocabulary-overlap zero-shot, not symbolic reasoning.

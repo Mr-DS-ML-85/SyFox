@@ -342,3 +342,49 @@ giant-prepare:
 giant-chunks:
 	mkdir -p data/giant/chunks
 	split -n l/12 -d -a 2 data/giant/train.jsonl data/giant/chunks/chunk_ --additional-suffix=.jsonl
+
+# -- v3.2 semantic layer: dedicated bank77 fabric + 16-domain router ---------
+# Dedicated high-cardinality substrate: opaque anchors, empty instructions
+# (the three RCA fixes), PLUS the v3.2 semantic field, context-sensitive
+# lanes, retrieval memories and the (gate-off) semantic hierarchy.
+b77-hier-data:
+	python3 tools/bank77_hier.py
+
+b77-sem: build/syfox b77-hier-data
+	bash scripts/b77_train_chunked.sh 0 11
+	cp data/bank77_hierarchy.json model-b77-sem/hierarchy.json
+	cp data/bank77_memories.jsonl model-b77-sem/memories.jsonl
+	./build/syfox calibrate --model model-b77-sem --examples data/bank77_cal.jsonl
+
+b77-sem-bench: build/syfox
+	./build/syfox bench --model model-b77-sem --eval data/bank77_cal.jsonl --energy-norm --replays 1 --latency-reps 1
+
+b77-sem-hidden: build/syfox
+	./build/syfox bench --model model-b77-sem --eval data/bank77_hidden.jsonl --energy-norm --replays 1 --latency-reps 2
+
+# Two-stage physics router: small dedicated fabric (one anchor per domain),
+# trained on router-question-only rows; decide --router model-router16 routes
+# into the mapped domain fabric (router.json holds anchors + models).
+router-data:
+	python3 tools/router_prepare.py
+
+router16: build/syfox router-data
+	./build/syfox learn --model model-router16 --examples data/router16_train.jsonl --epochs 3
+	cp data/router16_router.json model-router16/router.json
+	./build/syfox calibrate --model model-router16 --examples data/router16_cal.jsonl
+
+router16-bench: build/syfox
+	./build/syfox bench --model model-router16 --eval data/router16_cal.jsonl --energy-norm --replays 1 --latency-reps 1
+
+# Zero-shot probe suite (email/sms spam on the tickets fabric, snake +
+# tic-tac-toe on the giant fabric), plain vs semantic rebuilds.
+zeroshot-sem: build/rebuild_sem
+	./build/rebuild_sem model-game-big-latin model-game-big-latin-sem
+	./build/rebuild_sem model-tickets-big-latin model-tickets-big-latin-sem
+	./build/rebuild_sem model-giant-latin model-giant-latin-sem
+
+zeroshot: build/syfox
+	python3 tools/zeroshot_suite.py
+
+build/rebuild_sem: src/rebuild_sem.cpp core/syfox.hpp
+	$(CXX) $(CXXFLAGS) -fopenmp -I. src/rebuild_sem.cpp -o build/rebuild_sem

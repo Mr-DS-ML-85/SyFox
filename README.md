@@ -644,11 +644,34 @@ band: route answers with confidence below your threshold to a human.
   `model-*/substrate.bin` — the lanes ARE the knowledge, every one
   inspectable.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full mechanism
+## v3.2 — the semantic layer, retrieval by default, the two-stage router
+
+The substrate now carries a SECOND field: a 64-dim semantic vector per
+concept (signed character-trigram hashing + two fabric-grounding passes —
+deterministic, no ML), from which **resonance edges** leak a small,
+energy-conserving share of a source's energy to its semantically similar
+neighbours during settle, and readout gains a semantic-neighbour term.
+**Context-sensitive lanes** learn required/forbidden context words from the
+lessons that laid them and carry less when the decision's own tokens do not
+match — the same "card" routes toward card_arrival or
+card_delivery_estimate by context, physically. **Retrieval is default-on**:
+a `memories.jsonl` in the model dir primes every decide with the outcomes of
+the most resonating lived experiences (Hopfield-style settled-field
+cosine), deterministic and disclosed in the output. A dedicated
+**bank77 fabric** (1,648 nodes, semantic field + 141,920 context-signed
+lanes + 256 memories) takes 77-way banking intents to **0.158 hidden**
+(vs 0.081 v3.1.0 dedicated / 0.023 shared), and a small dedicated
+**router fabric** (16 domain anchors, cal 0.444 at 16-way vs chance 0.063)
+powers the two-stage physics router: `decide --router model-router16 ...`
+routes, then the mapped domain fabric decides. Pre-v3.2 models replay
+bit-for-bit (the semantic state lives in a magic-guarded file tail);
+`--no-semantics`, `--no-retrieval`, `--no-hierarchy` are the kill switches.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §16 for the full mechanism
 specification, [docs/ZEROSHOT.md](docs/ZEROSHOT.md) for the zero-shot probe
-reports and the runtime-flag mechanism (settled energy is invariant to the
-source modes; confidence is concentration, not correctness),
-[docs/PROBING.md](docs/PROBING.md) for probe methodology, and
+reports (Parts 1 and 4), the runtime-flag mechanism (settled energy is
+invariant to the source modes; confidence is concentration, not
+correctness), [docs/PROBING.md](docs/PROBING.md) for probe methodology, and
 [ROADMAP.md](ROADMAP.md) for where this is going.
 
 ## License & credit

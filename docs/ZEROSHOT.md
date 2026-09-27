@@ -222,3 +222,49 @@ Findings, all measured:
   flag experiment reproduce from a fresh clone).
 - **tickets/game/guard big splits**: synthetic corpora (`data/big/`,
   SHA-256 `MANIFEST.json`).
+
+---
+
+## Part 4 — v3.2 zero-shot re-run (Super Z, measured runs, 2026-09)
+
+The v3.2 semantic layer changed the trained-discrimination numbers
+(bank77 dedicated fabric 0.081 -> 0.158 hidden). Before claiming anything
+about zero-shot, the suite was RE-RUN under v3.2 per the interpretation
+rules above: `tools/zeroshot_suite.py` (data/zeroshot_v32_results.json has
+every row). Every number below is a real CLI decide (--energy-norm,
+retrieval disabled for the probe, deterministic).
+
+### Setup
+
+| Probe family | Fabric | Trained on | Zero-shot claim |
+|---|---|---|---|
+| email spam x6 | model-tickets-big-latin (+ `-sem` semantic rebuild) | support tickets only | no spam lessons ever |
+| sms spam x6 | same | support tickets only | no spam lessons ever |
+| snake x8 | model-giant-latin (+ `-sem`) | 16 domains incl. game; zero Snake lessons | same spirit as Part 1 model-xl |
+| tic-tac-toe x1 | same | zero Tic-tac-toe lessons | same spirit as Part 1 model-xl |
+
+`-sem` rebuilds are `load + save_model` of the SAME fabric (no retrain):
+the deterministic v3.2 semantic field (vectors, resonance edges) built over
+the frozen lanes.
+
+### Results (measured)
+
+| Family | plain | semantic rebuild | detail |
+|---|---|---|---|
+| email spam | **1.00** (6/6) | **1.00** (6/6) | conf 0.91-0.99; the criteria words overlap the tickets vocabulary — the composition channel is surface overlap, as in Part 1 |
+| sms spam | **0.83** (5/6) | 0.83 (5/6) | the one error is a ham read as spam at conf 0.103 (the honest low-conf regime, disclosed) |
+| snake | 0.12 (1/8) | 0.12 (1/8) | "food directly ahead -> right" (0.160 plain / 0.233 sem) is the only correct row; every wall/body/lethal-right scenario still picks the food-biased direction — the Part 1 composition failure reproduces under v3.2 |
+| tic-tac-toe | picks 1, conf 0.000 | picks 1, conf 0.000 | winning cell 3 still gets no composed support (Part 1's run picked 8; both are wrong — different field, same failure class) |
+
+### What Part 4 adds
+
+- The v3.2 semantic field (resonance + semantic readout) does NOT fake
+  symbolic composition: multi-constraint scenarios (lethal wall, forbidden
+  reversal, exclusions) fail exactly as in Part 1, with the food-direction
+  attractor dominating.
+- Where zero-shot WORKS (spam/ham through vocabulary overlap), the semantic
+  rebuild preserves it — energy-norm-level confidence, no new failures.
+- Trained discrimination and zero-shot composition remain the two separate
+  axes of Part 2, and v3.2 moves the first, not the second. Nothing above
+  is evidence of reasoning; the honest-silence disclosures (low-conf rows)
+  are doing their job.

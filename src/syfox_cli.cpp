@@ -70,12 +70,26 @@ struct Args {
     bool state_file = false, questions_file = false;
     // SI-faithful selection modes (off by default; never persisted into the model)
     bool salience_gating = false, miller_window = false;
+    // v3.2 semantic layer + retrieval-by-default + two-stage router
+    bool no_semantics = false;       // --no-semantics: runtime kill switch for the semantic field
+    bool no_retrieval = false;       // --no-retrieval: skip associative priming
+    bool no_hierarchy = false;       // --no-hierarchy: skip stage-1 category gating
+    long retrieval_topk = -1;        // --retrieval-topk N (-1 = engine default 5)
+    float retrieval_dose = 0;        // --retrieval-dose F (0 = engine default 0.30)
+    std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
 };
 
 // Apply the CLI mode overrides after load_model(). Mode-neutral by design:
 // substrate.bin stays untouched, flags live only for this process.
 void apply_modes(syfox::Engine& eng, const Args& a) {
     eng.substrate().set_source_modes(a.salience_gating, a.miller_window);
+    // v3.2 semantic layer knobs: the field is ON whenever the model ships it
+    // (substrate v4 tail); the kill switches restore pre-3.2 behavior exactly.
+    eng.substrate().set_semantics(!a.no_semantics);
+    eng.set_retrieval(!a.no_retrieval);
+    if (a.retrieval_topk >= 0) eng.set_retrieval_topk(static_cast<int>(a.retrieval_topk));
+    if (a.retrieval_dose > 0) eng.set_retrieval_dose(a.retrieval_dose);
+    if (a.no_hierarchy) eng.set_hierarchy(false);
     // v3 Milestone 5: --threads N controls deterministic parallel settle on
     // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
     // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
@@ -384,6 +398,14 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
         {"engine", std::string("syfox-") + syfox::VERSION},
         {"core", "si-substrate"},
     };
+    if (!u.retrieved.empty()) {
+        sfx::JVArr ret;
+        for (const auto& r : u.retrieved)
+            ret.push_back(sfx::JV(sfx::JVObj{
+                {"label", sfx::JV(r.first)},
+                {"resonance", std::round(r.second * 1000.0f) / 1000.0f}}));
+        usage["retrieval"] = sfx::JV(ret);          // v3.2: memories that primed this decision
+    }
     return sfx::JV(sfx::JVObj{{"answers", sfx::JV(out)}, {"usage", sfx::JV(usage)}});
 }
 
@@ -393,11 +415,78 @@ void cmd_decide(const Args& a) {
     sfx::JV questions = sfx::JV::parse(qtext);
     if (!questions.is_obj()) { std::cerr << "syfox: questions must be a JSON object\n"; std::exit(2); }
     std::string lang_note;
-    const std::string model_dir = route_model(a, state, lang_note, false);
+    std::string model_dir = route_model(a, state, lang_note, false);
+    sfx::JVObj route_report;
+    // -- v3.2 two-stage physics router ---------------------------------------
+    // Stage 1: a SMALL dedicated router fabric (500-node class, one anchor per
+    // domain) settles the state and picks the domain anchor — pure field
+    // dynamics, same substrate physics, no classifier.
+    // Stage 2: the domain model mapped in the router's router.json (models:
+    // {anchor: model-dir}) decides the actual questions; --model stays as the
+    // fallback domain layer when the mapping misses. Both stages are
+    // independent SI settles; the route is disclosed in the output.
+    if (!a.router.empty()) {
+        syfox::Engine reng;
+        reng.load_model(a.router);
+        apply_modes(reng, a);
+        if (a.energy_norm) reng.set_energy_norm(true);   // M1 gain for the router too
+        sfx::JV rschema(sfx::JVObj{});
+        {
+            std::ifstream rf(a.router + "/router.json");
+            if (rf) {
+                std::string buf((std::istreambuf_iterator<char>(rf)), std::istreambuf_iterator<char>());
+                rschema = sfx::JV::parse(buf);
+            }
+        }
+        if (!rschema.has("anchors") || !rschema.at("anchors").is_obj()) {
+            std::cerr << "syfox: router model " << a.router << " lacks router.json anchors\n";
+            std::exit(2);
+        }
+        sfx::JV rqs(sfx::JVObj{
+            {"route", sfx::JV(sfx::JVObj{
+                {"type", sfx::JV("choice")},
+                {"instructions", sfx::JV("which domain does this state belong to")},
+                {"criteria", rschema.at("anchors")}})}});
+        syfox::Usage ru;
+        auto rans = reng.decide(state, rqs, ru);
+        ru.calibrated = reng.calibration().fitted;
+        const syfox::Answer& ra = rans[0];
+        sfx::JVObj rj;
+        rj["anchor"] = sfx::JV(ra.deferred ? std::string() : ra.choice);
+        rj["confidence"] = sfx::JV(std::round(ra.confidence * 1000.0f) / 1000.0f);
+        rj["deferred"] = sfx::JV(ra.deferred);
+        std::vector<std::pair<float, std::string>> ranked;
+        for (const auto& p : ra.probabilities) ranked.emplace_back(p.second, p.first);
+        std::sort(ranked.begin(), ranked.end(), [](const auto& x, const auto& y){ return x.first > y.first; });
+        sfx::JVArr top3;
+        for (std::size_t i = 0; i < ranked.size() && i < 3; ++i)
+            top3.push_back(sfx::JV(sfx::JVObj{
+                {"anchor", sfx::JV(ranked[i].second)},
+                {"p", sfx::JV(std::round(ranked[i].first * 1000.0f) / 1000.0f)}}));
+        rj["top"] = sfx::JV(top3);
+        if (rschema.has("models") && rschema.at("models").is_obj()
+            && !ra.deferred && rschema.at("models").has(ra.choice)) {
+            model_dir = rschema.at("models").at(ra.choice).as_str();
+            rj["model"] = sfx::JV(model_dir);
+        }
+        route_report = std::move(rj);
+    }
     syfox::Engine eng;
     eng.load_model(model_dir);
     apply_modes(eng, a);
     if (a.energy_norm) eng.set_energy_norm(true);   // Milestone-1 gain knob
+    // --memories FILE (v3.2): explicit memory store for decide — overrides any
+    // model-dir memories.jsonl for this process. Rows: {"label":..., "state":...}.
+    if (!a.memories.empty()) {
+        std::vector<syfox::recall::Memory> mems;
+        for (const auto& r : load_jsonl(a.memories)) {
+            syfox::recall::Memory m;
+            m.label = r.at("label").as_str();
+            m.state = si::norm::normalize(r.at("state").as_str());
+            if (!m.label.empty() && !m.state.empty()) mems.push_back(std::move(m));
+        }
+        if (!mems.empty()) eng.set_memories(std::move(mems));
+    }
     syfox::Usage u;
     auto answers = eng.decide(state, questions, u);
     u.calibrated = eng.calibration().fitted;   // decide() resets Usage; set after
@@ -422,6 +511,7 @@ void cmd_decide(const Args& a) {
     }
     sfx::JV out = answers_to_json(answers, u);
     if (!lang_note.empty()) out.obj["lang_note"] = sfx::JV(lang_note);
+    if (!route_report.empty()) out.obj["route"] = sfx::JV(route_report);
     // v3 Milestone 3: machine-auditable evidence — supporting lanes with
     // provenance, plus any contradiction records for this exact state.
     if (a.evidence)
@@ -525,7 +615,14 @@ void cmd_stats(const Args& a) {
         {"noul_a", eng.calibration().noul_a},
         {"noul_b", eng.calibration().noul_b},
         {"salience_gating", sfx::JV(eng.substrate().config().salience_gating)},
-        {"miller_window", sfx::JV(eng.substrate().config().miller_window)}}).dump() << "\n";
+        {"miller_window", sfx::JV(eng.substrate().config().miller_window)},
+        // v3.2 semantic layer + retrieval + hierarchy
+        {"semantics", sfx::JV(eng.substrate().has_semantics() && !a.no_semantics)},
+        {"sem_edges", static_cast<double>(eng.substrate().resonance_edge_count())},
+        {"lane_contexts", static_cast<double>(eng.substrate().lane_context_count())},
+        {"retrieval", sfx::JV(eng.retrieval_on() && !a.no_retrieval)},
+        {"retrieval_memories", static_cast<double>(eng.memories().size())},
+        {"hierarchy", sfx::JV(eng.hierarchy_on() && !a.no_hierarchy)}}).dump() << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1210,35 @@ void usage_exit() {
         "                      instead of raw energy\n"
         "  --miller-window     live source cap drawn from [source_cap-4, source_cap]\n"
         "                      per decision (= [20,24] at the default cap 24;\n"
-        "                      TSDA live_cap lineage, SI samples [5,9] at cap 9)\n";
+        "                      TSDA live_cap lineage, SI samples [5,9] at cap 9)\n"
+        "semantic layer (v3.2, deterministic, no ML — default ON for models saved\n"
+        "  by v3.2+; pre-v3.2 fabrics replay unchanged because they carry no\n"
+        "  semantic tail):\n"
+        "  Stage 1  omega_semantic: fixed scalar projection of each concept's\n"
+        "           64-dim semantic vector (frequency encoding for resonance)\n"
+        "  Stage 2  context-sensitive lanes: lanes learn required/forbidden\n"
+        "           context words from the lessons that laid them; at settle a\n"
+        "           mismatched lane carries less (forbidden context x0.20,\n"
+        "           missing required x0.60..1.0 by match count)\n"
+        "  Stage 3  semantic hierarchy: hierarchy.json in the model dir; stage 1\n"
+        "           reads category anchors, stage 2 scales intent candidates\n"
+        "           (--no-hierarchy disables)\n"
+        "  Stage 4  semantic field: resonance edges (top-k cosine neighbours of\n"
+        "           the fabric-grounded vectors) leak a small energy share to\n"
+        "           semantically similar nodes at settle (conserved), and\n"
+        "           readout adds a semantic-neighbour term\n"
+        "  --no-semantics     runtime kill switch for the whole layer\n"
+        "retrieval by default (v3.2): decide consults associative memory — a\n"
+        "  memories.jsonl in the model dir (rows {\"label\":...,\"state\":...}) is\n"
+        "  fingerprinted once at load; each decide ranks memories by settled-field\n"
+        "  resonance and primes the field with the top-k outcomes at a faint dose\n"
+        "  (0.30 x inject). Deterministic. Flags: --memories FILE (explicit store),\n"
+        "  --retrieval-topk N (default 5), --retrieval-dose F, --no-retrieval.\n"
+        "two-stage router (v3.2): decide --router DIR runs a small dedicated\n"
+        "  router fabric (one anchor per domain; router.json holds anchors +\n"
+        "  models mapping) as stage 1, then the mapped domain model decides —\n"
+        "  physics-based routing, no classifier. The route is disclosed in the\n"
+        "  output as route:{anchor,confidence,top,model}.\n";
     std::exit(2);
 }
 
@@ -1176,6 +1301,13 @@ int main(int argc, char** argv) {
         else if (k == "--seed")  { if (i + 1 >= argc) usage_exit(); a.seed = std::strtoull(argv[++i], nullptr, 0); }
         else if (k == "--salience-gating") a.salience_gating = true;
         else if (k == "--miller-window") a.miller_window = true;
+        // v3.2 semantic layer / retrieval / router
+        else if (k == "--no-semantics") a.no_semantics = true;
+        else if (k == "--no-retrieval") a.no_retrieval = true;
+        else if (k == "--no-hierarchy") a.no_hierarchy = true;
+        else if (k == "--retrieval-topk") { if (i + 1 >= argc) usage_exit(); a.retrieval_topk = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--retrieval-dose") { if (i + 1 >= argc) usage_exit(); a.retrieval_dose = std::strtof(argv[++i], nullptr); }
+        else if (k == "--router") need(a.router);
         else usage_exit();
     }
     // v2.1 (P4): one synonym table for the whole process. --synonyms wins;

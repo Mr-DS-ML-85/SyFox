@@ -20,6 +20,7 @@
 #include "si_substrate.hpp"
 #include "normalize.hpp"
 #include "ngram.hpp"
+#include "recall.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -33,7 +34,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.1.3";
+inline const char* VERSION = "3.2.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -101,6 +102,9 @@ struct Usage {
     int settle_passes = 0;
     float settled_energy = 0.0f;
     bool calibrated = false;
+    // v3.2 retrieval-by-default: the memories that primed this decision
+    // (label, resonance) pairs, strongest first; empty when retrieval off.
+    std::vector<std::pair<std::string, float>> retrieved;
 };
 
 struct Calibration {
@@ -157,9 +161,14 @@ public:
     bool energy_norm() const { return energy_norm_; }
 
     // -- model persistence ----------------------------------------------------
-    void save_model(const std::string& dir) const {
+    void save_model(const std::string& dir) {
         std::string cmd_mkdir = "mkdir -p '" + dir + "'";
         (void)std::system(cmd_mkdir.c_str());
+        // v3.2: promote context signatures, then build the semantic field over
+        // the final fabric. Both are deterministic; both persist into the
+        // substrate v4 tail so decide-time needs no rebuild.
+        si_.finalize_contexts();
+        si_.build_semantics();
         si_.save(dir + "/substrate.bin");
         std::ofstream cf(dir + "/calibration.json");
         cf << calib_.to_json().dump();
@@ -170,7 +179,11 @@ public:
             {"lanes", static_cast<double>(si_.lane_count())},
             {"evidence_records", static_cast<double>(si_.evidence_count())},
             {"teach_events", static_cast<double>(teach_seq_)},
-            {"contradictions", static_cast<double>(conflicts_.size())}}).dump();
+            {"contradictions", static_cast<double>(conflicts_.size())},
+            {"semantics", si_.has_semantics()},
+            {"sem_edges", static_cast<double>(si_.resonance_edge_count())},
+            {"lane_contexts", static_cast<double>(si_.lane_context_count())},
+            {"retrieval_memories", static_cast<double>(memories_.size())}}).dump();
         // v3 Milestone 3: the audit trail. conflicts.jsonl = every detected
         // contradiction; lessons_index.jsonl = state-hash -> outcome index
         // (so a LATER learn invocation still detects contradictions against
@@ -224,7 +237,81 @@ public:
                 }
             }
         }
+        // v3.2: semantic hierarchy (Stage 3) ships as hierarchy.json in the
+        // model dir; absent file = single-stage readout, exactly as before.
+        load_hierarchy(dir + "/hierarchy.json");
+        // v3.2 retrieval BY DEFAULT: a memories.jsonl shipped in the model dir
+        // is loaded and fingerprinted once (settled-field cosines are then
+        // free at decide time). No file => retrieval is inert, behavior of
+        // every pre-3.2 model unchanged. --no-retrieval disables at runtime.
+        {
+            std::ifstream f(dir + "/memories.jsonl");
+            if (f) {
+                std::vector<recall::Memory> mems;
+                std::string line;
+                while (std::getline(f, line)) {
+                    if (line.empty()) continue;
+                    try {
+                        sfx::JV r = sfx::JV::parse(line);
+                        recall::Memory m;
+                        m.label = r.at("label").as_str();
+                        m.state = si::norm::normalize(r.at("state").as_str());
+                        if (!m.label.empty() && !m.state.empty()) mems.push_back(std::move(m));
+                    } catch (const std::exception&) { /* skip malformed line */ }
+                }
+                if (!mems.empty()) set_memories(std::move(mems));
+            }
+        }
     }
+
+    // -- v3.2 retrieval-by-default (associative priming) ------------------------
+    // Memories are NOT a second classifier: each memory is fingerprinted by
+    // its own settled field (recall.hpp Hopfield-style resonance), and the
+    // top-k resonating memories inject their OUTCOME tokens at a faint dose
+    // before the state settles — a physical prior from lived experience.
+    // Deterministic: fingerprints are fixed at load, the query fingerprint
+    // is a pure function of the state, ties break by memory order.
+    void set_memories(std::vector<recall::Memory> mems) {
+        memories_ = std::move(mems);
+        memory_fps_.clear();
+        memory_fps_.reserve(memories_.size());
+        for (const auto& m : memories_)
+            memory_fps_.push_back(recall::fingerprint(si_, m.state));
+        retrieval_on_ = true;
+    }
+    void set_retrieval(bool on) { retrieval_on_ = on; }
+    bool retrieval_on() const { return retrieval_on_; }
+    void set_retrieval_topk(int k) { retrieval_topk_ = std::max(0, k); }
+    void set_retrieval_dose(float d) { retrieval_dose_ = std::max(0.0f, d); }
+    const std::vector<recall::Memory>& memories() const { return memories_; }
+
+    // -- v3.2 Stage 3: semantic hierarchy (readout-side two-stage) --------------
+    // hierarchy.json: {"intents": {"c42": "h_card"}, "categories":
+    // {"h_card": {"criteria": "..."}}, "floor": 0.35}. Both levels are
+    // TRAINED anchors in the same fabric; at decide, stage 1 reads category
+    // energies, stage 2 scales each intent candidate by its category's
+    // normalized score (floor keeps every candidate physically alive).
+    bool load_hierarchy(const std::string& path) {
+        std::ifstream f(path);
+        if (!f) return false;
+        std::string buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        try {
+            sfx::JV j = sfx::JV::parse(buf);
+            hier_of_.clear(); hier_cat_criteria_.clear();
+            if (j.has("intents") && j.at("intents").is_obj())
+                for (const auto& kv : j.at("intents").obj)
+                    hier_of_[kv.first] = kv.second.as_str();
+            if (j.has("categories") && j.at("categories").is_obj())
+                for (const auto& kv : j.at("categories").obj)
+                    hier_cat_criteria_[kv.first] = kv.second.has("criteria")
+                        ? kv.second.at("criteria").as_str() : std::string();
+            hier_floor_ = static_cast<float>(j.has("floor") ? j.at("floor").as_num(0.35) : 0.35);
+            hier_on_ = !hier_of_.empty() && !hier_cat_criteria_.empty();
+        } catch (const std::exception&) { hier_on_ = false; }
+        return hier_on_;
+    }
+    void set_hierarchy(bool on) { hier_on_ = on; }
+    bool hierarchy_on() const { return hier_on_; }
 
     // set the audit context tag recorded into the lane evidence ledger
     void set_context(const std::string& c) { context_ = c; }
@@ -312,6 +399,25 @@ public:
                     if (si_.has(g))
                         si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f * eta);
         si_.hebbian_lesson(state, outcome, eta);
+        // v3.2 Stage 2: context-signature accumulation on the state->outcome
+        // lanes. The row's own tokens (state + criteria words) are the lane's
+        // context evidence; counts that survive pruning (>= 2 lessons) become
+        // the lane's required set at save time, and cross-lane diffs become
+        // forbidden words. Bookkeeping only — the field is untouched here.
+        {
+            std::vector<si::NodeId> ctx_ids;
+            for (const auto& u : words) {
+                if (si_.has(u)) ctx_ids.push_back(si_.find(u));
+                if (ctx_ids.size() >= 16) break;
+            }
+            if (!ctx_ids.empty())
+                for (const auto& a : state)
+                    if (si_.has(a))
+                        for (const auto& b : outcome)
+                            if (si_.has(b))
+                                for (const si::NodeId u : ctx_ids)
+                                    si_.add_ctx_support(si_.find(a), si_.find(b), u);
+        }
         // Milestone 3: record the support evidence for every state->outcome
         // lane this lesson just strengthened (bookkeeping; the ledger never
         // feeds back into the field).
@@ -514,6 +620,39 @@ public:
         usage.state_tokens = words.size();
 
         si_.reset_field();
+        // v3.2 retrieval-by-default: if the model ships memories, the query's
+        // settled-field fingerprint ranks them (Hopfield-style resonance,
+        // recall.hpp) and the top-k outcomes inject a faint prime dose before
+        // the state settles. The prime is part of the decision composition:
+        // same state + same memories => same field, bit for bit. No memories
+        // (or --no-retrieval) => this block is skipped entirely.
+        if (retrieval_on_ && !memories_.empty() && retrieval_topk_ > 0) {
+            const std::vector<float> fq = recall::fingerprint(si_, words);
+            struct Hit { float r; std::size_t idx; };
+            std::vector<Hit> hits;
+            hits.reserve(memories_.size());
+            for (std::size_t m = 0; m < memories_.size(); ++m) {
+                const std::vector<float>& fm = memory_fps_[m];
+                float dot = 0.0f;
+                const std::size_t nn = std::min(fq.size(), fm.size());
+                for (std::size_t i = 0; i < nn; ++i) dot += fq[i] * fm[i];
+                hits.push_back({dot, m});
+            }
+            std::stable_sort(hits.begin(), hits.end(),
+                             [](const Hit& x, const Hit& y) { return x.r > y.r; });
+            const std::size_t kk = std::min<std::size_t>(static_cast<std::size_t>(retrieval_topk_), hits.size());
+            si_.reset_field();                       // fresh field: prime + state only
+            const float dose = retrieval_dose_ * si_.config().inject_energy;
+            for (std::size_t i = 0; i < kk; ++i) {
+                if (hits[i].r <= 0.01f) continue;    // a whisper of resonance primes nothing
+                const recall::Memory& m = memories_[hits[i].idx];
+                std::vector<std::string> prime;
+                for (const auto& t : si::norm::normalize(m.label))
+                    if (si_.has(t)) prime.push_back(t);
+                if (!prime.empty()) si_.inject(prime, dose);
+                usage.retrieved.emplace_back(m.label, hits[i].r);
+            }
+        }
         si_.inject(words, state_dose(words));          // words at the (gained) substrate level
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
@@ -799,6 +938,36 @@ private:
                 energies.push_back(probe_energy(v.as_str(), ""));
             }
         if (labels.empty()) { a.deferred = true; a.reason = "no_options"; return; }
+        // v3.2 Stage 3 — semantic hierarchy gating (readout-side): when the
+        // model ships a hierarchy and the candidates carry categories, stage-1
+        // category energies scale the stage-2 intent energies. Deterministic,
+        // physics-read-only: the settled field is measured, never rewritten.
+        if (hier_on_ && !hier_of_.empty()) {
+            std::map<std::string, float> cat_e;
+            float max_cat = 0.0f;
+            bool any = false;
+            for (const auto& l : labels) {
+                auto it = hier_of_.find(l);
+                if (it == hier_of_.end()) continue;
+                if (cat_e.count(it->second) == 0) {
+                    auto cit = hier_cat_criteria_.find(it->second);
+                    const float e = (cit != hier_cat_criteria_.end())
+                        ? probe_energy(it->second, cit->second) : 0.0f;
+                    cat_e[it->second] = e;
+                }
+                max_cat = std::max(max_cat, cat_e[it->second]);
+                any = true;
+            }
+            if (any && max_cat > 0.0f) {
+                for (std::size_t i = 0; i < labels.size(); ++i) {
+                    auto it = hier_of_.find(labels[i]);
+                    if (it == hier_of_.end()) continue;
+                    const float gate = hier_floor_
+                        + (1.0f - hier_floor_) * (cat_e[it->second] / max_cat);
+                    energies[i] *= gate;
+                }
+            }
+        }
         std::vector<float> p;
         softmax_ps(energies, p, calib_.choice_temperature);
         std::size_t best = std::max_element(p.begin(), p.end()) - p.begin();
@@ -908,6 +1077,17 @@ private:
     Calibration calib_;
     bool energy_norm_ = false;                          // Milestone-1 gain knob (default off)
     std::unordered_set<std::uint64_t> lesson_hashes_;   // Milestone-2 dedup memory
+    // v3.2 retrieval-by-default state
+    std::vector<recall::Memory> memories_;
+    std::vector<std::vector<float>> memory_fps_;        // settled-field fingerprints, fixed at load
+    bool retrieval_on_ = true;                          // default ON (inert until memories exist)
+    int retrieval_topk_ = 5;
+    float retrieval_dose_ = 0.30f;                      // prime dose as a fraction of inject_energy
+    // v3.2 Stage 3 hierarchy state
+    std::map<std::string, std::string> hier_of_;        // intent anchor -> category anchor
+    std::map<std::string, std::string> hier_cat_criteria_; // category anchor -> criteria text
+    float hier_floor_ = 0.35f;
+    bool hier_on_ = false;
     // Milestone-3 audit state
     std::string context_ = "default";
     std::uint64_t teach_seq_ = 0;

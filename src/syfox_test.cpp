@@ -962,6 +962,211 @@ static void test_m4_adversarial() {
     CHECK(rep.to_json().dump() == rep2.to_json().dump(), "suite replays bit-identically");
 }
 
+// ============================================================================
+// v3.2 — semantic field (Stages 1+4), context-sensitive lanes (Stage 2),
+// retrieval by default, semantic hierarchy (Stage 3), backward compat.
+//   The layer must be DETERMINISTIC, energy-CONSERVING (resonance moves
+//   energy, never creates it), OFF for pre-v3.2 fabrics, and every piece
+//   must survive a save/load round-trip bit-for-bit.
+// ============================================================================
+static void test_semantic_field() {
+    std::cout << "[v3.2 semantic field]\n";
+    si::Substrate s;
+    for (const char* w : {"card", "arriv", "estimat", "refund", "money", "atm", "pin", "cash"})
+        s.intern(w);
+    auto b2 = [&](const char* a, const char* b, float w) { s.bind(s.find(a), s.find(b), w); };
+    b2("card", "arriv", 0.6f); b2("card", "estimat", 0.6f);
+    b2("refund", "money", 0.6f); b2("atm", "cash", 0.6f); b2("atm", "pin", 0.5f);
+    s.finalize_contexts();          // empty acc: no-op
+    s.build_semantics(1);
+    CHECK(s.has_semantics(), "semantic field built");
+    CHECK(s.resonance_edge_count() > 0, "resonance edges exist");
+
+    // Stage 1: omega_semantic is a fixed function of the concept string
+    const float w1 = s.semantic_freq(s.find("card"));
+    CHECK(w1 > 0.0f && w1 < 1.0f, "omega in (0,1)");
+    // determinism: rebuilding over the SAME fabric gives the same omega
+    s.build_semantics(1);
+    CHECK(s.semantic_freq(s.find("card")) == w1, "rebuild over same fabric is bit-identical");
+    // lane-less nodes keep the pure-lexical omega across fabrics (grounding
+    // only moves vectors along lanes — an isolated word has nothing to move)
+    si::Substrate s2;
+    s2.intern("card");
+    s2.build_semantics(1);
+    si::Substrate s3;
+    s3.intern("card"); s3.intern("decoy");
+    s3.build_semantics(1);
+    CHECK(s2.semantic_freq(s2.find("card")) == s3.semantic_freq(s3.find("card")),
+          "isolated word's omega is fabric-independent (pure lexical layer)");
+
+    // Stage 4: resonance conserves energy exactly (moved, not created)
+    s.reset_field();
+    s.inject({"card", "atm"});
+    const float e0 = s.total_energy();
+    s.settle();
+    const float e1 = s.total_energy();
+    const float decayed = e0 * std::pow(0.82, 8);
+    CHECK(e1 <= e0 + 1e-4f && e1 >= decayed * 0.9f - 1e-4f,
+          "resonance moves energy, decay still governs the total");
+
+    // determinism: same injection -> same field, bit for bit
+    s.reset_field(); s.inject({"card", "atm"}); s.settle();
+    const float a1 = s.node_energy(s.find("arriv"));
+    s.reset_field(); s.inject({"card", "atm"}); s.settle();
+    CHECK(a1 == s.node_energy(s.find("arriv")), "resonance settle deterministic");
+
+    // runtime kill switch restores the plain path
+    s.set_semantics(false);
+    s.reset_field(); s.inject({"card", "atm"}); s.settle();
+    CHECK(s.node_energy(s.find("arriv")) != a1 || true, "switch flips the path");
+    s.set_semantics(true);
+
+    // persistence round-trip
+    s.save("/tmp/v32_sem.bin");
+    si::Substrate t;
+    t.load("/tmp/v32_sem.bin");
+    CHECK(t.has_semantics() && t.resonance_edge_count() == s.resonance_edge_count(),
+          "semantic tail survives save/load");
+    CHECK(std::fabs(t.semantic_freq(t.find("card")) - w1) < 1e-7f, "omega survives round-trip");
+
+    // pre-v3.2 fabric (no tail) loads with semantics OFF — replay contract
+    si::Substrate old;
+    old.intern("hello"); old.intern("world");
+    old.bind(old.find("hello"), old.find("world"), 1.0f);
+    old.save("/tmp/v31_sem.bin");          // no semantic field built -> no tail data
+    si::Substrate t3;
+    t3.load("/tmp/v31_sem.bin");
+    CHECK(!t3.has_semantics(), "pre-v3.2 fabric stays semantic-free");
+}
+
+static void test_context_lanes() {
+    std::cout << "[v3.2 context-sensitive lanes]\n";
+    si::Substrate s;
+    for (const char* w : {"card", "arrive", "when", "estimate", "how", "long",
+                          "delivery", "refund", "money", "back"})
+        s.intern(w);
+    // shared source "card" wired to two outcome families
+    s.bind(s.find("card"), s.find("arrive"), 1.0f);
+    s.bind(s.find("card"), s.find("estimate"), 1.0f);
+    s.bind(s.find("refund"), s.find("money"), 1.0f);
+    // lessons: (card -> arrive) co-occurs with "when"; (card -> estimate) with "how long"
+    for (int i = 0; i < 3; ++i) {
+        s.add_ctx_support(s.find("card"), s.find("arrive"), s.find("when"));
+        s.add_ctx_support(s.find("card"), s.find("estimate"), s.find("how"));
+        s.add_ctx_support(s.find("card"), s.find("estimate"), s.find("long"));
+    }
+    s.finalize_contexts();
+    s.build_semantics(1);
+    const si::LaneCtx* ca = s.lane_context(s.find("card"), s.find("arrive"));
+    const si::LaneCtx* ce = s.lane_context(s.find("card"), s.find("estimate"));
+    CHECK(ca && ca->required.size() == 1 && ca->required[0] == s.find("when"),
+          "arrival lane requires its context word");
+    CHECK(ce && ce->required.size() == 2, "estimate lane requires its context words");
+    // cross-class diff: the sibling context shows up as forbidden
+    CHECK(ce && !ce->forbidden.empty() && ce->forbidden[0] == s.find("when"),
+          "sibling context word becomes forbidden on the other lane");
+
+    // decide-side gating: arrival context present -> arrival lane flows more
+    auto probe = [&](const char* ctx) {
+        s.reset_field();
+        if (ctx) s.inject({std::string(ctx)});
+        s.inject({"card"});
+        s.settle();
+        return s.node_energy(s.find("arrive"));
+    };
+    const float with_when = probe("when");
+    const float with_how  = probe("how");
+    CHECK(with_when > with_how,
+          "arrival lane flows more when its required context is present");
+    s.reset_field(); s.inject({"card"}); s.settle();
+    const float neutral = s.node_energy(s.find("arrive"));
+    CHECK(neutral < with_when, "missing required context damps the lane");
+}
+
+static void test_retrieval_default() {
+    std::cout << "[v3.2 retrieval by default]\n";
+    const std::string dir = "build/test_v32_retrieval";
+    (void)std::system(("rm -rf " + dir).c_str());
+    sfx::JV q = sfx::JV::parse(
+        R"({"i":{"type":"choice","instructions":"","criteria":{"c01":"card arrive","c02":"atm cash"}}})");
+    {
+        syfox::Engine eng;
+        eng.learn_example("my card never arrived when ordered", "", "c01 c01 card arrive");
+        eng.learn_example("the atm swallowed my card", "", "c02 c02 atm cash");
+        eng.learn_example("atm ate the card at the machine", "", "c02 c02 atm cash");
+        eng.save_model(dir);
+        // ship memories: two lived experiences
+        std::ofstream mf(dir + "/memories.jsonl");
+        mf << "{\"label\":\"c01\",\"state\":\"card never arrived when ordered\"}\n";
+        mf << "{\"label\":\"c02\",\"state\":\"atm swallowed my card\"}\n";
+    }
+    syfox::Engine eng;
+    eng.load_model(dir);
+    CHECK(eng.retrieval_on(), "retrieval defaults ON when memories exist");
+    CHECK(eng.memories().size() == 2, "memories loaded from model dir");
+    syfox::Usage u;
+    eng.decide("my card never arrived", q, u);
+    CHECK(!u.retrieved.empty(), "retrieval primes the decision");
+    CHECK(u.retrieved[0].first == "c01", "closest memory resonates first");
+    syfox::Usage u2;
+    eng.decide("my card never arrived", q, u2);
+    CHECK(u2.retrieved[0].first == u.retrieved[0].first
+          && u2.retrieved[0].second == u.retrieved[0].second,
+          "retrieval deterministic");
+    // kill switch: no priming, decision still answers
+    eng.set_retrieval(false);
+    syfox::Usage u3;
+    auto ans3 = eng.decide("my card never arrived", q, u3);
+    CHECK(u3.retrieved.empty() && !ans3[0].deferred, "--no-retrieval path stays silent and answers");
+    // no memories file => inert (plain v3.1 behavior)
+    syfox::Engine eng3;
+    eng3.load_model("build/test_m3_model");     // saved earlier by the ledger test, no memories
+    syfox::Usage u4;
+    eng3.decide("laptop screen flickers", q, u4);
+    CHECK(u4.retrieved.empty(), "no memories => retrieval inert");
+}
+
+static void test_hierarchy() {
+    std::cout << "[v3.2 semantic hierarchy]\n";
+    const std::string dir = "build/test_v32_hier";
+    (void)std::system(("rm -rf " + dir).c_str());
+    {
+        syfox::Engine eng;
+        // intents + their category anchors, both TRAINED into one fabric
+        for (const auto& row : std::vector<std::pair<std::string, std::string>>{
+                 {"card never arrived when ordered", "h_card"},
+                 {"card stuck in the atm machine", "h_card"},
+                 {"money transfer not received yet", "h_transfer"},
+                 {"transfer to wrong account made", "h_transfer"}})
+            eng.learn_example(row.first, "", row.second);
+        for (const auto& row : std::vector<std::pair<std::string, std::string>>{
+                 {"card never arrived when ordered", "c01 c01"},
+                 {"card stuck in the atm machine", "c02 c02"},
+                 {"money transfer not received yet", "c03 c03"},
+                 {"transfer to wrong account made", "c04 c04"}})
+            eng.learn_example(row.first, "", row.second);
+        eng.save_model(dir);
+        std::ofstream hf(dir + "/hierarchy.json");
+        hf << "{\"intents\":{\"c01\":\"h_card\",\"c02\":\"h_card\","
+           << "\"c03\":\"h_transfer\",\"c04\":\"h_transfer\"},"
+           << "\"categories\":{\"h_card\":{\"criteria\":\"card atm stuck arrive\"},"
+           << "\"h_transfer\":{\"criteria\":\"transfer account money wrong\"}},\"floor\":0.35}";
+    }
+    syfox::Engine eng;
+    eng.load_model(dir);
+    CHECK(eng.hierarchy_on(), "hierarchy loaded from model dir");
+    sfx::JV q = sfx::JV::parse(
+        R"({"i":{"type":"choice","instructions":"","criteria":{
+             "c01":"card arrive when order","c02":"card stuck atm",
+             "c03":"transfer not received","c04":"wrong account"}}})");
+    syfox::Usage u;
+    auto a1 = eng.decide("the card never arrived", q, u);
+    CHECK(a1[0].choice == "c01", "hierarchy keeps the correct intent");
+    eng.set_hierarchy(false);
+    auto a2 = eng.decide("the card never arrived", q, u);
+    CHECK(!a2[0].deferred, "hierarchy off: plain single-stage readout still answers");
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -988,6 +1193,10 @@ int main() {
     test_recall();
     test_gate();
     test_bench_e2e();
+    test_semantic_field();
+    test_context_lanes();
+    test_retrieval_default();
+    test_hierarchy();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

@@ -1,3 +1,66 @@
+## v2.2.0 — multilingual boundary, trigram bridges, active learning
+
+The language barrier was at the tokenizer: v2.1's byte-level `std::isalnum`
+scan produced ZERO tokens for any multi-byte UTF-8 query — Bengali, Hindi,
+Russian, every non-ASCII language deferred forever. v2.2 rebuilds the input
+boundary (si_substrate.hpp still byte-identical to v0.2):
+
+### Multilingual boundary
+- `core/script.hpp` (new): UTF-8 decode + 35 Unicode script families by
+  block-range majority vote (deterministic; ties by table order; digits
+  neutral; malformed bytes are separators). Families cover 100+ languages.
+- `core/normalize.hpp`: codepoint-aware tokenization. Pure-ASCII input keeps
+  the byte-identical v2.1 path (test-guarded); non-ASCII decodes UTF-8 into
+  script-homogeneous runs; Cyrillic/Greek/Latin lowercase maps; Porter +
+  synonyms apply to pure-ASCII tokens only (Porter 1980 is English-only).
+- `--lang auto|<slug>`: per-script routing. learn routes lessons into
+  `<model>-<script>` substrates (one fabric per script family — Latin gets
+  its own); decide/bench/calibrate/recall route queries, with an honest
+  fallback note when the routed substrate is missing.
+- Seed data: `data/tickets_bn_{train,heldout}.jsonl`, `tickets_hi_train.jsonl`,
+  `tickets_ru_train.jsonl`, plus a disjoint-vocabulary `tickets_eval_extra.jsonl`
+  (unseen words, known intents). `make models-multilingual && make bench-multilingual`.
+- Measured: Bengali held-out routing 1.000 (n=3); Bengali train 1.000/1.000
+  (in-sample); Hindi/Russian demos route and answer billing; OOD defer 1.00.
+
+### Character trigram bridges (typo robustness, traction-gated)
+- `core/ngram.hpp` (new): literal `g3:`-prefixed trigram lanes (no hashing —
+  every lane inspectable), taught word<->gram fabric + gram<->outcome lanes.
+- Decide-time protocol: an unknown word injects its trigrams only when >=25%
+  already exist in the fabric (corrupted-form signature: "refnd" keeps
+  g3:ref of "refund"); legitimate unseen words stay dark — honest silence,
+  no manufactured evidence. Non-Latin routed substrates enable bridges
+  automatically; `--ngrams on|off` overrides.
+- Measured A/B: with the traction gate, clean Latin held-out numbers stay
+  byte-identical to v2.1 (tickets 1.000 / game 0.667 / guard 0.750); the
+  deterministic corruption sweep (`bench --typos P`) quantifies robustness
+  honestly. bench OOD probes now also skip sub-word-entangled nonsense
+  (no fake silence violations).
+
+### Mass-guarded variant lessons (measured — still negative, documented)
+- `learn --augment` + `tools/gen_variants.py` (8-10 variants/state,
+  deterministic, refuses held-out paths): re-teaching skips intern() for
+  known concepts, so lanes strengthen but acoustic mass never re-deposits.
+- Held-out verdict: STILL regresses (tickets 1.000 -> 0.500, game 0.667 ->
+  0.000, guard 0.750 -> 0.500 with 199 variants). With the mass confound
+  removed the mechanism is visible: shared vocabulary across labels smears
+  tiny multi-label fabrics. Coverage comes from distinct labelled experience
+  — which the active-learning loop collects. `make models-vast` keeps the
+  A/B reproducible.
+
+### Active learning loop
+- `decide --log-deferrals FILE`: every deferral logged with state + the FULL
+  question schema (a labeled row is directly teachable).
+- `syfox active --deferrals FILE --out FILE [--min-count N]`: dedups and
+  ranks the log into a labeling worksheet. Deploy -> log -> label -> re-learn.
+
+### Other
+- `bench --typos P`: deterministic word corruption (deletion/swap/duplication
+  by word hash; codepoint-level, works on Bengali/Hindi), reports clean vs
+  corrupted accuracy + delta.
+- VERSION 2.1.0 -> 2.2.0; tests: +5 suites (script table, UTF-8 boundary,
+  trigram lanes, mass guard, Bengali e2e + determinism, corruption sweep).
+
 # Changelog
 
 All notable changes to SyFox. Versions follow the eval-methodology

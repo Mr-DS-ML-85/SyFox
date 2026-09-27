@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -37,6 +38,14 @@ struct Args {
     std::string split;               // bench --split train|heldout (P1 eval split)
     bool coverage_curve = false;     // bench --coverage-curve (P2 headline metric)
     std::string synonyms;            // synonym table path (default data/synonyms.txt)
+    // v2.2 multilingual + active-learning surface
+    std::string lang;                // --lang auto|<slug>: route to <model>-<script>; empty = off
+    int ngrams_mode = 0;             // --ngrams on|off: 1/-1 explicit; 0 = policy default
+    bool augment = false;            // learn --augment: mass-guarded variant lessons
+    float typos = 0;                 // bench --typos P: deterministic corruption sweep (0..100)
+    std::string deferrals;           // decide --log-deferrals FILE.jsonl (active-learning loop)
+    std::string out;                 // active --out FILE.jsonl (labeling worksheet)
+    long min_count = 1;              // active --min-count N
     bool state_file = false, questions_file = false;
     // SI-faithful selection modes (off by default; never persisted into the model)
     bool salience_gating = false, miller_window = false;
@@ -83,10 +92,102 @@ std::string outcome_text(const sfx::JV& q, const std::string& label) {
     return label;
 }
 
+// -- multilingual routing (v2.2) -------------------------------------------
+// --lang empty : v2.1 behavior — whatever --model says, no detection (off)
+// --lang auto  : detect the script of the text, use <model>-<script-slug>
+// --lang slug  : force a script family (latin, bengali, devanagari, ...)
+// Read commands (decide/bench/calibrate/recall) fall back to the base model
+// with an honest note when the routed substrate is missing; learn CREATES
+// the routed substrate (that is how per-script fabrics grow).
+//
+// Trigram policy: when the user did not pass --ngrams explicitly, sub-word
+// bridges ACTIVATE automatically whenever the routed substrate is non-Latin
+// (the script barrier and tiny vocabularies make them load-bearing there);
+// Latin keeps the word-level stream that reproduces the v2.1 baselines.
+std::string route_model(const Args& a, const std::string& state_text,
+                        std::string& note, bool for_learning) {
+    note.clear();
+    if (a.lang.empty()) return a.model;
+    const si::script::Script sc = (a.lang == "auto")
+        ? si::script::detect_script(state_text)
+        : si::script::from_slug(a.lang);
+    if (sc == si::script::Script::Unknown) {
+        note = "script=unknown; using base model";
+        return a.model;
+    }
+    if (a.ngrams_mode == 0)                            // policy default (explicit flag wins)
+        si::norm::grams_enabled() = (sc != si::script::Script::Latin);
+    const std::string suffix = std::string("-") + si::script::slug(sc);
+    if (a.model.size() > suffix.size() &&
+        a.model.compare(a.model.size() - suffix.size(), suffix.size(), suffix) == 0)
+        return a.model;                              // already the routed substrate
+    const std::string routed = a.model + suffix;
+    if (!for_learning) {
+        std::ifstream probe(routed + "/substrate.bin");
+        if (!probe) {
+            note = "no " + routed + " substrate trained; falling back to " + a.model
+                 + " (honest silence still guards untaught vocabulary)";
+            return a.model;
+        }
+    }
+    note = "script=" + std::string(si::script::slug(sc)) + " -> " + routed;
+    return routed;
+}
+
 void cmd_learn(const Args& a) {
+    auto rows = load_jsonl(a.examples);
+    if (!a.lang.empty()) {
+        // v2.2 --lang: route every lesson by its script family into a
+        // per-script substrate (<model>-<slug>). Latin gets its own substrate
+        // like every other family — one fabric per script is the isolation the
+        // routing contract promises. Group order is std::map order: deterministic.
+        std::map<std::string, std::vector<const sfx::JV*>> groups;
+        for (const auto& ex : rows) {
+            const si::script::Script sc = (a.lang == "auto")
+                ? si::script::detect_script(ex.at("state").as_str())
+                : si::script::from_slug(a.lang);
+            groups[si::script::slug(sc)].push_back(&ex);
+        }
+        sfx::JVArr routed;
+        for (auto& g : groups) {
+            const std::string dir = a.model + "-" + g.first;
+            // trigram policy per script group (explicit --ngrams wins)
+            si::norm::grams_enabled() = (a.ngrams_mode != 0)
+                ? (a.ngrams_mode == 1) : (g.first != "latin");
+            syfox::Engine eng;
+            eng.load_model(dir);                              // incremental if exists
+            for (const auto* exp : g.second) {
+                const sfx::JV& qs = exp->at("questions");
+                const sfx::JV& labels = exp->at("labels");
+                const std::string state = exp->at("state").as_str();
+                for (const auto& qkv : qs.obj) {
+                    const sfx::JV& q = qkv.second;
+                    std::string type = q.at("type").as_str();
+                    std::string label = labels.at(qkv.first).as_str();
+                    if (type == "choice" || type == "score")
+                        eng.learn_example(state, q.at("instructions").as_str(),
+                                          outcome_text(q, label), a.augment);
+                    else if (type == "noul")
+                        eng.learn_noul(state, q.at("instructions").as_str(),
+                                       label == "true", a.augment);
+                }
+            }
+            eng.save_model(dir);
+            routed.push_back(sfx::JV(sfx::JVObj{
+                {"script", sfx::JV(g.first)}, {"model", sfx::JV(dir)},
+                {"lessons", static_cast<double>(g.second.size())},
+                {"nodes", static_cast<double>(eng.substrate().node_count())},
+                {"lanes", static_cast<double>(eng.substrate().lane_count())}}));
+        }
+        std::cout << sfx::JV(sfx::JVObj{
+            {"command", sfx::JV("learn")}, {"examples", sfx::JV(a.examples)},
+            {"lang", sfx::JV(a.lang)}, {"augment", sfx::JV(a.augment)},
+            {"routed", sfx::JV(routed)},
+            {"note", sfx::JV("lessons routed per script family: one SI substrate per script")}}).dump() << "\n";
+        return;
+    }
     syfox::Engine eng;
     eng.load_model(a.model);                                    // incremental if model exists
-    auto rows = load_jsonl(a.examples);
     for (const auto& ex : rows) {
         std::string state = ex.at("state").as_str();
         const sfx::JV& qs = ex.at("questions");
@@ -96,9 +197,11 @@ void cmd_learn(const Args& a) {
             std::string type = q.at("type").as_str();
             std::string label = labels.at(qkv.first).as_str();
             if (type == "choice" || type == "score")
-                eng.learn_example(state, q.at("instructions").as_str(), outcome_text(q, label));
+                eng.learn_example(state, q.at("instructions").as_str(),
+                                  outcome_text(q, label), a.augment);
             else if (type == "noul")
-                eng.learn_noul(state, q.at("instructions").as_str(), label == "true");
+                eng.learn_noul(state, q.at("instructions").as_str(),
+                               label == "true", a.augment);
         }
     }
     eng.save_model(a.model);
@@ -108,8 +211,19 @@ void cmd_learn(const Args& a) {
 }
 
 void cmd_calibrate(const Args& a) {
+    // v2.2 --lang: calibrate the substrate the examples route to (fitting a
+    // different script's substrate would set scalars on a fabric that never
+    // saw the rows — meaningless). Dominant script over the file's states.
+    std::string lang_note;
+    std::string model_dir = a.model;
+    if (!a.lang.empty()) {
+        auto probe_rows = load_jsonl(a.examples);
+        std::string agg;
+        for (const auto& r : probe_rows) if (r.has("state")) agg += r.at("state").as_str() + "\n";
+        model_dir = route_model(a, agg, lang_note, false);
+    }
     syfox::Engine eng;
-    eng.load_model(a.model);
+    eng.load_model(model_dir);
     auto rows = load_jsonl(a.examples);
     auto calib_rows = eng.harvest_rows(rows);
     // v2.1 (P6): report calibration honestly — MULTI-CLASS ECE on the fit
@@ -117,12 +231,13 @@ void cmd_calibrate(const Args& a) {
     // adopted; its 1-bit ECE guard may keep T=1). Same helper the fit uses,
     // same definition bench reports.
     eng.fit_calibration(calib_rows);
-    eng.save_model(a.model);
+    eng.save_model(model_dir);
     const auto& c = eng.calibration();
     const auto r4 = [](double v) { return std::round(v * 10000.0) / 10000.0; };
     sfx::JVObj o;
     o["command"] = sfx::JV("calibrate");
-    o["model"] = sfx::JV(a.model);
+    o["model"] = sfx::JV(model_dir);
+    if (!lang_note.empty()) o["lang_note"] = sfx::JV(lang_note);
     o["fit_rows"] = sfx::JV(static_cast<double>(calib_rows.size()));
     o["fit_source"] = sfx::JV(a.examples);
     o["choice_temperature"] = std::round(c.choice_temperature * 10000.0) / 10000.0;
@@ -181,17 +296,42 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
 }
 
 void cmd_decide(const Args& a) {
-    syfox::Engine eng;
-    eng.load_model(a.model);
-    apply_modes(eng, a);
     std::string state = a.state_file ? read_file(a.state) : a.state;
     std::string qtext = a.questions_file ? read_file(a.questions) : a.questions;
     sfx::JV questions = sfx::JV::parse(qtext);
     if (!questions.is_obj()) { std::cerr << "syfox: questions must be a JSON object\n"; std::exit(2); }
+    std::string lang_note;
+    const std::string model_dir = route_model(a, state, lang_note, false);
+    syfox::Engine eng;
+    eng.load_model(model_dir);
+    apply_modes(eng, a);
     syfox::Usage u;
     auto answers = eng.decide(state, questions, u);
     u.calibrated = eng.calibration().fitted;   // decide() resets Usage; set after
-    std::cout << answers_to_json(answers, u).dump() << "\n";
+    sfx::JV out = answers_to_json(answers, u);
+    if (!lang_note.empty()) out.obj["lang_note"] = sfx::JV(lang_note);
+    // v2.2 active-learning loop, step 1: log deferrals for human labeling.
+    // Each row carries the state + the FULL question schema, so a labeled
+    // row is directly teachable with `syfox learn` — no reconstruction step.
+    if (!a.deferrals.empty()) {
+        bool any = false;
+        sfx::JVArr def;
+        for (const auto& ans : answers)
+            if (ans.deferred)
+                def.push_back(sfx::JV(sfx::JVObj{
+                    {"qid", sfx::JV(ans.qid)}, {"reason", sfx::JV(ans.reason)}}));
+        if ((any = !def.empty())) {
+            std::ofstream log(a.deferrals, std::ios::app);
+            if (log)
+                log << sfx::JV(sfx::JVObj{
+                    {"state", sfx::JV(state)},
+                    {"questions", questions},
+                    {"deferred", sfx::JV(def)},
+                    {"settled_energy", std::round(u.settled_energy * 1000.0f) / 1000.0f}}).dump() << "\n";
+            out.obj["deferrals_logged"] = sfx::JV(static_cast<double>(def.size()));
+        }
+    }
+    std::cout << out.dump() << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +451,43 @@ void cmd_bench(const Args& a) {
     }
     auto rows = load_jsonl(eval_path);
     if (rows.empty()) { std::cerr << "syfox: no eval rows in " << eval_path << "\n"; std::exit(2); }
+    // v2.2 --lang: route the WHOLE eval to the substrate its dominant script
+    // belongs to (per-row re-settling across engines would make the latency
+    // axis meaningless). One honest note carries the routing decision.
+    std::string lang_note;
+    if (!a.lang.empty()) {
+        std::string agg;
+        for (const auto& r : rows) if (r.has("state")) agg += r.at("state").as_str() + "\n";
+        const std::string model_dir = route_model(a, agg, lang_note, false);
+        if (model_dir != a.model) eng.load_model(model_dir);
+    }
+    // v2.2 --typos P: the measured typo-robustness claim. Same eval rows,
+    // same engine, states deterministically corrupted (deletion / swap /
+    // duplication chosen by word hash). Reports BOTH sides + the delta.
+    if (a.typos > 0.0f) {
+        std::vector<sfx::JV> corrupted = rows;
+        for (auto& r : corrupted)
+            if (r.is_obj() && r.has("state"))
+                r.obj["state"] = sfx::JV(syfox::bench::corrupt_state(r.at("state").as_str(), a.typos));
+        syfox::bench::BenchConfig bc;
+        auto rep_c = syfox::bench::run(eng, rows, eval_path, bc, a.model);
+        auto rep_t = syfox::bench::run(eng, corrupted, eval_path, bc, a.model);
+        sfx::JVObj o;
+        o["command"] = sfx::JV("bench");
+        o["model"] = sfx::JV(a.model);
+        o["eval_source"] = sfx::JV(eval_path);
+        if (!split_note.empty()) o["eval_split_note"] = sfx::JV(split_note);
+        if (!lang_note.empty()) o["lang_note"] = sfx::JV(lang_note);
+        o["typo_pct"] = sfx::JV(std::round(a.typos * 10.0f) / 10.0f);
+        o["choice_accuracy_clean"] = std::round(rep_c.choice_accuracy * 10000.0) / 10000.0;
+        o["choice_accuracy_typos"] = std::round(rep_t.choice_accuracy * 10000.0) / 10000.0;
+        o["choice_accuracy_delta"] = std::round((rep_c.choice_accuracy - rep_t.choice_accuracy) * 10000.0) / 10000.0;
+        o["clean"] = rep_c.to_json();
+        o["typo"] = rep_t.to_json();
+        o["note"] = sfx::JV("deterministic corruption: same word is corrupted the same way on every run — the sweep replays bit-identically");
+        std::cout << sfx::JV(o).dump() << "\n";
+        return;
+    }
 
     if (a.coverage_curve) {
         auto cr = syfox::bench::coverage_curve(eng, rows, 20);
@@ -349,6 +526,7 @@ void cmd_bench(const Args& a) {
                           bc, a.model);
     auto j = rep.to_json();
     if (!a.split.empty()) j.obj["eval_split"] = sfx::JV(a.split);
+    if (!lang_note.empty()) j.obj["lang_note"] = sfx::JV(lang_note);
     std::cout << j.dump() << "\n";
 }
 
@@ -357,8 +535,10 @@ void cmd_bench(const Args& a) {
 // settled-energy space; no token comparison, no pattern matching).
 // ---------------------------------------------------------------------------
 void cmd_recall(const Args& a) {
+    std::string lang_note;
+    const std::string model_dir = route_model(a, a.state, lang_note, false);
     syfox::Engine eng;
-    eng.load_model(a.model);
+    eng.load_model(model_dir);
     if (a.state.empty() || (a.memories.empty() && a.examples.empty())) usage_exit();
     std::vector<syfox::recall::Memory> memories;
     auto memory_from_row = [](const sfx::JV& r) -> syfox::recall::Memory {
@@ -394,7 +574,56 @@ void cmd_recall(const Args& a) {
         {"query", sfx::JV(a.state)},
         {"memories", static_cast<double>(memories.size())},
         {"hits", sfx::JV(arr)},
+        {"lang_note", sfx::JV(lang_note.empty() ? "routing off" : lang_note)},
         {"note", sfx::JV("similarity measured in the settled-energy field; no token comparison, no pattern matching")}}).dump() << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// v2.2 Active Learning Loop — the deployment story for a substrate that can
+// only know what it was taught. SyFox's honest silence is not a failure
+// mode, it is a SIGNAL: every deferral is a state the fabric could not
+// route. The loop: deploy with --log-deferrals -> collect the log ->
+// `syfox active` dedups/ranks it into a labeling worksheet -> a human fills
+// "labels" -> `syfox learn` re-teaches. Fine-tuning built from the
+// substrate's own uncertainty instead of an external drift metric.
+// ---------------------------------------------------------------------------
+void cmd_active(const Args& a) {
+    if (a.deferrals.empty() || a.out.empty()) usage_exit();
+    std::map<std::string, long> counts;                 // state -> deferral count
+    std::map<std::string, sfx::JV> qs_of;               // state -> question schema
+    for (const auto& r : load_jsonl(a.deferrals)) {
+        if (!r.is_obj() || !r.has("state") || !r.has("questions")) continue;
+        const std::string st = r.at("state").as_str();
+        ++counts[st];
+        if (qs_of.find(st) == qs_of.end()) qs_of[st] = r.at("questions");
+    }
+    // rank: deferral count desc, then state text asc — deterministic
+    std::vector<std::pair<std::string, long>> ranked(counts.begin(), counts.end());
+    std::sort(ranked.begin(), ranked.end(),
+              [](const std::pair<std::string, long>& x, const std::pair<std::string, long>& y) {
+                  if (x.second != y.second) return x.second > y.second;
+                  return x.first < y.first;
+              });
+    std::ofstream out(a.out);
+    if (!out) { std::cerr << "syfox: cannot write " << a.out << "\n"; std::exit(2); }
+    long written = 0;
+    for (const auto& kv : ranked) {
+        if (kv.second < a.min_count) continue;
+        out << sfx::JV(sfx::JVObj{
+            {"state", sfx::JV(kv.first)},
+            {"questions", qs_of[kv.first]},
+            {"labels", sfx::JV(sfx::JVObj{})},          // <- the human fills this
+            {"defer_count", static_cast<double>(kv.second)}}).dump() << "\n";
+        ++written;
+    }
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("active")},
+        {"deferral_log", sfx::JV(a.deferrals)},
+        {"unique_deferred_states", static_cast<double>(counts.size())},
+        {"min_count", static_cast<double>(a.min_count)},
+        {"worksheet", sfx::JV(a.out)},
+        {"rows_written", static_cast<double>(written)},
+        {"note", sfx::JV("fill labels{} in the worksheet, then: syfox learn --model DIR --examples " + a.out)}}).dump() << "\n";
 }
 
 void cmd_derive(const Args& a) {
@@ -594,10 +823,23 @@ void usage_exit() {
         "                                        sweeps tau 0.0->1.0 and reports\n"
         "                                        coverage %% vs accuracy-within)\n"
         "  syfox recall    --model DIR --state '...' (--memories FILE.jsonl | --examples FILE.jsonl) [--topk N]\n"
+        "  syfox active    --deferrals FILE.jsonl --out FILE.jsonl [--min-count N]\n"
         "  syfox version\neval-split honesty (v2.1): --split heldout scores data/<domain>_heldout.jsonl\n"
         "(rows the fabric never learned from); the default train file is in-sample.\n"
         "token normalization (v2.1): data/synonyms.txt folds synonyms + Porter-stems\n"
         "tokens before injection (--synonyms overrides the path; deterministic).\n"
+        "multilingual boundary (v2.2): UTF-8 codepoint tokenization for any script;\n"
+        "  --lang auto|<slug> routes each query/lesson to <model>-<script> (one SI\n"
+        "  substrate per script family: latin, bengali, devanagari, cyrillic, ...);\n"
+        "  non-Latin routed substrates enable the character trigram bridges\n"
+        "  automatically (typo routing); --ngrams on|off overrides explicitly.\n"
+        "variant lessons (v2.2): learn --augment re-teaches paraphrase/variant rows\n"
+        "  WITHOUT mass re-deposition (lanes strengthen, acoustic mass unchanged).\n"
+        "typo robustness (v2.2): bench --typos P corrupts P% of words deterministically\n"
+        "  and reports clean vs corrupted accuracy.\n"
+        "active learning (v2.2): decide --log-deferrals FILE records every deferral\n"
+        "  with its question schema; syfox active turns the log into a labeling\n"
+        "  worksheet; label it and re-learn. Deploy -> log -> label -> retrain.\n"
         "selection modes (SI-faithful, off by default, not saved into the model):\n"
         "  --salience-gating   rank settle sources by salience (motion history)\n"
         "                      instead of raw energy\n"
@@ -633,6 +875,20 @@ int main(int argc, char** argv) {
         else if (k == "--memories") need(a.memories);
         else if (k == "--split") need(a.split);
         else if (k == "--synonyms") need(a.synonyms);
+        else if (k == "--lang") need(a.lang);
+        else if (k == "--log-deferrals") need(a.deferrals);
+        else if (k == "--deferrals") need(a.deferrals);   // active-command alias
+        else if (k == "--out") need(a.out);
+        else if (k == "--min-count") { if (i + 1 >= argc) usage_exit(); a.min_count = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--typos") { if (i + 1 >= argc) usage_exit(); a.typos = std::strtof(argv[++i], nullptr); }
+        else if (k == "--augment") a.augment = true;
+        else if (k == "--ngrams") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.ngrams_mode = 1;
+            else if (v == "off") a.ngrams_mode = -1;
+            else usage_exit();
+        }
         else if (k == "--coverage-curve") a.coverage_curve = true;
         else if (k == "--topk") { if (i + 1 >= argc) usage_exit(); a.topk = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--steps") { if (i + 1 >= argc) usage_exit(); a.steps = std::strtol(argv[++i], nullptr, 10); }
@@ -663,5 +919,6 @@ int main(int argc, char** argv) {
     if (cmd == "analogs") { if (a.concept.empty()) usage_exit(); cmd_analogs(a); return 0; }
     if (cmd == "bench") { cmd_bench(a); return 0; }
     if (cmd == "recall") { cmd_recall(a); return 0; }
+    if (cmd == "active") { cmd_active(a); return 0; }
     usage_exit();
 }

@@ -20,9 +20,11 @@
 // ============================================================================
 #pragma once
 #include "si_substrate.hpp"
+#include "script.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -287,28 +289,170 @@ inline void ensure_synonyms() {
 
 // ---------------------------------------------------------------------------
 // The one normalization pipeline (teach, decide, recall, harvest — everyone).
-// Scan rules mirror si::tokenize (alnum runs, 2..24 chars) so only the fold
-// layer differs from v0.2.
+//
+// v2.2 — multilingual boundary. The v2.1 pipeline scanned BYTES with
+// std::isalnum, which in the C locale splits every multi-byte UTF-8
+// sequence apart: a Bengali or Hindi query produced ZERO tokens (the actual
+// language barrier). The pipeline is now codepoint-aware:
+//
+//    * pure-ASCII input takes the SAME byte path as v2.1 — output is
+//      byte-identical (guarded by test), so existing fabrics are unaffected;
+//    * non-ASCII input decodes UTF-8 and scans letter/digit codepoint runs;
+//      a run splits where the SCRIPT changes (tokens are script-homogeneous);
+//    * Latin tokens: lowercased (ASCII fast case + Latin-1/Extended-A map),
+//      Porter + synonyms apply to pure-ASCII tokens only — Porter(1980) is
+//      an English algorithm and would corrupt accented bytes;
+//    * Cyrillic/Greek: codepoint lowercase map, no Porter, no synonyms
+//      (the fold table is English by design; forcing it would be wrong);
+//    * all other scripts: codepoints pass through as UTF-8, untouched;
+//    * token length limits 2..24 CODEPOINTS (same intent as the old
+//      2..24 bytes rule);
+//    * malformed UTF-8 bytes are separators (deterministic, never a crash);
+//    * still no NLP pipeline, no neural net: ranges, maps, and counters.
+//
+// Character n-gram lanes live in ngram.hpp and are appended by
+// state_tokens(), NOT here — labels, instructions, and readout probes
+// stay gram-free by construction.
 // ---------------------------------------------------------------------------
+
+// codepoint lowercase for Latin-1 + Latin Extended-A (Cyrillic/Greek have
+// their own maps below). Deterministic range arithmetic, no locale.
+inline std::uint32_t lower_latin(std::uint32_t cp) {
+    if (cp >= 0x0041 && cp <= 0x005A) return cp + 0x20;                   // ASCII A-Z
+    if (cp >= 0x00C0 && cp <= 0x00DE && cp != 0x00D7) return cp + 0x20;   // À..Þ -> à..þ
+    if (cp >= 0x0100 && cp <= 0x0137) return (cp % 2 == 0) ? cp + 1 : cp; // A-macron pairs
+    if (cp >= 0x0139 && cp <= 0x0148) return (cp % 2 == 1) ? cp + 1 : cp;
+    if (cp >= 0x014A && cp <= 0x0177) return (cp % 2 == 0) ? cp + 1 : cp;
+    if (cp == 0x0178) return 0x00FF;                                      // Ÿ -> ÿ
+    if (cp >= 0x0179 && cp <= 0x017E) return (cp % 2 == 1) ? cp + 1 : cp;
+    if (cp >= 0x0180 && cp <= 0x01BF && cp % 2 == 1) return cp + 1;
+    if (cp >= 0x01CD && cp <= 0x01DC && cp % 2 == 1) return cp + 1;
+    if (cp >= 0x01DE && cp <= 0x01EF && cp % 2 == 0) return cp + 1;
+    if (cp >= 0x01F1 && cp <= 0x01F3) return cp + 2;                      // DZ/Dd/dz digraphs
+    if (cp >= 0x01F4 && cp <= 0x01F5) return (cp == 0x01F4) ? cp + 1 : cp;
+    if (cp >= 0x01FA && cp <= 0x0217 && cp % 2 == 0) return cp + 1;
+    if (cp >= 0x1E00 && cp <= 0x1EF9 && cp % 2 == 0) return cp + 1;       // Vietnamese block
+    return cp;
+}
+
+inline std::uint32_t lower_cyrillic(std::uint32_t cp) {
+    if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;                   // А..Я -> а..я
+    if (cp >= 0x0400 && cp <= 0x040F) return cp + 0x50;                   // Ѐ..Џ -> ѐ..џ
+    if ((cp >= 0x0460 && cp <= 0x0481 && cp % 2 == 0) ||
+        (cp >= 0x048A && cp <= 0x04BF && cp % 2 == 0)) return cp + 1;
+    if (cp == 0x04C0) return 0x04CF;                                      // Пalochka
+    if (cp >= 0x04C1 && cp <= 0x04CE && cp % 2 == 1) return cp - 1;
+    return cp;
+}
+
+inline std::uint32_t lower_greek(std::uint32_t cp) {
+    if ((cp >= 0x0391 && cp <= 0x03A1) || (cp >= 0x03A3 && cp <= 0x03AB))
+        return cp + 0x20;                                                 // Α..Ω -> α..ω
+    return cp;
+}
+
+inline std::uint32_t lower_cp(std::uint32_t cp, script::Script sc) {
+    switch (sc) {
+        case script::Script::Latin:    return lower_latin(cp);
+        case script::Script::Cyrillic: return lower_cyrillic(cp);
+        case script::Script::Greek:    return lower_greek(cp);
+        default:                       return cp;
+    }
+}
+
+inline void append_utf8(std::string& s, std::uint32_t cp) {
+    if (cp < 0x80) { s.push_back(static_cast<char>(cp)); return; }
+    if (cp < 0x800) {
+        s.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        return;
+    }
+    if (cp < 0x10000) {
+        s.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        s.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        return;
+    }
+    s.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    s.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+    s.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+}
+
+// Latin-token post-processing: identical to v2.1 for pure-ASCII tokens
+// (porter -> synonyms); non-ASCII Latin passes through lowercased only.
+inline std::string fold_latin_token(std::string t) {
+    bool pure_ascii = true;
+    for (char c : t) if (static_cast<unsigned char>(c) >= 0x80) { pure_ascii = false; break; }
+    if (!pure_ascii) return t;
+    t = porter_stem(t);
+    auto it = syn_table().find(t);
+    if (it != syn_table().end()) t = it->second;
+    return t;
+}
+
 inline std::vector<std::string> normalize(const std::string& text) {
     struct Once { Once() { ensure_synonyms(); } };
     static Once once;
 
+    // ASCII fast path: byte-for-byte the v2.1 pipeline (guarded by test).
+    bool ascii_only = true;
+    for (char raw : text)
+        if (static_cast<unsigned char>(raw) >= 0x80) { ascii_only = false; break; }
+
     std::vector<std::string> out;
-    std::string cur;
-    auto emit = [&]() {
-        if (cur.size() >= 2 && cur.size() <= 24) {
-            std::string t = porter_stem(cur);
-            auto it = syn_table().find(t);
-            if (it != syn_table().end()) t = it->second;
-            out.push_back(std::move(t));
+    if (ascii_only) {
+        std::string cur;
+        auto emit = [&]() {
+            if (cur.size() >= 2 && cur.size() <= 24) {
+                std::string t = porter_stem(cur);
+                auto it = syn_table().find(t);
+                if (it != syn_table().end()) t = it->second;
+                out.push_back(std::move(t));
+            }
+            cur.clear();
+        };
+        for (char raw : text) {
+            unsigned char c = static_cast<unsigned char>(raw);
+            if (std::isalnum(c)) cur.push_back(static_cast<char>(std::tolower(c)));
+            else if (!cur.empty()) emit();
         }
-        cur.clear();
+        if (!cur.empty()) emit();
+        return out;
+    }
+
+    // UTF-8 codepoint path (the multilingual boundary).
+    std::string cur;                                   // current token, UTF-8
+    std::uint32_t cur_script = 0xFFFFFFFFu;            // dominant script of `cur`
+    std::size_t   cur_cps = 0;                         // codepoint count
+    auto emit = [&]() {
+        if (cur_cps >= 2 && cur_cps <= 24) {
+            const script::Script sc = static_cast<script::Script>(cur_script);
+            out.push_back(sc == script::Script::Latin
+                          ? fold_latin_token(cur) : cur);
+        }
+        cur.clear(); cur_cps = 0; cur_script = 0xFFFFFFFFu;
     };
-    for (char raw : text) {
-        unsigned char c = static_cast<unsigned char>(raw);
-        if (std::isalnum(c)) cur.push_back(static_cast<char>(std::tolower(c)));
-        else if (!cur.empty()) emit();
+    std::uint32_t cp = 0;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        i += script::decode_utf8(text, i, cp);
+        if (cp == 0xFFFFFFFFu) { if (!cur.empty()) emit(); continue; }  // malformed: separator
+        if (script::is_letter_cp(cp)) {
+            const std::uint32_t sc = static_cast<std::uint32_t>(script::codepoint_script(cp));
+            if (cur_script != 0xFFFFFFFFu && sc != cur_script) emit();  // script change splits
+            if (cur.empty()) cur_script = sc;
+            append_utf8(cur, lower_cp(cp, static_cast<script::Script>(sc)));
+            ++cur_cps;
+        } else if (script::is_digit_cp(cp)) {
+            if (cur_script != 0xFFFFFFFFu &&
+                cur_script != static_cast<std::uint32_t>(script::Script::Latin)) emit();
+            if (cur.empty()) cur_script = static_cast<std::uint32_t>(script::Script::Latin);
+            append_utf8(cur, cp);                       // digits: script-neutral, ASCII order
+            ++cur_cps;
+        } else {
+            if (!cur.empty()) emit();                   // separator
+        }
     }
     if (!cur.empty()) emit();
     return out;

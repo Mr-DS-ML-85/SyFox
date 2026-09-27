@@ -70,7 +70,15 @@ inline std::vector<RecallHit> recall(si::Substrate& s,
                                      int top_k = 5) {
     std::vector<RecallHit> hits;
     if (memories.empty() || s.node_count() == 0) return hits;
-    const std::vector<float> fq = fingerprint(s, si::norm::normalize(query_state));
+    // v2.2: query goes through the SAME state-side protocol as decide()
+    // (words + trigram lanes when grams are on); the CLI builds memory
+    // states with the same protocol, so both sides of the cosine speak the
+    // same encoding. Similarity itself is still settled-field cosine — the
+    // grams are fed to the physics, they are never the similarity metric.
+    const std::vector<float> fq = fingerprint(s,
+        si::norm::field_tokens(si::norm::normalize(query_state),
+                               si::norm::grams_enabled(),
+                               [&s](const std::string& w) { return s.has(w); }));
     float qn2 = 0.0f;
     for (float v : fq) qn2 += v * v;
     if (qn2 <= 0.0f) return hits;      // query resonates with nothing

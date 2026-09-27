@@ -19,6 +19,7 @@
 #include "json.hpp"
 #include "si_substrate.hpp"
 #include "normalize.hpp"
+#include "ngram.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +30,33 @@
 
 namespace syfox {
 
-inline const char* VERSION = "2.1.0";
+inline const char* VERSION = "2.2.0";
+
+// ---------------------------------------------------------------------------
+// v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
+// Words inject at the substrate's own inject_energy; the trigram bridges of
+// an unknown word inject ONLY when that word passes the sub-word traction
+// gate below (a corrupted form of something taught). A boundary protocol,
+// not core physics: si_substrate.hpp is untouched.
+// ---------------------------------------------------------------------------
+inline constexpr float kBridgeEnergy = 1.0f;
+
+// Sub-word traction gate: an UNKNOWN word earns trigram bridges only when a
+// meaningful fraction of its trigrams already exist in the fabric — the
+// signature of a CORRUPTED FORM of something taught ("refnd" keeps g3:ref
+// of "refund"). A legitimate unseen word ("webhook" never taught) shares
+// nothing and stays fully dark: honest silence, no manufactured evidence.
+// Measured (v2.2 A/B, README): ungated bridges regress clean heldout
+// (tickets 1.000 -> 0.833/0.500 depending on bridge level) because unseen
+//-but-relevant words bridge into unrelated labels; with this gate, clean
+// behavior returns to baseline while typo routing is retained.
+inline bool subword_traction(const si::Substrate& s, const std::string& w) {
+    const auto grams = si::norm::expand_ngrams({w});
+    if (grams.empty()) return false;
+    std::size_t known = 0;
+    for (const auto& g : grams) if (s.has(g)) ++known;
+    return known * 4 >= grams.size();                    // >= 25% of trigrams known
+}
 
 // ---------------------------------------------------------------------------
 struct Answer {
@@ -115,14 +142,35 @@ public:
     //  1. all concepts join the vocabulary (intern; fresh nodes are light)
     //  2. adjacent state tokens bind (co-occurrence fabric for diffusion)
     //  3. state -> outcome lanes strengthen (fire together, wire together)
+    //
+    // v2.2: (a) the STATE side carries character trigram lanes (ngram.hpp;
+    // state_tokens()) so typos and sub-word fragments reach the fabric —
+    // outcome/label side stays gram-free. (b) augment=true is the mass-
+    // guarded re-teach used by paraphrase/variant lessons: concepts already
+    // in the vocabulary are NOT intern()ed again, so re-exposure does not
+    // raise acoustic mass (the v2.1 dose-response artifact: re-taught
+    // near-duplicates re-weighted the field by 1/sqrt(mass) damping and
+    // REGRESSED held-out accuracy). With the guard, a variant lesson only
+    // lays/strengthens LANES (coverage), it never re-deposits mass.
     void learn_example(const std::string& state_text, const std::string& instructions,
-                       const std::string& outcome_text) {
-        std::vector<std::string> state = si::norm::normalize(state_text + " " + instructions);
+                       const std::string& outcome_text, bool augment = false) {
+        const bool grams = si::norm::grams_enabled();
+        const std::vector<std::string> words =
+            si::norm::normalize(state_text + " " + instructions);
+        std::vector<std::string> state = si::norm::state_tokens(words, grams);
+        const std::size_t n_words = words.size();
         std::vector<std::string> outcome = si::norm::normalize(outcome_text);
-        for (const auto& t : state) si_.intern(t);
-        for (const auto& t : outcome) si_.intern(t);
-        for (std::size_t i = 1; i < state.size(); ++i)      // co-occurrence fabric
-            si_.bind(si_.find(state[i - 1]), si_.find(state[i]), si_.config().learn_eta * 0.5f);
+        for (const auto& t : state)
+            if (!(augment && si_.has(t))) si_.intern(t);
+        for (const auto& t : outcome)
+            if (!(augment && si_.has(t))) si_.intern(t);
+        for (std::size_t i = 1; i < n_words; ++i)          // co-occurrence fabric
+            si_.bind(si_.find(words[i - 1]), si_.find(words[i]), si_.config().learn_eta * 0.5f);
+        if (grams)                                         // word<->its own trigrams fabric
+            for (const auto& w : words)
+                for (const auto& g : si::norm::expand_ngrams({w}))
+                    if (si_.has(g))
+                        si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f);
         si_.hebbian_lesson(state, outcome);
     }
 
@@ -222,11 +270,21 @@ public:
     //           (supporting evidence wires the route)
     // y=false : anti-Hebbian weaken the same routes (disconfirming evidence
     //           dissolves them), so the field discriminates, not accumulates.
-    void learn_noul(const std::string& state_text, const std::string& instructions, bool y) {
-        std::vector<std::string> state = si::norm::normalize(state_text);
-        std::vector<std::string> instr = si::norm::normalize(instructions);
-        for (const auto& t : state) si_.intern(t);
-        for (const auto& t : instr) si_.intern(t);
+    void learn_noul(const std::string& state_text, const std::string& instructions, bool y,
+                    bool augment = false) {
+        const bool grams = si::norm::grams_enabled();
+        const std::vector<std::string> words = si::norm::normalize(state_text);
+        std::vector<std::string> state = si::norm::state_tokens(words, grams);
+        std::vector<std::string> instr = si::norm::normalize(instructions);   // gram-free
+        for (const auto& t : state)
+            if (!(augment && si_.has(t))) si_.intern(t);
+        for (const auto& t : instr)
+            if (!(augment && si_.has(t))) si_.intern(t);
+        if (grams)
+            for (const auto& w : words)
+                for (const auto& g : si::norm::expand_ngrams({w}))
+                    if (si_.has(g))
+                        si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f);
         if (y) si_.hebbian_lesson(state, instr, 2.0f);   // supporting evidence binds hard
         else   si_.weaken(state, instr);                 // disconfirming evidence dissolves
     }
@@ -238,11 +296,20 @@ public:
         usage.lanes = si_.lane_count();
 
         std::vector<Answer> answers;
-        std::vector<std::string> tokens = si::norm::normalize(state);
-        usage.state_tokens = tokens.size();
+        const std::vector<std::string> words = si::norm::normalize(state);
+        usage.state_tokens = words.size();
 
         si_.reset_field();
-        si_.inject(tokens);
+        si_.inject(words);                               // words at the substrate's own level
+        if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
+            std::vector<std::string> bridges;
+            for (const auto& w : words)
+                if (!si_.has(w) && subword_traction(si_, w))
+                    for (const auto& g : si::norm::expand_ngrams({w}))
+                        if (si_.has(g)) bridges.push_back(g);
+            si_.inject(bridges, kBridgeEnergy);
+            usage.state_tokens += bridges.size();
+        }
         si_.settle();
         usage.settled_energy = si_.total_energy();
 
@@ -255,7 +322,7 @@ public:
             a.type = q.at("type").as_str();
             if (silent) {
                 a.deferred = true;
-                a.reason = tokens.empty() ? "empty_state"
+                a.reason = words.empty() ? "empty_state"
                          : (usage.settled_energy <= 0.0f ? "unknown_vocabulary" : "honest_silence");
                 answers.push_back(a);
                 continue;
@@ -277,6 +344,15 @@ public:
             if (!qs.is_obj()) continue;
             si_.reset_field();
             si_.inject(si::norm::normalize(state));
+            if (si::norm::grams_enabled()) {
+                const std::vector<std::string> words2 = si::norm::normalize(state);
+                std::vector<std::string> bridges;
+                for (const auto& w : words2)
+                    if (!si_.has(w) && subword_traction(si_, w))
+                        for (const auto& g : si::norm::expand_ngrams({w}))
+                            if (si_.has(g)) bridges.push_back(g);
+                si_.inject(bridges, kBridgeEnergy);
+            }
             si_.settle();
             if (si_.silent()) continue;
             for (const auto& qkv : qs.obj) {

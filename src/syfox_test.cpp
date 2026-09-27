@@ -588,11 +588,169 @@ static void test_bench_e2e() {
         CHECK(j.find(key) != std::string::npos, std::string("report carries ") + key);
 }
 
+// ---------------------------------------------------------------------------
+// v2.2 — multilingual boundary: script detection, UTF-8 tokenization,
+// character trigram lanes, mass-guarded augmentation, deterministic typos.
+// ---------------------------------------------------------------------------
+static void test_script_detection() {
+    std::cout << "[script: Unicode script detection]\n";
+    using si::script::Script;
+    CHECK(si::script::detect_script("You charged me twice for the same invoice") == Script::Latin, "english -> latin");
+    CHECK(si::script::detect_script("আমার কার্ড থেকে দুইবার টাকা কেটেছে") == Script::Bengali, "bengali -> bengali");
+    CHECK(si::script::detect_script("मेरे कार्ड से दो बार पैसे कट गए") == Script::Devanagari, "hindi -> devanagari");
+    CHECK(si::script::detect_script("С моей карты списали деньги дважды") == Script::Cyrillic, "russian -> cyrillic");
+    CHECK(si::script::detect_script("Θέλω επιστροφή χρημάτων") == Script::Greek, "greek -> greek");
+    CHECK(si::script::detect_script("أريد استرداد المبلغ") == Script::Arabic, "arabic -> arabic");
+    CHECK(si::script::detect_script("エラーが出ます") == Script::Kana, "japanese kana -> kana");
+    CHECK(si::script::detect_script("에러가 납니다") == Script::Hangul, "korean -> hangul");
+    CHECK(si::script::detect_script("账户被重复扣款了") == Script::Han, "chinese -> han");
+    CHECK(si::script::detect_script("12345 67890") == Script::Latin, "digits are neutral -> latin default");
+    CHECK(si::script::detect_script("") == Script::Latin, "empty -> latin default");
+    CHECK(si::script::detect_script("¡Hola! ¿Dinero de vuelta?") == Script::Latin, "punctuated latin stays latin");
+    CHECK(si::script::detect_script("ok আমার ok ok ok ok ok") == Script::Latin, "majority vote: latin wins 6-2");
+    CHECK(si::script::slug(Script::Bengali) == std::string("bengali"), "slug naming");
+    CHECK(si::script::from_slug("devanagari") == Script::Devanagari, "slug roundtrip");
+}
+
+static void test_utf8_normalize() {
+    std::cout << "[normalize: UTF-8 codepoint boundary]\n";
+    const auto bn = si::norm::normalize("আমার কার্ড থেকে টাকা ফেরত চাই");
+    CHECK(!bn.empty(), "bengali tokenizes (v2.1 produced ZERO tokens — the language barrier)");
+    bool nonascii = false;
+    for (const auto& t : bn)
+        for (char c : t) if (static_cast<unsigned char>(c) >= 0x80) { nonascii = true; break; }
+    CHECK(nonascii, "bengali tokens carry utf-8 codepoints");
+    const auto ru = si::norm::normalize("Москваinvoice");
+    CHECK(ru.size() == 2, "script change splits a run into two tokens");
+    CHECK(!ru.empty() && ru[0] == "москва", "cyrillic lowercased");
+    const auto gr = si::norm::normalize("ΟΔΙΚΑ");
+    // mechanical codepoint map: all-caps Greek loses no tonos it never had;
+    // tonos restoration is NLP-pipeline territory, deliberately out of scope
+    CHECK(!gr.empty() && gr[0] == "οδικα", "greek lowercased (mechanical map, no tonos logic)");
+    const auto lat = si::norm::normalize("Café payment");
+    CHECK(lat.size() == 2 && lat[0] == "café", "accented latin: one token, lowercase, no porter on non-ascii");
+    // ASCII fast path must stay byte-identical to v2.1
+    CHECK(si::norm::normalize("Charged twice.")[0] == "charg", "ascii path: porter unchanged");
+    CHECK(si::norm::normalize("Reimbursement denied")[0] == "refund", "ascii path: synonym fold unchanged");
+    CHECK(si::norm::normalize("a x7").size() == 1, "ascii path: length rule unchanged");
+    // malformed utf-8 bytes are separators, never a crash
+    std::string bad = "ok \xFF\xFE fine";
+    CHECK(si::norm::normalize(bad).size() == 2, "malformed bytes become separators");
+}
+
+static void test_ngram_lanes() {
+    std::cout << "[ngram: character trigram lanes]\n";
+    const auto g = si::norm::expand_ngrams({"refund"});
+    CHECK(g.size() == 4, "refund -> 4 trigrams");
+    CHECK(g[0] == "g3:ref" && g[1] == "g3:efu" && g[2] == "g3:fun" && g[3] == "g3:und",
+          "trigram lane names are literal strings, left-to-right");
+    CHECK(si::norm::expand_ngrams({"abc"}).empty(), "words under 4 codepoints contribute none");
+    const auto bn = si::norm::expand_ngrams(si::norm::normalize("ফেরত দিন টাকা"));
+    bool bn_grams = false;
+    for (const auto& s : bn) if (s.rfind("g3:", 0) == 0 && s.size() > 3) { bn_grams = true; break; }
+    CHECK(bn_grams, "bengali decomposes into codepoint trigrams");
+    const std::vector<std::string> words = {"refund", "charg"};
+    CHECK(si::norm::state_tokens(words, false) == words, "grams off == exact v2.1 stream");
+    const auto on = si::norm::state_tokens(words, true);
+    CHECK(on.size() == 2 + 4 + 3, "grams on: words first, then per-word grams");
+    CHECK(!si::norm::grams_enabled(),
+          "grams default OFF (measured: Latin baselines need the word-level stream; "
+          "--lang auto enables bridges for non-Latin substrates)");
+    si::norm::grams_enabled() = true;
+    const auto ft = si::norm::field_tokens(words, true,
+                                           [](const std::string& w) { return w == "charg"; });
+    CHECK(ft.size() == 2 + 4,
+          "bridge protocol: known word (charg) carries no grams, unknown word (refund) carries 4");
+    si::norm::grams_enabled() = false;
+}
+
+static void test_mass_guard() {
+    std::cout << "[augment: mass-guarded re-teach]\n";
+    using namespace syfox;
+    Engine a;
+    a.learn_example("Refund my money now", "team", "billing payment");
+    a.learn_example("Refund my money now", "team", "billing payment");
+    const float m_a = a.substrate().node_mass(a.substrate().find("refund"));
+    CHECK(m_a == 2.0f, "plain re-teach re-deposits mass (the documented v2.1 artifact)");
+    Engine b;
+    b.learn_example("Refund my money now", "team", "billing payment");
+    const float n1 = b.substrate().node_mass(b.substrate().find("refund"));
+    const float w1 = b.substrate().lane_weight(b.substrate().find("refund"),
+                                               b.substrate().find("bill"));
+    b.learn_example("Refund my money now", "team", "billing payment", /*augment=*/true);
+    const float n2 = b.substrate().node_mass(b.substrate().find("refund"));
+    const float w2 = b.substrate().lane_weight(b.substrate().find("refund"),
+                                               b.substrate().find("bill"));
+    CHECK(n1 == 1.0f && n2 == n1, "augment re-teach does NOT re-deposit mass");
+    CHECK(w2 > w1, "augment re-teach still strengthens lanes (coverage, not re-weighting)");
+}
+
+static void test_multilingual_e2e() {
+    std::cout << "[multilingual: bengali fabric end to end]\n";
+    using namespace syfox;
+    // multilingual scenario: the --lang auto policy runs non-Latin substrates
+    // with sub-word bridges enabled (they are load-bearing for typo routing)
+    si::norm::grams_enabled() = true;
+    Engine eng;
+    const char* bn_billing[] = {
+        "আমার কার্ড থেকে দুইবার টাকা কেটেছে অতিরিক্ত টাকা ফেরত দিন",
+        "সাবস্ক্রিপশন বাতিল করেছি তবুও আবার চার্জ করেছে টাকা ফেরত চাই",
+        "গত মাসের ইনভয়েসে ভুল টাকার পরিমাণ আছে ঠিক করুন"};
+    const char* bn_technical[] = {
+        "অ্যাপটি বারবার ক্র্যাশ করছে লগইন করতে পারছি না",
+        "পেমেন্ট গেটওয়ে কাজ করছে না এরর দেখাচ্ছে",
+        "ওয়েবহুক ইভেন্ট কানেক্ট হচ্ছে না ইন্টিগ্রেশন ব্যর্থ"};
+    const sfx::JV q = sfx::JV::parse(
+        R"({"department":{"type":"choice","instructions":"Which team should handle this",)"
+        R"("criteria":{"billing":"payment or subscription issues","technical":"bugs or integration problems"}}})");
+    for (const auto* s : bn_billing)
+        eng.learn_example(s, "Which team should handle this", "billing payment or subscription issues");
+    for (const auto* s : bn_technical)
+        eng.learn_example(s, "Which team should handle this", "technical bugs or integration problems");
+    Usage u;
+    auto a1 = eng.decide("অর্ডার ৪৪১২ এর জন্য অতিরিক্ত পেমেন্ট হয়েছে ওই টাকা ফেরত চাই", q, u);
+    CHECK(!a1.empty() && !a1[0].deferred, "bengali heldout settles (not honest silence)");
+    CHECK(!a1.empty() && !a1[0].deferred && a1[0].choice == "billing", "bengali heldout -> billing");
+    auto a2 = eng.decide("এপিআই কল করলে এরর আসে ইন্টিগ্রেশন কাজ করছে না", q, u);
+    CHECK(!a2.empty() && !a2[0].deferred && a2[0].choice == "technical", "bengali heldout -> technical");
+    // typo'd bengali query (vowels/matra dropped) — trigram lanes must carry it
+    auto a3 = eng.decide("ওয়েবহক ইভন্ট কনেক্ট হচছ না ইন্টিগ্রেশন ব্যর্থ", q, u);
+    CHECK(!a3.empty() && !a3[0].deferred && a3[0].choice == "technical",
+          "bengali typo query still routes (character trigram lanes)");
+    // determinism with the multilingual boundary
+    Usage u2;
+    auto a1b = eng.decide("অর্ডার ৪৪১২ এর জন্য অতিরিক্ত পেমেন্ট হয়েছে ওই টাকা ফেরত চাই", q, u2);
+    CHECK(!a1b.empty() && a1b[0].choice == a1[0].choice &&
+          std::fabs(a1b[0].confidence - a1[0].confidence) < 1e-9f,
+          "bengali decisions replay bit-identically");
+    si::norm::grams_enabled() = false;
+}
+
+static void test_typo_corruption() {
+    std::cout << "[typos: deterministic corruption sweep]\n";
+    using syfox::bench::corrupt_state;
+    CHECK(corrupt_state("refund the money", 0.0f) == "refund the money", "0% corruption is identity");
+    const std::string c1 = corrupt_state("refund the duplicate charge immediately", 100.0f);
+    CHECK(c1 != "refund the duplicate charge immediately", "100% corrupts qualifying words");
+    CHECK(corrupt_state("refund the duplicate charge immediately", 100.0f) == c1,
+          "corruption is deterministic (word-hash decided)");
+    const std::string s = corrupt_state("add a column to the users table", 100.0f);
+    CHECK(s.rfind("add ", 0) == 0, "words under 4 codepoints never corrupted");
+    const std::string b = corrupt_state("আমার কার্ড থেকে টাকা কেটেছে দুইবার", 100.0f);
+    CHECK(b != "আমার কার্ড থেকে টাকা কেটেছে দুইবার", "bengali words corrupt on codepoints");
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
     test_folding();
     test_normalize();
+    test_script_detection();
+    test_utf8_normalize();
+    test_ngram_lanes();
+    test_mass_guard();
+    test_multilingual_e2e();
+    test_typo_corruption();
     test_field_physics();
     test_salience_mechanics();
     test_hebbian_choice();

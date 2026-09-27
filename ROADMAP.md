@@ -12,7 +12,7 @@
 - [x] Three seed domains: support tickets, game bot, coding-agent guardrail
 
 ## v0.2 — Depth and robustness
-- [ ] Character n-gram concept lanes: typo robustness without touching the core physics
+- [x] Character n-gram concept lanes: typo robustness without touching the core physics (v2.2: trigram bridges + traction gate; `bench --typos` measures)
 - [x] Physics port (post-audit): SI cavity salience integrator
       tanh(s·decay + gain·|ΔE|) runs every pass; `salience_gating` and
       `miller_window` ([cap−4, cap], TSDA live_cap) ship behind config flags.

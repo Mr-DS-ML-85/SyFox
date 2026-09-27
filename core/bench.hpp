@@ -55,6 +55,70 @@ struct BenchConfig {
     float closecall_margin = 0.10f; // argmax margin below this = close call
 };
 
+// ---------------------------------------------------------------------------
+// Deterministic typo corruption (v2.2) — the measured form of the
+// typo-robustness claim. Real user input arrives misspelled; this mutates
+// eval states the way keyboards do and the bench reports the accuracy drop.
+//
+// Determinism: corruption decisions come from FNV-1a of the WORD ITSELF,
+// not of the row or position — the same word is corrupted identically
+// everywhere (row-stable comparisons, replay-stable across runs).
+// Works on codepoints (UTF-8), so Bengali/Hindi words corrupt correctly
+// (matra drops, consonant swaps). Words < 4 codepoints are never touched
+// (mirrors the n-gram lane minimum). Ops: deletion / adjacent swap /
+// duplication, chosen by hash bits.
+// ---------------------------------------------------------------------------
+inline std::string corrupt_state(const std::string& state, float pct) {
+    if (pct <= 0.0f) return state;
+    auto fnv64 = [](const std::string& s) {
+        std::uint64_t h = 1469598103934665603ull;
+        for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+        return h;
+    };
+    // decode once: per-codepoint strings + letter flags
+    std::vector<std::string> cps;
+    std::vector<bool>        letter;
+    for (std::size_t i = 0; i < state.size();) {
+        std::uint32_t cp = 0;
+        const std::size_t len = si::script::decode_utf8(state, i, cp);
+        cps.push_back(state.substr(i, len));
+        letter.push_back(cp != 0xFFFFFFFFu && si::script::is_letter_cp(cp));
+        i += len;
+    }
+    const unsigned want = static_cast<unsigned>(pct);
+    std::size_t i = 0;
+    while (i < cps.size()) {
+        if (!letter[i]) { ++i; continue; }
+        std::size_t j = i;
+        while (j < cps.size() && letter[j]) ++j;          // letter run [i,j)
+        if (j - i >= 4) {
+            std::string w;
+            for (std::size_t k = i; k < j; ++k) w += cps[k];
+            const std::uint64_t h = fnv64(w);
+            if (static_cast<unsigned>(h % 100ull) < want) {
+                const std::size_t pos  = static_cast<std::size_t>((h >> 7) % (j - i));
+                const std::size_t op   = static_cast<std::size_t>((h >> 19) % 3ull);
+                if (op == 0) {                                        // deletion
+                    cps.erase(cps.begin() + static_cast<std::ptrdiff_t>(i + pos));
+                    --j;
+                } else if (op == 1 && pos + 1 < j - i) {              // adjacent swap
+                    std::swap(cps[i + pos], cps[i + pos + 1]);
+                } else if (op == 1) {                                 // swap impossible at edge
+                    cps.erase(cps.begin() + static_cast<std::ptrdiff_t>(i + pos));
+                    --j;
+                } else {                                              // duplication
+                    cps.insert(cps.begin() + static_cast<std::ptrdiff_t>(i + pos), cps[i + pos]);
+                    ++j;
+                }
+            }
+        }
+        i = j;
+    }
+    std::string out;
+    for (const auto& c : cps) out += c;
+    return out;
+}
+
 // A replay unit: one state + the typed questions to ask about it + the
 // expected labels (qid -> label). Generated probes carry no labels and are
 // scored only for margins/deferral, never for accuracy.
@@ -67,7 +131,12 @@ struct Probe {
 
 // Deterministic nonsense vocabulary for the honesty probes. Every token is
 // checked against the model's vocabulary before use; a token the model
-// happens to know is skipped (no fake OOD).
+// happens to know is skipped (no fake OOD). v2.2: the check extends to
+// SUB-WORD material — a word whose trigrams overlap taught g3:* lanes
+// ("teapot" vs taught "team": g3:tea) carries partial evidence under the
+// trigram encoding and is NOT out-of-distribution anymore; probing with it
+// would fake a silence violation. Truly unentangled vocabulary must still
+// defer at 100% — that is the contract this probe guards.
 inline std::vector<std::string> ood_states(const si::Substrate& s, int n) {
     static const char* kNonsense[] = {
         "zorblatz", "quibblemock", "framistan", "velocirapture", "glorgnax",
@@ -78,12 +147,17 @@ inline std::vector<std::string> ood_states(const si::Substrate& s, int n) {
         "discombobulate", "kerfuffle", "wabbit", "skua", "fondue"
     };
     const int K = static_cast<int>(sizeof(kNonsense) / sizeof(kNonsense[0]));
+    auto subword_entangled = [&s](const std::string& w) {
+        for (const auto& g : si::norm::expand_ngrams({w}))
+            if (s.has(g)) return true;
+        return false;
+    };
     std::vector<std::string> out;
     for (int i = 0; i < n && i < K; ++i) {
         std::vector<std::string> toks;
         for (int k = 0; k < 3; ++k) {
             const std::string w = kNonsense[(i * 3 + k) % K];
-            if (!s.has(w)) toks.push_back(w);          // unknown => stays dark
+            if (!s.has(w) && !subword_entangled(w)) toks.push_back(w);  // unknown at word AND sub-word level
         }
         if (toks.empty()) continue;                    // all three known: skip
         std::string st;

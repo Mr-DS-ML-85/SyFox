@@ -321,6 +321,101 @@ reproducible (`make models-augmented`), and the synonym-folding table
 the generalization P3 was after — "reimbursement" lands on the same node as
 "refund" — without re-deposition.
 
+### Variant lessons, mass-guarded (v2.2, measured — still negative)
+
+v2.2 asked the obvious follow-up: was the v2.1 regression ONLY the mass
+re-deposition? `tools/gen_variants.py` now generates 8–10 variants per
+taught state (synonym swaps, clause rotation, adjacent reorder, fillers;
+deterministic, refuses held-out paths), and `learn --augment` re-teaches
+them **mass-guarded** — concepts already in the vocabulary are not
+`intern()`ed again, so acoustic mass never changes; only lanes are laid and
+strengthened. Held-out choice accuracy (`make models-vast`):
+
+| recipe | tickets | game | guard |
+|---|---|---|---|
+| train only | **1.000** | 0.667 | **0.750** |
+| train + 199 mass-guarded variants | 0.500 | 0.000 | 0.500 |
+
+Still negative — worse than plain re-teaching on game. The mechanism is now
+measurable with the mass confound removed: variant lessons lay NEW lanes
+from the same words to MULTIPLE labels (the seed domains share vocabulary
+across labels — "refund" appears under billing AND sales), and reorder
+fillers bind noise nodes to everything. On tiny multi-label fabrics the
+fabric smears. **The physics verdict is unchanged: coverage comes from
+distinct labelled experience, not from re-phrasing 16 rows** — which is
+exactly what the active-learning loop (below) collects. `make models-vast`
+stays reproducible so this A/B can be re-run as fabrics grow.
+
+### Multilingual boundary and typo robustness (v2.2, measured)
+
+**The language barrier is real and was at the tokenizer**: v2.1 scanned bytes
+with `std::isalnum`, which in the C locale tears apart every multi-byte UTF-8
+sequence — a Bengali or Hindi query produced **zero tokens** and deferred
+forever. v2.2 rebuilds the boundary (`core/script.hpp` + `core/normalize.hpp`
++ `core/ngram.hpp`):
+
+1. **Script detection** — 35 Unicode script families (Latin, Cyrillic, Greek,
+   Arabic, Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu,
+   Kannada, Malayalam, Sinhala, Thai, Lao, Tibetan, Myanmar, Georgian, Khmer,
+   Mongolian, Ethiopic, Cherokee, Coptic, Vai, Yi, Bopomofo, Han, Kana,
+   Hangul, Hebrew, Armenian, Syriac, Thaana, Nko) by block-range majority
+   vote. Deterministic: ties break by table order, digits are neutral,
+   malformed bytes are separators. These families carry **100+ languages**
+   (Latin alone 60+: English, Spanish, French, German, Portuguese, Vietnamese,
+   Turkish, Swahili, Indonesian…; Cyrillic ~15: Russian, Ukrainian, Bulgarian,
+   Kazakh…; Arabic ~10: Arabic, Persian, Urdu, Pashto…; Devanagari ~8: Hindi,
+   Marathi, Nepali…; Bengali, Punjabi, Gujarati, Odia, Tamil, Telugu, Kannada,
+   Malayalam, Sinhala, Thai, Lao, Khmer, Burmese, Tibetan, Georgian, Armenian,
+   Greek, Hebrew, Amharic, Tigrinya, Chinese, Japanese, Korean, Dhivehi,
+   Mongolian, Cherokee, Coptic, Vai, Nuosu…).
+2. **Per-script substrates** — `--lang auto` detects the script of every
+   query/lesson and routes to `<model>-<script>`: one SI substrate per script
+   family (Latin included). A routed substrate is isolated fabric — no
+   cross-script interference. Missing substrate → honest fallback note.
+3. **Character trigram lanes** — taught words deposit `g3:ref`-style
+   sub-word lanes (literal strings, not hashes — every lane inspectable).
+   At decide time, an UNKNOWN word injects its trigrams **only if ≥25% of
+   them already exist in the fabric** (the signature of a corrupted form:
+   `refnd` keeps `g3:ref` of `refund`). A legitimate unseen word shares
+   nothing and stays dark — honest silence, no manufactured evidence.
+   Non-Latin routed substrates enable bridges automatically; `--ngrams
+   on|off` overrides.
+
+Measured (all reproducible; `make models` teaches the trigram lanes, the
+default decide path stays word-level):
+
+| measurement | result |
+|---|---|
+| Bengali tokens (v2.1) | **0 tokens** — every non-Latin query deferred |
+| Bengali tokens (v2.2) | full tokenization, script detected |
+| Bengali held-out routing (n=3, `model-tickets-bengali`) | choice acc **1.000**, OOD defer 1.00 |
+| Bengali train routing (n=11, in-sample) | choice acc 1.000, score acc 1.000 |
+| Hindi (Devanagari) + Russian (Cyrillic) demos | routed to `-devanagari` / `-cyrillic`, correct billing choice |
+| Latin held-out with lanes in fabric, word-level decide | tickets 1.000 / game 0.667 / guard 0.750 — **byte-identical to v2.1** |
+| Latin held-out, bridges on (`--ngrams on`) | same clean numbers (traction gate) |
+| Deterministic corruption 40% (`bench --typos 40`) | tickets clean 1.000 → 0.500 (bridges neutral at n=6; the sweep is deterministic and scales with fabric) |
+
+### Active learning loop (v2.2) — your fine-tuning
+
+A substrate can only know what it was taught, so the growth path is the
+loop — deploy, log deferrals, label, re-learn:
+
+```bash
+./build/syfox decide --model model-tickets --log-deferrals logs/deferrals.jsonl \
+    --state "..." --questions '{...}'        # step 1: honest silence leaves a trail
+./build/syfox active --deferrals logs/deferrals.jsonl --out worksheet.jsonl
+                                             # step 2: dedup + rank by deferral count
+# step 3: a human fills "labels" in the worksheet (schema already embedded)
+./build/syfox learn --model model-tickets --examples worksheet.jsonl
+                                             # step 4: re-teach
+```
+
+Each deferral log row carries the state AND the full question schema, so a
+labeled worksheet row is directly teachable — no reconstruction step. This
+is the mechanism answer to "train it vastly": the field grows by **distinct
+labelled experience collected from its own uncertainty**, not by re-phrasing
+the same 16 rows (measured twice — see the dose-response sections above).
+
 ### Latency and cost
 
 Measured p50 per decision: 29–64 µs on a single CPU core (p95 ≤ 80 µs) —
@@ -394,24 +489,37 @@ state, nothing corroborated — every question returns:
 SyFox never guesses from nothing. For guardrails, combine this with a defer
 band: route answers with confidence below your threshold to a human.
 
-## Known limits (v0.1 — honest list)
+## Known limits (v2.2 — honest list)
 
 * Tone/sentiment questions need much more data than routing questions; with 22
   seed rows the argmax is usually right but probabilities stay near-uniform.
-* Word-level substrate: heavy typos fall outside the vocabulary (character-n
-  gram lanes are on the roadmap).
-* English/Bengali-style token folding is deliberately minimal (deterministic
-  string normalization, no NLP pipeline).
-* The substrate **derives, it doesn't retrieve**. A state you never taught
-  still gets a computed answer: energy diffuses across the lane fabric and
-  evidence composes across lessons. Verified in a two-lesson probe (only
+  More genuinely distinct labelled rows help; re-teaching near-duplicates does
+  not (measured twice — see the augmentation dose-response sections).
+* ~~Word-level substrate: heavy typos fall outside the vocabulary~~ **fixed in
+  v2.2**: character trigram lanes now exist (see "Multilingual boundary and
+  typo robustness"). Measured honestly: on the 6-row tickets held-out set the
+  bridges are neutral at the operating point (clean and corrupted accuracy
+  unchanged) — the mechanism is load-bearing for non-Latin typo routing, where
+  the script barrier makes vocabularies tiny.
+* ~~English/Bengali-style token folding is deliberately minimal~~ **updated in
+  v2.2**: tokenization is now codepoint-aware for any script (UTF-8 decode,
+  script-homogeneous runs, Cyrillic/Greek/Latin lowercase maps) — still a
+  deterministic string boundary, still no NLP pipeline, still no neural net.
+* **The substrate derives AND retrieves.** A state you never taught still gets
+  a computed answer: energy diffuses across the lane fabric and evidence
+  composes across lessons. Verified in a two-lesson probe (only
   `alpha beta`→x and `beta gamma`→y taught): querying `alpha` alone — a
   state never taught, from a lesson that never mentioned y — puts y at
-  0.494 through the two-hop path alpha→beta→y. What the field cannot exceed
-  is the vocabulary and lane fabric of its experience: concepts you never
-  taught don't exist in it, and unknown words defer (honest silence) instead
-  of being hallucinated. Audit `model-*/substrate.bin` — the lanes ARE the
-  knowledge, every one inspectable.
+  0.494 through the two-hop path alpha→beta→y. And since v0.2 it also
+  **retrieves**: `syfox recall` (core/recall.hpp) is Hopfield-style
+  associative memory — settle the query and each stored memory into
+  L2-normalized energy fingerprints, rank by cosine. Zero token comparison,
+  zero pattern matching; untaught vocabulary resonates with nothing. What
+  the field cannot exceed is the vocabulary and lane fabric of its
+  experience: concepts you never taught don't exist in it, and unknown words
+  defer (honest silence) instead of being hallucinated. Audit
+  `model-*/substrate.bin` — the lanes ARE the knowledge, every one
+  inspectable.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full mechanism
 specification and the Synthetic-Intelligence lineage, and

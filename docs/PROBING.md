@@ -71,3 +71,24 @@ comparable mass. The fabric's own held-out numbers (SMS 0.937) were measured
 under its trained schema. Next step on that side: re-run the probes with the
 trained schema, sweep wording, and score the real held-out sets with
 `--defer-margin` so ties are visible instead of silent.
+
+## 6. Runtime flags in probes (v3.1.2)
+
+`--energy-norm`, `--salience-gating`, and `--miller-window` are readout /
+injection instruments, not reasoning upgrades. The model-xl zero-shot
+reports (Snake A–E, Tic-Tac-Toe, file routing) and their repo-fabric
+confirmation are archived with the code-level mechanism in
+[ZEROSHOT.md](ZEROSHOT.md). Short version:
+
+- `--energy-norm` changes the injection dose — a different settled field.
+- `--salience-gating` / `--miller-window` change which nodes propagate
+  during settling — the settled energy is conserved (bit-identical across
+  source modes, measured on 2,638 real hidden rows), only the readout
+  changes. Winner flips at constant settled energy are expected behavior.
+- Confidence under amplified configs is concentration, not correctness:
+  high-confidence-wrong rows went 0 → 15–86 per 1,800-row fabric under the
+  amplified configs while baseline confidence never crossed the bar.
+
+Keep zero-shot probes and trained held-out numbers in separate buckets
+(ZEROSHOT.md §Part 1/Part 2); never quote a flagged readout against a
+default-config benchmark.

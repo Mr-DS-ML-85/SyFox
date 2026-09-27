@@ -1,3 +1,39 @@
+## v3.1.2 — zero-shot probe reports archived; the runtime-flag mechanism measured
+
+The model-xl zero-shot experiments (Snake 8-scenario suite + the A–E flag
+experiment, Tic-Tac-Toe symbolic composition, file-organizer routing) are
+archived in `docs/ZEROSHOT.md`, and the report's central observation —
+winner flips at constant settled energy, Miller-window confidence 0.805 on
+an illegal move — is now mechanism-explained in code and re-measured on
+repo fabrics with real held-out rows (`tools/flag_probe_experiment.py`,
+2,638 hidden rows, trained schema, deterministic):
+
+- **Source modes don't touch the field.** With the injection dose held
+  constant, settled energy is bit-identical across salience/miller configs
+  (spread ≤ 0.001 on 99.5% / 99.8% of rows) because a settle pass conserves
+  energy up to uniform decay — source gating only decides which nodes
+  propagate ("gated nodes keep their energy (readout-visible) but stay
+  silent as sources", `si_substrate.hpp settle()`). The same invariance is
+  why the model-xl A–E run reported 83.928 in every amplified config.
+- **Energy-norm DOES change the field** (injection dose): 0% of rows keep
+  their settled energy vs baseline. On trained schemas it is pure
+  amplification — tickets-big flips 0.1% of winners at identical 0.971
+  accuracy while margins rise 0.0355 → 0.9430 and confidence 0.002 → 0.923;
+  baseline deferrals 35 → 0 (the documented M1 purpose).
+- **Flags are diagnostic instruments, not defaults.** Salience gating is
+  fabric-dependent: −4.1 points on tickets-big (0.971 → 0.930), +19 points
+  on sms-natural (0.160 → 0.360) where the full-source readout is dominated
+  by harvest noise. High-confidence-wrong rows (conf ≥ 0.5 while wrong):
+  0 at baseline on both fabrics → 15–86 under amplified configs.
+- Zero-shot and trained-domain results stay in separate buckets; the
+  interpretation rules (confidence = concentration, never correctness;
+  `--defer-margin` for honest ties) are in ZEROSHOT.md §Part 3 and
+  PROBING.md §6.
+
+Also: the four SMS probe data files (`data/sms_train.jsonl`,
+`sms_hidden_match/reworded/empty.jsonl`) are now committed so the v3.1.1
+probe experiment and this flag experiment reproduce from a fresh clone.
+
 ## v3.1.1 — the probe experiment: criteria wording is a first-class input; honest ties via --defer-margin
 
 The model-xl diagnostic (handcrafted Bangla/English/SMS probes tying at

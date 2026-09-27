@@ -645,7 +645,10 @@ band: route answers with confidence below your threshold to a human.
   inspectable.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full mechanism
-specification and the Synthetic-Intelligence lineage, and
+specification, [docs/ZEROSHOT.md](docs/ZEROSHOT.md) for the zero-shot probe
+reports and the runtime-flag mechanism (settled energy is invariant to the
+source modes; confidence is concentration, not correctness),
+[docs/PROBING.md](docs/PROBING.md) for probe methodology, and
 [ROADMAP.md](ROADMAP.md) for where this is going.
 
 ## License & credit

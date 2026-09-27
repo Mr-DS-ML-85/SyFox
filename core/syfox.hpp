@@ -34,7 +34,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.2.1";
+inline const char* VERSION = "3.3.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -93,6 +93,12 @@ struct Answer {
     float confidence = 0.0f;
     bool deferred = false;
     std::string reason;                                  // honest-silence reasons
+    // v3.3 readout disclosures: an EXACT top-2 probability tie (the readout
+    // carries no signal between the top two; the pick is deterministic
+    // criteria order), and the question tokens that gated the readout when
+    // question-conditioned gating fired.
+    bool tied = false;
+    std::vector<std::string> gate_tokens;
 };
 
 struct Usage {
@@ -201,6 +207,22 @@ public:
                     {"outcome", sfx::JV(kv.second.outcome)}}).dump() << "\n";
         }
     }
+
+    // v3.3 question-conditioned readout (read-only over the settled field).
+    // Ported from the original Synthetic-Intelligence repo, where EVERY token
+    // of the turn — context AND question — drove the activation field
+    // (si_main.cpp: "for (int id : matched) physics.drive(id, 3.0f, 6.0f, 20)").
+    // SyFox's contract keeps state and question separate, so the portable
+    // form gates the READOUT: question tokens that are NEW relative to the
+    // state (the "who" in "Who found the radio?") carry lane mass to the
+    // candidate anchors, and candidates are scaled by that mass. The settled
+    // field is measured, never rewritten — same shape as the hierarchy gate.
+    void set_question_gate(bool on) { question_gate_on_ = on; }
+    bool question_gate_on() const { return question_gate_on_; }
+    void set_question_gate_floor(float f) {
+        question_gate_floor_ = std::min(1.0f, std::max(0.0f, f));
+    }
+    float question_gate_floor() const { return question_gate_floor_; }
 
     // v3.2.1: returns false when the substrate file is missing (honest load
     // failure — callers surface a clear error instead of deciding on an
@@ -695,7 +717,7 @@ public:
                 answers.push_back(a);
                 continue;
             }
-            if (a.type == "choice")   decide_choice(q, a);
+            if (a.type == "choice")   decide_choice(q, words, a);
             else if (a.type == "score") decide_score(q, a);
             else if (a.type == "noul")  decide_noul(q, a);
             answers.push_back(a);
@@ -942,7 +964,8 @@ private:
         return std::max(0.0f, std::min(1.0f, conf));
     }
 
-    void decide_choice(const sfx::JV& q, Answer& a) {
+    void decide_choice(const sfx::JV& q, const std::vector<std::string>& state_words,
+                       Answer& a) {
         const sfx::JV& crit = q.at("criteria");
         std::vector<std::string> labels; std::vector<float> energies;
         if (crit.is_obj())
@@ -956,6 +979,19 @@ private:
                 energies.push_back(probe_energy(v.as_str(), ""));
             }
         if (labels.empty()) { a.deferred = true; a.reason = "no_options"; return; }
+        // v3.3 honest silence at the READOUT: if the settled field carries no
+        // energy on ANY candidate, the readout has nothing to measure — the
+        // old behavior answered with a uniform distribution and picked by
+        // criteria order (the reported "purple elephant" OOD mode answered a
+        // tie at confidence 0). Deferring here is the same honest-silence
+        // contract the dark-field case already follows.
+        bool any_energy = false;
+        for (float e : energies) if (e > 0.0f) { any_energy = true; break; }
+        if (!any_energy) {
+            a.deferred = true;
+            a.reason = "unknown_candidates";
+            return;
+        }
         // v3.2 Stage 3 — semantic hierarchy gating (readout-side): when the
         // model ships a hierarchy and the candidates carry categories, stage-1
         // category energies scale the stage-2 intent energies. Deterministic,
@@ -986,6 +1022,62 @@ private:
                 }
             }
         }
+        // v3.3 — question-conditioned readout gating. The state field stands;
+        // the question's NEW tokens (present in the fabric, absent from the
+        // state) distribute lane mass over the candidate anchors, and each
+        // candidate is scaled by its share of that mass. Deterministic,
+        // read-only: the settled field is measured, never rewritten.
+        if (question_gate_on_) {
+            std::vector<std::string> qtoks;
+            if (q.has("instructions")) {
+                for (const auto& t : si::norm::normalize(q.at("instructions").as_str())) {
+                    if (!si_.has(t)) continue;                       // unknown question words gate nothing
+                    if (std::find(state_words.begin(), state_words.end(), t) != state_words.end())
+                        continue;                                    // the state already spoke for itself
+                    if (std::find(qtoks.begin(), qtoks.end(), t) == qtoks.end())
+                        qtoks.push_back(t);
+                }
+            }
+            if (!qtoks.empty()) {
+                std::unordered_map<si::NodeId, float> rel;
+                std::vector<std::pair<si::NodeId, float>> ln;
+                for (const auto& t : qtoks) {
+                    ln.clear();
+                    si_.lanes_of(si_.find(t), ln);
+                    for (const auto& l : ln) rel[l.first] += l.second;
+                }
+                std::vector<float> r(labels.size(), 0.0f);
+                float maxr = 0.0f;
+                for (std::size_t i = 0; i < labels.size(); ++i) {
+                    // labels are user-facing keys ("Tariq"); the fabric stores
+                    // normalized concepts ("tariq") — normalize before lookup,
+                    // same convention probe_energy uses for the readout.
+                    const std::vector<std::string> lt = si::norm::normalize(labels[i]);
+                    float ri = 0.0f;
+                    bool any_tok = false;
+                    for (const auto& t : lt) {
+                        if (!si_.has(t)) continue;
+                        any_tok = true;
+                        auto it = rel.find(si_.find(t));
+                        if (it != rel.end()) ri += it->second;
+                    }
+                    if (!any_tok) continue;                          // candidate not in the fabric: untouched
+                    r[i] = ri;
+                    maxr = std::max(maxr, ri);
+                }
+                if (maxr > 0.0f) {
+                    for (std::size_t i = 0; i < labels.size(); ++i) {
+                        const std::vector<std::string> lt = si::norm::normalize(labels[i]);
+                        bool any_tok = false;
+                        for (const auto& t : lt) if (si_.has(t)) { any_tok = true; break; }
+                        if (!any_tok) continue;
+                        energies[i] *= question_gate_floor_
+                                     + (1.0f - question_gate_floor_) * (r[i] / maxr);
+                    }
+                    a.gate_tokens = qtoks;
+                }
+            }
+        }
         std::vector<float> p;
         softmax_ps(energies, p, calib_.choice_temperature);
         std::size_t best = std::max_element(p.begin(), p.end()) - p.begin();
@@ -993,6 +1085,18 @@ private:
         for (std::size_t i = 0; i < labels.size(); ++i)
             a.probabilities.emplace_back(labels[i], p[i]);
         a.confidence = entropy_confidence(p);
+        // v3.3 exact-tie disclosure: when the top two probabilities are
+        // EQUAL the readout carried no signal between them — the pick is
+        // deterministic criteria order (std::map key order), and every reply
+        // says so. NEAR-ties stay the --defer-margin knob's business.
+        if (p.size() >= 2) {
+            float p1 = 0.0f, p2 = 0.0f;
+            for (float v : p) {
+                if (v > p1) { p2 = p1; p1 = v; }
+                else if (v > p2) p2 = v;
+            }
+            if (p1 - p2 <= 1e-9f) a.tied = true;
+        }
     }
 
     void decide_score(const sfx::JV& q, Answer& a) {
@@ -1106,6 +1210,14 @@ private:
     std::map<std::string, std::string> hier_cat_criteria_; // category anchor -> criteria text
     float hier_floor_ = 0.35f;
     bool hier_on_ = false;
+    // v3.3 question-conditioned readout state. Default OFF: measured on the
+    // trained domains the gate is a trade-off (tickets-cal acc 0.9533 ->
+    // 0.9000 with the gate on — "which team" lanes mislead), while on
+    // question-driven reasoning probes it is the fix (who/latest gate rows).
+    // Ships as an opt-in knob exactly like the M1 energy-norm gain: enabled
+    // with --question-gate / opts.question_gate, floor tuned by measurement.
+    bool question_gate_on_ = false;
+    float question_gate_floor_ = 0.25f;
     // Milestone-3 audit state
     std::string context_ = "default";
     std::uint64_t teach_seq_ = 0;

@@ -1,0 +1,60 @@
+{
+ "comment": "v3.3 measured tables: question-conditioned readout (opt-in gate), tie disclosure, readout silence, --evidence repro. Reproduce via tools/reasoning_probes.py --rebuild.",
+ "probe_fabric": "model-reasoning-probe (14 QA-style lessons, data/reasoning_probe_lessons.jsonl; calibrate --energy-norm, T=1 adopted)",
+ "evidence_bug": {
+  "root_cause": "harness treated --evidence as value-taking and swallowed --model; on v3.2.0 the missing default model dir loaded as a SILENT empty fabric (lanes 0, vocabulary 0, calibrated false, all unknown_vocabulary) \u2014 reproduced exactly on a v3.2.0 worktree build with 'decide --evidence --state ... --questions ...' (no --model)",
+  "fix_status": "v3.2.1's loud load failure already cures it (exit 2 naming the dir); v3.3 adds a stderr hint when the failed dir is the default 'model' value"
+ },
+ "probe_results": {
+  "Test 1 who found the radio": {
+   "gate OFF": "tariq @ 0.056",
+   "gate ON floor 0.10": "tariq @ 0.113 gate=[who]",
+   "gate ON floor 0.25": "tariq @ 0.099 gate=[who]",
+   "note": "gate fires on the question's NEW token 'who' and doubles the margin for the question-relevant answer"
+  },
+  "Test 2 two-person tie": {
+   "gate OFF": "tariq @ 0.133",
+   "gate ON floor 0.10": "tariq @ 0.146 gate=[who]"
+  },
+  "Test 4 unknown options xyz/abc/def": {
+   "all configs": "DEFER (unknown_candidates)",
+   "note": "was answered by noise (abc 0.344 reported); all-dark readout now defers"
+  },
+  "Test 10 alarm-lights-door chain": {
+   "gate OFF": "lights @ 0.016",
+   "gate ON floor 0.10": "lights @ 0.023 gate=[what, turn, on]"
+  },
+  "Test 16 latest temperature": {
+   "gate OFF": "twentytwo @ 0.008",
+   "gate ON floor 0.10": "twentytwo @ 0.117 gate=[what, latest]",
+   "note": "14x confidence when the fabric has 'latest' lanes to the right value"
+  },
+  "Test 17 OOD submarine color": {
+   "all configs": "DEFER (unknown_candidates)",
+   "note": "in a fabric that never saw the entities; the user's variant where the state lights the field (purple 0.472) remains an open mode \u2014 the state-salience override needs a deeper mechanism"
+  }
+ },
+ "regression_check_tickets_cal_150": {
+  "gate default OFF": {
+   "acc": 0.9533,
+   "meanC": 0.8736,
+   "note": "bit-identical to v3.2.1 shipped numbers"
+  },
+  "gate ON (measured trade-off)": {
+   "acc": 0.9,
+   "meanC": 0.8373,
+   "note": "'which team' lanes mislead on this fabric => gate ships opt-in"
+  }
+ },
+ "tie_break_facts": {
+  "mechanism": "criteria iterate in std::map key order; max_element = first-max => alphabetically-first wins exact ties (user's 'Salma wins' = S < T, not last-position)",
+  "sem_hop": "the v3.2 semantic readout term is itself a deterministic tie-breaker between differently-spelled labels (aaa/bbb lane sums equal 0.679428518, probabilities 0.500078 vs 0.499921)",
+  "disclosure": "exact ties (p1-p2 <= 1e-9) now set tied:true in every reply path"
+ },
+ "old_repo_findings": {
+  "whole_line_drive": "si_main.cpp drives EVERY matched token of the turn into the field ('for (int id : matched) physics.drive(id, 3.0f, 6.0f, 20)') \u2014 ported as the readout gate, adapted to syfox's state/question contract (question tokens NEW vs the state only)",
+  "symbolic_edges": "the old repo answers who-did-what via TYPED graph edges (Tariq -found-> radio); syfox's bag-of-words core has no typed edges \u2014 subject-object resolution (failure mode 5) stays an architectural limit",
+  "multi_hop": "old repo derives multi-hop via rule composition on the graph; syfox's diffusion propagates energy through learned lanes (Test 10 answered lights), but 3+ hop composition remains weak",
+  "arithmetic": "no arithmetic mechanism in either repo \u2014 architectural limit confirmed"
+ }
+}

@@ -77,6 +77,9 @@ struct Args {
     long retrieval_topk = -1;        // --retrieval-topk N (-1 = engine default 5)
     float retrieval_dose = 0;        // --retrieval-dose F (0 = engine default 0.30)
     std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
+    // v3.3 question-conditioned readout (opt-in; see core/syfox.hpp note)
+    bool question_gate = false;      // --question-gate: enable readout gating
+    float question_gate_floor = 0;   // --question-gate-floor F (0 = engine default 0.25)
 };
 
 // v3.2.1 — BUG #1 disclosure: a kill switch on a model that lacks the
@@ -137,6 +140,16 @@ syfox::Engine& load_or_die(syfox::Engine& eng, const std::string& dir,
         std::cerr << "syfox: " << role << " model \"" << dir
                   << "\": cannot read " << dir
                   << "/substrate.bin (no such file or directory)\n";
+        // v3.3 hint: "model" is the DEFAULT --model value. Seeing it here
+        // almost always means the caller's harness swallowed --model after
+        // a flag it treats as value-taking (measured: a python argparse
+        // add_argument('--evidence') without action='store_true' eats the
+        // following --model token, and a v3.2.0 binary then decided on a
+        // SILENT empty fabric: lanes 0, vocabulary 0, all unknown_vocabulary).
+        if (dir == "model")
+            std::cerr << "syfox: note: \"model\" is the default --model value; "
+                      << "check that the preceding CLI flag did not consume "
+                      << "the --model argument\n";
         std::exit(2);
     }
     return eng;
@@ -153,6 +166,9 @@ void apply_modes(syfox::Engine& eng, const Args& a) {
     if (a.retrieval_topk >= 0) eng.set_retrieval_topk(static_cast<int>(a.retrieval_topk));
     if (a.retrieval_dose > 0) eng.set_retrieval_dose(a.retrieval_dose);
     if (a.no_hierarchy) eng.set_hierarchy(false);
+    // v3.3 question-conditioned readout knobs (opt-in)
+    if (a.question_gate) eng.set_question_gate(true);
+    if (a.question_gate_floor > 0) eng.set_question_gate_floor(a.question_gate_floor);
     // v3 Milestone 5: --threads N controls deterministic parallel settle on
     // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
     // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
@@ -453,6 +469,13 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
         }
         o["deferred"] = sfx::JV(a.deferred);
         if (!a.reason.empty()) o["reason"] = sfx::JV(a.reason);
+        // v3.3 readout disclosures
+        if (a.tied) o["tied"] = sfx::JV(true);
+        if (!a.gate_tokens.empty()) {
+            sfx::JVArr gt;
+            for (const auto& t : a.gate_tokens) gt.push_back(sfx::JV(t));
+            o["question_gate"] = sfx::JV(gt);
+        }
         out[a.qid] = sfx::JV(o);
     }
     sfx::JVObj usage{
@@ -1312,7 +1335,17 @@ void usage_exit() {
         "  router fabric (one anchor per domain; router.json holds anchors +\n"
         "  models mapping) as stage 1, then the mapped domain model decides —\n"
         "  physics-based routing, no classifier. The route is disclosed in the\n"
-        "  output as route:{anchor,confidence,top,model}.\n";
+        "  output as route:{anchor,confidence,top,model}.\n"
+        "question-conditioned readout (v3.3, opt-in): the question's NEW tokens\n"
+        "  (present in the fabric, absent from the state — the \"who\" in \"Who\n"
+        "  found the radio?\") gate the readout by lane mass: each candidate is\n"
+        "  scaled by its share of question-to-anchor lane weight. Read-only\n"
+        "  over the settled field; disclosed as question_gate:[tokens]. Flags:\n"
+        "  --question-gate (enable), --question-gate-floor F (default 0.25).\n"
+        "  Measured: fixes question-relevance probes (who/latest), costs 5.3\n"
+        "  points on tickets-cal — hence opt-in, like the energy-norm gain.\n"
+        "  Replies also disclose tied:true on exact top-2 probability ties, and\n"
+        "  defer with reason unknown_candidates when NO candidate carries energy.\n";
     std::exit(2);
 }
 
@@ -1382,6 +1415,8 @@ int main(int argc, char** argv) {
         else if (k == "--retrieval-topk") { if (i + 1 >= argc) usage_exit(); a.retrieval_topk = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--retrieval-dose") { if (i + 1 >= argc) usage_exit(); a.retrieval_dose = std::strtof(argv[++i], nullptr); }
         else if (k == "--router") need(a.router);
+        else if (k == "--question-gate") a.question_gate = true;
+        else if (k == "--question-gate-floor") { if (i + 1 >= argc) usage_exit(); a.question_gate_floor = std::strtof(argv[++i], nullptr); }
         else usage_exit();
     }
     // v2.1 (P4): one synonym table for the whole process. --synonyms wins;

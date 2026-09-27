@@ -77,6 +77,10 @@ class SyFoxEngine:
             retrieval_topk  int    -> v3.2 memories to prime with (default 5)
             retrieval_dose  float  -> v3.2 prime dose x inject (default 0.30)
             hierarchy       bool   -> v3.2 Stage-3 category gating
+            question_gate   bool   -> v3.3 question-conditioned readout (opt-in,
+                                       default off; measured trade-off: fixes
+                                       reasoning probes, hurts tickets-cal 0.9533->0.9000)
+            question_gate_floor float -> v3.3 floor for gated candidates (0..1, default 0.25)
         Returns (answers, usage) plus "evidence" key when requested.
         usage carries "retrieval": [{label, resonance}] when priming fired.
         """

@@ -1276,6 +1276,103 @@ static void test_ablation_distinctness() {
     (void)std::system(("rm -rf " + d2 + " " + dir + "_pass3").c_str());
 }
 
+// ---------------------------------------------------------------------------
+// v3.3 — question-conditioned readout + tie disclosure + readout silence.
+// Ported from the original Synthetic-Intelligence repo's whole-line drive:
+// the question's NEW tokens (not already in the state) gate the readout by
+// lane mass. Opt-in (measured trade-off: tickets-cal 0.9533 -> 0.9000 with
+// the gate on). Also pinned here: exact ties are DISCLOSED (tied:true) and
+// an all-dark readout defers (unknown_candidates) instead of answering by
+// criteria order at confidence 0.
+// ---------------------------------------------------------------------------
+static void test_question_gate() {
+    std::cout << "[v3.3 question-conditioned readout]\n";
+    const std::string dir = "build/test_v33_qgate";
+    (void)std::system(("rm -rf " + dir).c_str());
+    sfx::JV q = sfx::JV::parse(
+        R"({"i":{"type":"choice","instructions":"Who found the radio?",
+                "criteria":{"tariq":"the finder","salma":"a witness",
+                             "radio":"the object"}}})");
+    {
+        syfox::Engine eng;
+        eng.learn_example("tariq found the radio in the lab", "", "tariq");
+        eng.learn_example("the radio was found by tariq", "", "tariq");
+        eng.learn_example("who found the radio tariq did", "", "tariq");
+        eng.learn_example("salma was there in the room", "", "salma");
+        eng.learn_example("salma saw the radio on the table", "", "salma");
+        eng.save_model(dir);
+    }
+    syfox::Engine eng;
+    CHECK(eng.load_model(dir), "gate probe fabric loads");
+    const std::string state = "the radio was found by tariq salma was there";
+
+    // 1) gate OFF (default): plain state-energy readout, no disclosure.
+    {
+        syfox::Engine e2;
+        e2.load_model(dir);
+        syfox::Usage u;
+        auto a = e2.decide(state, q, u);
+        CHECK(!a[0].deferred && a[0].choice == "tariq",
+              "gate OFF: readout still answers");
+        CHECK(a[0].gate_tokens.empty(), "gate OFF: no gate disclosure");
+    }
+    // 2) gate ON: the "who" token (new vs the state) fires the gate, is
+    //    disclosed, and boosts the question-relevant candidate's confidence.
+    {
+        syfox::Engine e2;
+        e2.load_model(dir);
+        e2.set_question_gate(true);
+        syfox::Usage u;
+        auto a = e2.decide(state, q, u);
+        CHECK(!a[0].deferred && a[0].choice == "tariq",
+              "gate ON: question-relevant answer holds");
+        CHECK(a[0].gate_tokens.size() == 1 && a[0].gate_tokens[0] == "who",
+              "gate ON: gate tokens disclosed (who)");
+        syfox::Usage u2;
+        auto b = e2.decide(state, q, u2);
+        CHECK(b[0].confidence == a[0].confidence && b[0].choice == a[0].choice,
+              "gate deterministic");
+    }
+    // 3) exact tie disclosure: two candidates bound in ONE lesson (identical
+    //    decay history -> exactly equal lane weights -> exactly equal
+    //    energies; two separate lessons would NOT tie because lane_decay
+    //    runs per lesson — real physics, not a bug).
+    {
+        const std::string d3 = "build/test_v33_tie";
+        (void)std::system(("rm -rf " + d3).c_str());
+        syfox::Engine e3;
+        e3.learn_example("alpha beta gamma delta", "", "aaa bbb");
+        e3.save_model(d3);
+        syfox::Engine e4;
+        e4.load_model(d3);
+        e4.substrate().set_semantics(false);   // the v3.2 sem_hop term is itself
+                                               // a deterministic tie-breaker between
+                                               // differently-spelled labels; strip it
+                                               // to reach the EXACT-tie case
+        sfx::JV tq = sfx::JV::parse(
+            R"({"i":{"type":"choice","instructions":"","criteria":{
+                 "bbb":"x","aaa":"x"}}})");
+        syfox::Usage u;
+        auto a = e4.decide("alpha beta gamma delta", tq, u);
+        CHECK(a[0].tied, "exact tie is disclosed (tied:true)");
+        CHECK(a[0].choice == "aaa",
+              "tie pick is deterministic (criteria key order)");
+        (void)std::system(("rm -rf " + d3).c_str());
+    }
+    // 4) readout silence: no candidate carries any energy -> defer.
+    {
+        syfox::Engine e2;
+        e2.load_model(dir);
+        sfx::JV uq = sfx::JV::parse(
+            R"({"i":{"type":"choice","instructions":"",
+                    "criteria":{"zzz":"","qqq":"","mmm":""}}})");
+        syfox::Usage u;
+        auto a = e2.decide("tariq found the radio", uq, u);
+        CHECK(a[0].deferred && a[0].reason == "unknown_candidates",
+              "all-dark readout defers (unknown_candidates)");
+    }
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -1307,6 +1404,7 @@ int main() {
     test_retrieval_default();
     test_hierarchy();
     test_ablation_distinctness();
+    test_question_gate();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

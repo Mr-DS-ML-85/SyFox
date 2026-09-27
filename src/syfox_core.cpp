@@ -143,6 +143,13 @@ static std::string decide_json(SyFoxHandle* h, const char* state,
             o["confidence"] = sfx::JV(std::round(a.confidence * 1000.0f) / 1000.0f);
             o["deferred"] = sfx::JV(a.deferred);
             if (!a.reason.empty()) o["reason"] = sfx::JV(a.reason);
+            // v3.3 readout disclosures
+            if (a.tied) o["tied"] = sfx::JV(true);
+            if (!a.gate_tokens.empty()) {
+                sfx::JVArr gt;
+                for (const auto& t : a.gate_tokens) gt.push_back(sfx::JV(t));
+                o["question_gate"] = sfx::JV(gt);
+            }
             ans[a.qid] = sfx::JV(o);
         }
         sfx::JVObj usage{
@@ -211,6 +218,10 @@ char* syfox_decide_ex(SyFoxHandle* h, const char* state, const char* questions_j
                 if (o.has("retrieval_topk"))  h->eng->set_retrieval_topk(static_cast<int>(o.at("retrieval_topk").as_num(5)));
                 if (o.has("retrieval_dose"))  h->eng->set_retrieval_dose(static_cast<float>(o.at("retrieval_dose").as_num(0.30)));
                 if (o.has("hierarchy"))       h->eng->set_hierarchy(truthy(o.at("hierarchy")));
+                // v3.3 question-conditioned readout
+                if (o.has("question_gate"))   h->eng->set_question_gate(truthy(o.at("question_gate")));
+                if (o.has("question_gate_floor"))
+                    h->eng->set_question_gate_floor(static_cast<float>(o.at("question_gate_floor").as_num(0.25)));
             }
         } catch (...) { /* opts are optional; a bad opts object is ignored */ }
     }

@@ -709,6 +709,28 @@ roundtrip-stable (unit-test enforced; all shipped fabrics rebuilt through
 the converged path). `make ci` is the pre-commit gate: unit suite +
 ablation distinctness + router route assertion.
 
+## v3.3 — question-conditioned readout, tie disclosure, readout silence
+
+Three readout-honesty mechanisms, one ported from the original
+Synthetic-Intelligence substrate (full story in the
+[CHANGELOG](CHANGELOG.md), numbers in `data/v33_reasoning_tables.json`):
+
+- **Question-conditioned readout** (opt-in, `--question-gate`): the old
+  repo drove every token of the turn into the field; SyFox's readout
+  measured state energy only, so the salient state noun beat the
+  question-relevant entity. The gate scales candidates by the lane mass of
+  the question's NEW tokens (`who`, `latest`, ...), disclosed as
+  `question_gate:[tokens]`. Measured: who-found margin 0.056 -> 0.113,
+  latest-temperature confidence x14; costs 5.3 points on tickets-cal,
+  hence opt-in like the energy-norm gain.
+- **Exact-tie disclosure**: replies set `tied: true` when the top two
+  probabilities are equal (the pick is deterministic criteria order; the
+  v3.2 semantic readout term itself breaks most ties physically).
+- **Readout silence**: when NO candidate carries energy, decide defers
+  with `reason: unknown_candidates` instead of answering a uniform
+  distribution by criteria order (the "unknown options answered by noise"
+  and pure-OOD failure modes).
+
 ## License & credit
 
 MIT © 2026 Mr-DS-ML-85. Core mechanics ported from the author's

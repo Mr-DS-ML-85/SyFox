@@ -1,3 +1,77 @@
+## v3.3.0 — question-conditioned readout, tie disclosure, readout silence
+
+**The `--evidence` "empty model" bug — root-caused, already cured, better
+hint.** The reported symptom (lanes 0, vocabulary 0, calibrated false, all
+`unknown_vocabulary` with `--evidence`, healthy without) is reproduced
+exactly on a v3.2.0 build with `decide --evidence --state ... --questions ...`
+and NO `--model`: the harness that emitted the flag treated it as
+value-taking and swallowed the following `--model` token, and v3.2.0's
+silent load then decided on an empty default fabric — with the evidence
+block in the output, which made the flag look guilty. The flag itself is a
+plain boolean in both versions. v3.2.1's loud load failure already exits
+with `syfox: decide model "model": cannot read model/substrate.bin`;
+v3.3 adds a stderr hint when the failed dir is the default `model` value,
+naming the swallow-the-argument failure pattern explicitly.
+
+**Question-conditioned readout (opt-in) — ported from the original
+Synthetic-Intelligence repo.** There, EVERY token of the turn drove the
+activation field (`si_main.cpp`: `for (int id : matched)
+physics.drive(id, 3.0f, 6.0f, 20)`) — the question was never a bystander.
+SyFox's contract keeps state and question separate, and the readout only
+measured state energy: the question's instructions gated nothing, so the
+salient state noun beat the question-relevant entity ("Who found the
+radio?" → `radio` over `Tariq`). The portable form gates the READOUT:
+question tokens that are NEW relative to the state (the `who` in "Who found
+the radio?") distribute lane mass over the candidate anchors, and each
+candidate is scaled by its share (`floor + (1-floor) x r/max_r`), floor
+0.25 default. Read-only over the settled field — same shape as the
+hierarchy gate; disclosed as `question_gate: [tokens]` in every reply
+path. **Measured (tools/reasoning_probes.py, QA-style probe fabric):**
+gate ON doubles the who-found margin (0.056 -> 0.113 at floor 0.10), lifts
+the latest-temperature confidence 14x (0.008 -> 0.117), and never flips a
+correct answer off. **Measured regression that sets the default:** on
+tickets-cal the gate costs 5.3 points (0.9533 -> 0.9000 — "which team"
+lanes mislead), so the gate ships OPT-IN exactly like the M1 energy-norm:
+`--question-gate` / `--question-gate-floor F` / opts `question_gate`,
+`question_gate_floor`.
+
+**Exact-tie disclosure + readout silence.** The tie-break truth (measured):
+criteria iterate in `std::map` key order and `max_element` keeps the first
+max, so exact ties go to the alphabetically-first candidate — the reported
+"Salma wins (last position)" was S < T, not a `>=` bug. Two structural
+tie-breakers were measured along the way: the v3.2 sem_hop term
+deterministically separates differently-spelled labels (aaa/bbb with
+IDENTICAL lane sums 0.679428518 still end at 0.500078 vs 0.499921 through
+their different trigram vectors), and per-lesson lane decay makes
+same-structure candidates from separate lessons near-ties rather than
+exact ones. What was missing was HONESTY about ties: every reply now sets
+`tied: true` when the top two probabilities are equal (near-ties remain the
+`--defer-margin` knob's business). And when the readout measures ZERO
+energy on every candidate, decide now defers with
+`reason: "unknown_candidates"` instead of answering a uniform distribution
+by criteria order — the same honest-silence contract the dark-field case
+already followed (measured: the reported unknown-options test answered
+`abc` at 0.344 by noise; it now defers; the OOD "submarine's favorite
+color" probe defers in a fabric that never saw the entities).
+
+**The five reported reasoning failure modes — status.** (1) multi-hop
+chaining: diffusion already propagates through learned lanes (the
+alarm→lights probe answers `lights`), 3+ hop composition stays weak;
+(2) temporal ordering: the gate carries `latest`/`after` signal when the
+fabric has those lanes — a training-side fix, tool-supported; (3)
+arithmetic: architectural limit, unchanged in both repos; (4) OOD
+abstention: the all-dark-readout defer fixes the pure case; the
+state-lit-but-unanswerable case (purple 0.472) remains open — the state
+salience override needs a mechanism the gate does not provide; (5)
+subject-object relations: the old repo solves it with TYPED graph edges
+(`Tariq -found-> radio`), which the bag-of-words core deliberately lacks —
+architectural limit, documented.
+
+Tools: reasoning_probes.py (probe fabric builder + before/after suite);
+data/v33_reasoning_tables.json archives every number. Tests: 9 new checks
+(gate on/off/disclosure/determinism, tie disclosure, criteria-order pick,
+readout silence). VERSION 3.2.1 -> 3.3.0.
+
 ## v3.2.1 — the three paper-blocking bug fixes (ablation kill switches, confidence calibration, router config)
 
 **BUG #1 — ablation kill switches were silently inert (root-caused, disclosed,

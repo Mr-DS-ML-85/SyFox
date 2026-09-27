@@ -1,0 +1,14 @@
+{"state": "tariq found the radio in the lab", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"tariq": "tariq"}}}, "labels": {"i": "tariq"}}
+{"state": "the radio was found by tariq", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"tariq": "tariq"}}}, "labels": {"i": "tariq"}}
+{"state": "tariq picked up the radio", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"tariq": "tariq"}}}, "labels": {"i": "tariq"}}
+{"state": "salma was there in the room", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"salma": "salma"}}}, "labels": {"i": "salma"}}
+{"state": "salma saw the radio on the table", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"salma": "salma"}}}, "labels": {"i": "salma"}}
+{"state": "who found the radio tariq did", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"tariq": "tariq"}}}, "labels": {"i": "tariq"}}
+{"state": "who saw the radio salma did", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"salma": "salma"}}}, "labels": {"i": "salma"}}
+{"state": "the alarm rang then the lights turned on", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"lights": "lights"}}}, "labels": {"i": "lights"}}
+{"state": "the lights turned on then the door opened", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"door": "door"}}}, "labels": {"i": "door"}}
+{"state": "what happens after the alarm the lights", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"lights": "lights"}}}, "labels": {"i": "lights"}}
+{"state": "the temperature was twenty degrees in the morning", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twenty": "twenty"}}}, "labels": {"i": "twenty"}}
+{"state": "the temperature rose to twenty five degrees at noon", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twentyfive": "twentyfive"}}}, "labels": {"i": "twentyfive"}}
+{"state": "the temperature fell to twenty two degrees in the evening", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twentytwo": "twentytwo"}}}, "labels": {"i": "twentytwo"}}
+{"state": "the latest temperature reading was twenty two degrees", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twentytwo": "twentytwo"}}}, "labels": {"i": "twentytwo"}}

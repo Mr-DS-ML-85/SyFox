@@ -333,3 +333,12 @@ density: build/syfox models-big
 	@ls -d model-*-big-* 2>/dev/null | while read d; do \
 	        ./build/syfox stats --model "$$d" | python3 -c "import json,sys; d=json.load(sys.stdin); print('%6d nodes %7d lanes density=%.5f degree=%.2f  %s' % (d.get('nodes',0), d.get('lanes',0), d.get('fabric_density',0), d.get('mean_out_degree',0), sys.argv[1]))" "$$d"; \
 	done
+giant-fetch:
+	python3 tools/hf_fetch.py
+
+giant-prepare:
+	python3 tools/giant_prepare.py
+
+giant-chunks:
+	mkdir -p data/giant/chunks
+	split -n l/12 -d -a 2 data/giant/train.jsonl data/giant/chunks/chunk_ --additional-suffix=.jsonl

@@ -1,3 +1,40 @@
+## v3.1.3 — routed-learn isolation bugfix; the 16-domain giant model + syfox-hf packaging
+
+**Bugfix (CLI, boundary layer):** `learn --lang auto` taught EVERY script
+family the ENTIRE corpus — the routed loop iterated all rows instead of the
+family's rows, so each per-script substrate (`<model>-<slug>`) was a full
+copy of everything and the "one fabric per script" isolation contract was
+broken since v2.2. Fixed: families now teach only their own rows (epochs
+applied per family). All tests pass; multilingual fabrics should be
+retrained — the giant model below was trained post-fix, and its
+bengali/devanagari/cyrillic substrates (546-680 nodes) answer their
+held-out tickets at 0.920-0.959 with a trivially perfect in-substrate
+router.
+
+**The giant model** (built in the sandbox, packaged in the separate
+`syfox-hf` repo): 16 domains — bank77 (9k), UCI SMS (3.9k), the 6 data/big
+corpora (27.2k), plus 8 newly downloaded real HF datasets (CLINC-150,
+enron_spam, emotion, Davidson hate, ag_news, amazon_polarity, dbpedia_14,
+boolq) — 76,142 train rows / 152,284 lessons per epoch, 278 globally unique
+opaque anchors, empty instructions everywhere, round-robin domain
+interleave, mined top-10 criteria for the new domains, per-script
+calibration. One interleaved pass: giant-latin 43,420 nodes / 1,905,170
+lanes. Hidden (scored once, energy-norm on): tickets_en 0.904, sms 0.752,
+enron 0.752, hate 0.653, agnews 0.604, polarity 0.571, dbpedia 0.475, boolq
+0.531 (majority-level), bank77 0.023 (77-way collapses in a shared fabric);
+bn 0.943 / hi 0.920 / ru 0.959 on their own substrates. Router measured
+under THREE conditions: informed 0.432 (weighted, the bench condition),
+blind 0.400 hidden (23,528 rows) / 0.399 cal, all-questions 0.399 cal —
+asking everything dilutes the anchoring instead of recovering it. Router
+wording sweep (cal only): short4 0.426 > abstract 0.208 > mid8 0.164 >
+rich12 0.079 — richer specific criteria HARVEST worse (PROBING.md
+mechanism). Tooling: tools/hf_fetch.py (cached parquet fetcher),
+tools/giant_prepare.py (corpus builder with the three failure-mode fixes),
+tools/giant_bench.py (router+class+e2e per-row bench, slim-format aware),
+tools/router_sweep.py, tools/wrapper_condition_experiment.py; Makefile
+targets giant-fetch/-prepare/-chunks. data/giant bulk gitignored
+(schemas/probes/MANIFEST committed).
+
 ## v3.1.2 — zero-shot probe reports archived; the runtime-flag mechanism measured
 
 The model-xl zero-shot experiments (Snake 8-scenario suite + the A–E flag

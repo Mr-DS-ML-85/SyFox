@@ -210,23 +210,30 @@ void cmd_learn(const Args& a) {
             syfox::Engine eng;
             eng.load_model(dir);                              // incremental if exists
             eng.set_context(dir);                             // audit context tag (M3)
-            for (const auto* exp : epoch_rows) {
-                const sfx::JV& qs = exp->at("questions");
-                const sfx::JV& labels = exp->at("labels");
-                const std::string state = exp->at("state").as_str();
-                for (const auto& qkv : qs.obj) {
-                    const sfx::JV& q = qkv.second;
-                    std::string type = q.at("type").as_str();
-                    std::string label = labels.at(qkv.first).as_str();
-                    bool learned = false;
-                    if (type == "choice" || type == "score")
-                        eng.learn_example(state, q.at("instructions").as_str(),
-                                          outcome_text(q, label), a.augment, lp, &learned);
-                    else if (type == "noul")
-                        eng.learn_noul(state, q.at("instructions").as_str(),
-                                       label == "true", a.augment, lp, &learned);
-                    ++lessons;
-                    if (!learned) ++skipped;
+            // v3.1.3 BUGFIX: this loop MUST teach g.second (this script
+            // family's rows), not epoch_rows (the whole file). The v2.2 code
+            // iterated epoch_rows here, so every per-script substrate was
+            // taught the ENTIRE corpus — the opposite of the isolation the
+            // routing contract promises. Epochs are applied per family.
+            for (long e = 0; e < a.epochs; ++e) {
+                for (const auto* exp : g.second) {
+                    const sfx::JV& qs = exp->at("questions");
+                    const sfx::JV& labels = exp->at("labels");
+                    const std::string state = exp->at("state").as_str();
+                    for (const auto& qkv : qs.obj) {
+                        const sfx::JV& q = qkv.second;
+                        std::string type = q.at("type").as_str();
+                        std::string label = labels.at(qkv.first).as_str();
+                        bool learned = false;
+                        if (type == "choice" || type == "score")
+                            eng.learn_example(state, q.at("instructions").as_str(),
+                                              outcome_text(q, label), a.augment, lp, &learned);
+                        else if (type == "noul")
+                            eng.learn_noul(state, q.at("instructions").as_str(),
+                                           label == "true", a.augment, lp, &learned);
+                        ++lessons;
+                        if (!learned) ++skipped;
+                    }
                 }
             }
             eng.save_model(dir);

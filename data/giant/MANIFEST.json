@@ -1,0 +1,252 @@
+{
+ "seed": 77,
+ "recipe": {
+  "instructions": "empty on every row (Failure-2 fix)",
+  "anchors": "globally-unique opaque per-class anchors (Failure-3 fix)",
+  "train_order": "round-robin domain interleave (Failure-1 fix)",
+  "epochs": 3,
+  "criteria": "existing domains verbatim (keys remapped); new HF domains mined top-20 from train only"
+ },
+ "sources": {
+  "big": "data/big/* synthetic corpora (SHA-256 MANIFEST.json)",
+  "bank77": "PolyAI banking77 official splits",
+  "sms": "UCI SMS Spam Collection",
+  "hf": [
+   "clinc/clinc_oos",
+   "SetFit/enron_spam",
+   "dair-ai/emotion",
+   "tdavidson/hate_speech_offensive",
+   "fancyzhx/ag_news",
+   "fancyzhx/amazon_polarity",
+   "fancyzhx/dbpedia_14",
+   "google/boolq"
+  ]
+ },
+ "domains": [
+  {
+   "domain": "agnews",
+   "source": "hf",
+   "train": 4000,
+   "cal": 400,
+   "hidden": 2000,
+   "classes": 4
+  },
+  {
+   "domain": "bank77",
+   "source": "bank77",
+   "train": 9000,
+   "cal": 1003,
+   "hidden": 3080,
+   "classes": 77
+  },
+  {
+   "domain": "boolq",
+   "source": "hf",
+   "train": 4000,
+   "cal": 500,
+   "hidden": 1500,
+   "classes": 2
+  },
+  {
+   "domain": "clinc",
+   "source": "hf",
+   "train": 8000,
+   "cal": 3000,
+   "hidden": 4500,
+   "classes": 151
+  },
+  {
+   "domain": "dbpedia",
+   "source": "hf",
+   "train": 4000,
+   "cal": 400,
+   "hidden": 2000,
+   "classes": 14
+  },
+  {
+   "domain": "emotion",
+   "source": "hf",
+   "train": 4000,
+   "cal": 700,
+   "hidden": 2000,
+   "classes": 6
+  },
+  {
+   "domain": "enron",
+   "source": "hf",
+   "train": 4000,
+   "cal": 754,
+   "hidden": 1110,
+   "classes": 2
+  },
+  {
+   "domain": "game",
+   "source": "big",
+   "train": 5600,
+   "cal": 1200,
+   "hidden": 1200,
+   "classes": 3
+  },
+  {
+   "domain": "guard",
+   "source": "big",
+   "schema": "noul_multi",
+   "train": 5600,
+   "cal": 1200,
+   "hidden": 1200,
+   "classes": 2
+  },
+  {
+   "domain": "hate",
+   "source": "hf",
+   "train": 4078,
+   "cal": 400,
+   "hidden": 1500,
+   "classes": 3
+  },
+  {
+   "domain": "polarity",
+   "source": "hf",
+   "train": 4000,
+   "cal": 400,
+   "hidden": 2000,
+   "classes": 2
+  },
+  {
+   "domain": "sms",
+   "source": "sms",
+   "train": 3900,
+   "cal": 836,
+   "hidden": 838,
+   "classes": 2
+  },
+  {
+   "domain": "tickets_bn",
+   "source": "big",
+   "train": 2520,
+   "cal": 540,
+   "hidden": 540,
+   "classes": 3
+  },
+  {
+   "domain": "tickets_en",
+   "source": "big",
+   "train": 8400,
+   "cal": 1800,
+   "hidden": 1800,
+   "classes": 3
+  },
+  {
+   "domain": "tickets_hi",
+   "source": "big",
+   "train": 2522,
+   "cal": 539,
+   "hidden": 539,
+   "classes": 3
+  },
+  {
+   "domain": "tickets_ru",
+   "source": "big",
+   "train": 2522,
+   "cal": 539,
+   "hidden": 539,
+   "classes": 3
+  }
+ ],
+ "train_rows": 76142,
+ "lessons_per_epoch": 152284,
+ "files": {
+  "agnews_hidden.jsonl": {
+   "bytes": 2854716,
+   "sha256": "01c588eeb855d59238e8782a11d1138a451ab50ee53935379ab478cfb31bb5ab"
+  },
+  "bank77_hidden.jsonl": {
+   "bytes": 61690062,
+   "sha256": "33f9e2f263e255af283af70c7a0d6b99764e87adeea7912580cdda5c1145414e"
+  },
+  "boolq_hidden.jsonl": {
+   "bytes": 1530267,
+   "sha256": "209dfd7465431c79ca60ca91ba9a821d26dc4b34883fdd3e32fc9a3ca5f1e832"
+  },
+  "cal_bengali.jsonl": {
+   "bytes": 618367,
+   "sha256": "a357fe6e539298ff05dccbe131e2354b18d0ab9437baa33fe78c4dc54382d6dd"
+  },
+  "cal_cyrillic.jsonl": {
+   "bytes": 591443,
+   "sha256": "d5921dec0577b9f81b56b491db45b8989e34af7900bf20f047dd13a4d18b411e"
+  },
+  "cal_devanagari.jsonl": {
+   "bytes": 615106,
+   "sha256": "ccc966390021cbb7b340fe485a3c7aaf4143c505392d1fcacf4519f3366e400f"
+  },
+  "cal_latin.jsonl": {
+   "bytes": 89486520,
+   "sha256": "b7f793cce467a67a6d274523a99c5a8646f9256cdc607ada2b5940acce87e55c"
+  },
+  "clinc_hidden.jsonl": {
+   "bytes": 87849637,
+   "sha256": "e402c6d887bca2e024d580a4d391d3782a3c1d3b9eda225122aa1367fcd799e3"
+  },
+  "dbpedia_hidden.jsonl": {
+   "bytes": 5668931,
+   "sha256": "64ecaeb6b34e0e43bd50fe1da49ca61e0e8c1e27e29920e6f770dad46c376b7b"
+  },
+  "emotion_hidden.jsonl": {
+   "bytes": 3141173,
+   "sha256": "a39aa5f1c7b0cab7865410d14fc10aef680c8d4ed8661fada72bdcc3f87ffe1d"
+  },
+  "enron_hidden.jsonl": {
+   "bytes": 1446454,
+   "sha256": "49d0d16ee891de0cb77f979be5f3ea2d0cc3c06b4727a7ea13a2c3e5dcfbfc82"
+  },
+  "game_hidden.jsonl": {
+   "bytes": 1253167,
+   "sha256": "1c0772dc60debd4941991d77ec71db0c9e972d3a374d92d0bf81fbf76abec035"
+  },
+  "guard_hidden.jsonl": {
+   "bytes": 1546069,
+   "sha256": "2bc3368ac2b9c8f0594befd485d7947a811dea961150f348a5317555c8d8b6ac"
+  },
+  "hate_hidden.jsonl": {
+   "bytes": 1771637,
+   "sha256": "296d1ddd83644cbbb3bdcee0a41369a638483b2190a5517dd1663d3ad42e7dd8"
+  },
+  "polarity_hidden.jsonl": {
+   "bytes": 2625038,
+   "sha256": "6e40c568c228400d44ca26d3e9529def67769aa4eb9bdd557276ecdbf7a1c087"
+  },
+  "probes.jsonl": {
+   "bytes": 182393,
+   "sha256": "58bb202afab610acb5e13c71f63f6e98fc1a92565f4d77f47f7e9979cfa831a5"
+  },
+  "sms_hidden.jsonl": {
+   "bytes": 863414,
+   "sha256": "6a2d4b9953e898517531dc50c0ff1b66bb28dc3403575e6001eca5b4f0727618"
+  },
+  "tickets_bn_hidden.jsonl": {
+   "bytes": 617425,
+   "sha256": "0da2882861ece0c7a332c38c5f895fe1365225e9849cb2fdfa3f311fdbc024a4"
+  },
+  "tickets_en_hidden.jsonl": {
+   "bytes": 1871664,
+   "sha256": "6b1d06679c4cd89c936f05e0d59587846841deba79a26f8c542f7df12306bab3"
+  },
+  "tickets_hi_hidden.jsonl": {
+   "bytes": 613063,
+   "sha256": "6587f7a6e37bd3cf150d2af936c31953ac21c0d751c1c99ff2006f9cee83a406"
+  },
+  "tickets_ru_hidden.jsonl": {
+   "bytes": 588793,
+   "sha256": "eb0f8c64f920ad88aa4894f01fc055f2d921530c2af6604131cff1f6edfba88e"
+  },
+  "train.jsonl": {
+   "bytes": 413558856,
+   "sha256": "b91a59be0458eb4b34cf821d58b70f6e2eb92f3a5e747d2c3397ffcb667e480f"
+  },
+  "schemas.json": {
+   "bytes": 55690,
+   "sha256": "505826bda1d69274f87b5b5a0eb6c74a1b8fef7d7f3a13e0a34c144930b737f2"
+  }
+ }
+}

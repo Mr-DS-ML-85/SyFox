@@ -1,13 +1,30 @@
 // ============================================================================
 //  SyFox core C API — thin shared-library wrapper (server bridge).
-//  All decisions come from the SI substrate; this file only marshals JSON.
+//  All decisions come from the SI substrate; this file only marshals JSON
+//  and exposes the SAME boundary knobs the CLI already has (v1.0 -> v3.0):
+//
+//    M1  energy-norm measurement gain      -> syfox_engine_set_energy_norm
+//    v1  SI salience gating + Miller window -> syfox_engine_set_source_modes
+//    M5  deterministic OMP parallel settle -> syfox_engine_set_parallel_settle
+//    v2.2 trigram lane policy              -> syfox_engine_set_ngrams
+//    v2.2 script routing                   -> syfox_detect_script
+//    M3  machine-auditable evidence        -> syfox_decide_ex(opts.evidence)
+//
+//  No transformer, no classifier, no physics changes: si_substrate.hpp is
+//  untouched; every knob here exists because the CLI exposes it too.
 // ============================================================================
 #include "core/syfox.hpp"
+#include "core/script.hpp"
+#include "core/ngram.hpp"
 
 #include <cstring>
 #include <string>
 
 using syfox::Engine;
+
+namespace { bool truthy(const sfx::JV& v) {
+    return (v.is_bool() && v.b) || (v.is_num() && v.num != 0.0);
+} }
 
 extern "C" {
 
@@ -27,58 +44,152 @@ void syfox_engine_free(SyFoxHandle* h) {
     delete h;
 }
 
+const char* syfox_core_version(void) { return syfox::VERSION; }
+
+// -- engine-scoped knobs (identical semantics to the CLI flags) -------------
+
+void syfox_engine_set_energy_norm(SyFoxHandle* h, int on) {
+    if (h) h->eng->set_energy_norm(on != 0);          // M1: measurement gain
+}
+
+void syfox_engine_set_source_modes(SyFoxHandle* h, int salience_gating, int miller_window) {
+    if (h) h->eng->substrate().set_source_modes(salience_gating != 0, miller_window != 0);
+}
+
+void syfox_engine_set_parallel_settle(SyFoxHandle* h, int on, int threads) {
+    if (!h) return;
+#if defined(_OPENMP)
+    if (threads > 0) omp_set_num_threads(threads);
+#endif
+    h->eng->substrate().set_parallel_settle(on != 0); // M5: OMP builds only
+}
+
+void syfox_engine_set_ngrams(SyFoxHandle* h, int on) {
+    (void)h;                                          // process-global policy
+    si::norm::grams_enabled() = (on != 0);            // v2.2 trigram lanes
+}
+
+// -- script detection (v2.2 --lang auto) ------------------------------------
+// Returns a malloc'd slug ("latin", "bengali", ...) or "unknown".
+char* syfox_detect_script(const char* text) {
+    if (!text) return nullptr;
+    const si::script::Script sc = si::script::detect_script(text);
+    const std::string slug = (sc == si::script::Script::Unknown)
+        ? "unknown" : si::script::slug(sc);
+    char* buf = static_cast<char*>(std::malloc(slug.size() + 1));
+    std::memcpy(buf, slug.c_str(), slug.size() + 1);
+    return buf;
+}
+
+// -- decide ------------------------------------------------------------------
+// Shared marshaling for syfox_decide (no evidence) and syfox_decide_ex.
+static std::string decide_json(SyFoxHandle* h, const char* state,
+                               const char* questions_json, bool want_evidence) {
+    std::string out;
+    try {
+        sfx::JV q = sfx::JV::parse(questions_json);
+        if (!q.is_obj()) { return "{\"error\":\"questions must be an object\"}"; }
+        syfox::Usage u;
+        auto answers = h->eng->decide(state, q, u);
+        u.calibrated = h->eng->calibration().fitted;   // decide() resets Usage
+        sfx::JVObj ans;
+        for (const auto& a : answers) {
+            sfx::JVObj o;
+            o["type"] = sfx::JV(a.type);
+            if (a.type == "choice") {
+                o["choice"] = sfx::JV(a.choice);
+                sfx::JVObj pr;
+                for (const auto& p : a.probabilities)
+                    pr[p.first] = sfx::JV(std::round(p.second * 1000.0f) / 1000.0f);
+                o["probabilities"] = sfx::JV(pr);
+            } else if (a.type == "score") {
+                o["score"] = sfx::JV(std::round(a.value * 1000.0f) / 1000.0f);
+                sfx::JVObj pr;
+                for (const auto& p : a.probabilities)
+                    pr[p.first] = sfx::JV(std::round(p.second * 1000.0f) / 1000.0f);
+                o["probabilities"] = sfx::JV(pr);
+            } else if (a.type == "noul") {
+                o["noul"] = sfx::JV(std::round(a.probability * 1000.0f) / 1000.0f);
+            }
+            o["confidence"] = sfx::JV(std::round(a.confidence * 1000.0f) / 1000.0f);
+            o["deferred"] = sfx::JV(a.deferred);
+            if (!a.reason.empty()) o["reason"] = sfx::JV(a.reason);
+            ans[a.qid] = sfx::JV(o);
+        }
+        sfx::JVObj usage{
+            {"state_tokens", static_cast<double>(u.state_tokens)},
+            {"vocabulary", static_cast<double>(u.vocabulary)},
+            {"lanes", static_cast<double>(u.lanes)},
+            {"settled_energy", std::round(u.settled_energy * 1000.0f) / 1000.0f},
+            {"calibrated", sfx::JV(u.calibrated)},
+            {"engine", std::string("syfox-") + syfox::VERSION},
+            {"core", "si-substrate"}};
+        sfx::JVObj root{{"answers", sfx::JV(ans)}, {"usage", sfx::JV(usage)}};
+        if (want_evidence)   // M3: supporting lanes + provenance + contradictions
+            root["evidence"] = h->eng->evidence_json(state, q, answers);
+        out = sfx::JV(root).dump();
+    } catch (const std::exception& e) {
+        out = std::string("{\"error\":\"") + e.what() + "\"}";
+    }
+    return out;
+}
+
 // Decides and returns a malloc'd JSON string: {"answers":..., "usage":...}.
 // Caller frees with syfox_string_free. On malformed questions returns
 // {"error": "..."}.
 char* syfox_decide(SyFoxHandle* h, const char* state, const char* questions_json) {
     if (!h || !state || !questions_json) return nullptr;
-    std::string out;
-    try {
-        sfx::JV q = sfx::JV::parse(questions_json);
-        if (!q.is_obj()) { out = "{\"error\":\"questions must be an object\"}"; }
-        else {
-            syfox::Usage u;
-            auto answers = h->eng->decide(state, q, u);
-            u.calibrated = h->eng->calibration().fitted;
-            sfx::JVObj ans;
-            for (const auto& a : answers) {
-                sfx::JVObj o;
-                o["type"] = sfx::JV(a.type);
-                if (a.type == "choice") {
-                    o["choice"] = sfx::JV(a.choice);
-                    sfx::JVObj pr;
-                    for (const auto& p : a.probabilities)
-                        pr[p.first] = sfx::JV(std::round(p.second * 1000.0f) / 1000.0f);
-                    o["probabilities"] = sfx::JV(pr);
-                } else if (a.type == "score") {
-                    o["score"] = sfx::JV(std::round(a.value * 1000.0f) / 1000.0f);
-                    sfx::JVObj pr;
-                    for (const auto& p : a.probabilities)
-                        pr[p.first] = sfx::JV(std::round(p.second * 1000.0f) / 1000.0f);
-                    o["probabilities"] = sfx::JV(pr);
-                } else if (a.type == "noul") {
-                    o["noul"] = sfx::JV(std::round(a.probability * 1000.0f) / 1000.0f);
+    const std::string s = decide_json(h, state, questions_json, false);
+    char* buf = static_cast<char*>(std::malloc(s.size() + 1));
+    std::memcpy(buf, s.c_str(), s.size() + 1);
+    return buf;
+}
+
+// opts_json: {"evidence":bool, "energy_norm":bool, "salience_gating":bool,
+//             "miller_window":bool, "ngrams":"on"|"off"}
+// Absent keys leave the current engine state untouched (sticky, CLI-equal).
+char* syfox_decide_ex(SyFoxHandle* h, const char* state, const char* questions_json,
+                      const char* opts_json) {
+    if (!h || !state || !questions_json) return nullptr;
+    bool evidence = false;
+    if (opts_json && *opts_json) {
+        try {
+            sfx::JV o = sfx::JV::parse(opts_json);
+            if (o.is_obj()) {
+                if (o.has("evidence"))        evidence = truthy(o.at("evidence"));
+                if (o.has("energy_norm"))     h->eng->set_energy_norm(truthy(o.at("energy_norm")));
+                if (o.has("salience_gating") || o.has("miller_window"))
+                    h->eng->substrate().set_source_modes(
+                        o.has("salience_gating") && truthy(o.at("salience_gating")),
+                        o.has("miller_window") && truthy(o.at("miller_window")));
+                if (o.has("ngrams")) {
+                    const std::string g = o.at("ngrams").as_str();
+                    if (g == "on")  si::norm::grams_enabled() = true;
+                    if (g == "off") si::norm::grams_enabled() = false;
                 }
-                o["confidence"] = sfx::JV(std::round(a.confidence * 1000.0f) / 1000.0f);
-                o["deferred"] = sfx::JV(a.deferred);
-                if (!a.reason.empty()) o["reason"] = sfx::JV(a.reason);
-                ans[a.qid] = sfx::JV(o);
             }
-            sfx::JVObj usage{
-                {"state_tokens", static_cast<double>(u.state_tokens)},
-                {"vocabulary", static_cast<double>(u.vocabulary)},
-                {"lanes", static_cast<double>(u.lanes)},
-                {"settled_energy", std::round(u.settled_energy * 1000.0f) / 1000.0f},
-                {"calibrated", sfx::JV(u.calibrated)},
-                {"engine", std::string("syfox-") + syfox::VERSION},
-                {"core", "si-substrate"}};
-            out = sfx::JV(sfx::JVObj{{"answers", sfx::JV(ans)}, {"usage", sfx::JV(usage)}}).dump();
-        }
-    } catch (const std::exception& e) {
-        out = std::string("{\"error\":\"") + e.what() + "\"}";
+        } catch (...) { /* opts are optional; a bad opts object is ignored */ }
     }
-    char* buf = static_cast<char*>(std::malloc(out.size() + 1));
-    std::memcpy(buf, out.c_str(), out.size() + 1);
+    const std::string s = decide_json(h, state, questions_json, evidence);
+    char* buf = static_cast<char*>(std::malloc(s.size() + 1));
+    std::memcpy(buf, s.c_str(), s.size() + 1);
+    return buf;
+}
+
+// Model fabric summary: {"nodes":...,"lanes":...,"evidence_records":...,
+// "calibrated":...,"version":...,"core":...}
+char* syfox_engine_info(SyFoxHandle* h) {
+    if (!h) return nullptr;
+    const sfx::JVObj o{
+        {"nodes", static_cast<double>(h->eng->substrate().node_count())},
+        {"lanes", static_cast<double>(h->eng->substrate().lane_count())},
+        {"evidence_records", static_cast<double>(h->eng->substrate().evidence_count())},
+        {"calibrated", sfx::JV(h->eng->calibration().fitted)},
+        {"version", std::string(syfox::VERSION)},
+        {"core", "si-substrate"}};
+    const std::string s = sfx::JV(o).dump();
+    char* buf = static_cast<char*>(std::malloc(s.size() + 1));
+    std::memcpy(buf, s.c_str(), s.size() + 1);
     return buf;
 }
 

@@ -86,6 +86,26 @@ curl -X POST localhost:8010/v1/systemone -H 'Content-Type: application/json' \
   -d @examples/support_ticket.json
 ```
 
+The v3 server exposes the same decide-side surface as the CLI. Server flags
+mirror the CLI (`--lang auto|<slug>`, `--ngrams on|off|auto`, `--energy-norm`,
+`--salience-gating`, `--miller-window`, `--threads N`, `--log-deferrals FILE`);
+per-request knobs ride in the body (`"lang"`, `"options": {"evidence": true, ...}`):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/systemone` | decide (Jev-compatible shape; optional `options.evidence` → M3 evidence JSON, `lang` → v2.2 per-script routing with honest fallback notes) |
+| `GET /v1/models` | model dir discovery from `meta.json` — nodes, lanes, evidence records, contradiction count (no fabric load) |
+| `GET /v1/health` | core version, active flags, fabric stats, uptime |
+| `GET /v1/deferrals` | v2.2 active-learning loop, step 1: everything the fabric deferred on (also mirrored to `--log-deferrals` file) |
+
+```bash
+# M3 evidence over HTTP: supporting lanes + provenance + contradictions
+curl -X POST localhost:8010/v1/systemone -H 'Content-Type: application/json' \
+  -d '{"state":"Refund the duplicate charge","options":{"evidence":true},
+       "questions":{"department":{"type":"choice","instructions":"team",
+         "criteria":{"billing":"payments","technical":"bugs"}}}}'
+```
+
 ## The three question primitives
 
 | Type | Asks | Returns |

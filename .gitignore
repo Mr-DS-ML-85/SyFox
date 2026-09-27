@@ -2,3 +2,8 @@ build/
 model-*/
 __pycache__/
 *.pyc
+data/bank77_train.jsonl
+data/bank77_cal.jsonl
+data/bank77_hidden.jsonl
+data/bank77_cal_bare.jsonl
+data/bank77_hidden_bare.jsonl

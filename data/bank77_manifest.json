@@ -1,0 +1,17 @@
+{
+ "bank77_train.jsonl": {
+  "rows": 9000,
+  "sha256": "0a2325bbac4f7937c873372d3344e3736532f6cea0427578c4d89a6453aea894"
+ },
+ "bank77_cal.jsonl": {
+  "rows": 1003,
+  "sha256": "ad08abf71a44925ede60901f81056c96d905ea12334b717f1dde403d33e98371"
+ },
+ "bank77_hidden.jsonl": {
+  "rows": 3080,
+  "sha256": "13bb785276cebbc87778b70be49680c3367e6c4a22cd274f1c18dc912eb40c8e"
+ },
+ "bank77_criteria.json": {
+  "note": "mined per-class anchors (train-only)"
+ }
+}

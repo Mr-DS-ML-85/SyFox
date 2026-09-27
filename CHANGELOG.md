@@ -1,3 +1,57 @@
+## v3.1.0 — banking77: real 77-way benchmark, the manual error anatomy, and the hub-pollution fixes
+
+Real dataset, not synthetic: PolyAI banking77 — 10,003 official train rows /
+3,080 official test rows / 77 intents (`tools/bank77_prepare.py` pulls the
+CSVs). The official test split becomes the hidden test (firewall-enforced
+naming); 10% of train is carved stratified (seed 77) for calibration.
+
+### Measured fix ladder (selection on cal ONLY, hidden scored once)
+| config change | cal top-1 |
+|---|---|
+| naive: generic criteria, instructions inline, natural labels | 0.029 |
+| + mined per-class criteria (log-ratio, unigrams+bigrams, top-20) | (baseline run) |
+| + empty instructions (learn folds instructions into the state side; identical per-row instructions are hub pollution — they are never injected at decide) | 0.041 |
+| + opaque anchors `c00..c76` (natural labels like `card_arrival` tokenize into shared hubs; "card" spans many classes. Opaque ids give every class a DEDICATED anchor node) | 0.073 |
+| + consolidation epochs 3 (reproduces the model-xl recipe on the clean schema) | 0.081–0.085 |
+| + top-20 terms + anchor arbitration (flat top-5 re-ranked by bare-anchor readout — product of two readout views) | **0.091** |
+
+HIDDEN (official test, 3,080 rows, scored once): **top-1 0.081, top-3 0.221,
+top-5 0.326** vs chance 0.013 — 6.3× chance at top-1, 25× at top-5.
+No cal overfit: cal predicted 0.091, hidden gave 0.081.
+
+### What the manual benchmark exposed (the point of doing it by hand)
+- Without `--energy-norm`, corpus-scale masses silence the readout: all 77
+  options sit at exactly 1/77 and argmax degrades to alphabetical order.
+  The M1 measurement gain is MANDATORY at this scale (0% -> 100% coverage).
+- The error anatomy (`tools/bank77_analysis.py`): gold sits at ranks 2-20 for
+  ~60% of rows; margin-when-correct is ~2x margin-when-wrong; a single class
+  (`wrong_exchange_rate_for_cash_withdrawal`) absorbs wrong predictions from
+  every other class via hub-word bigrams ("cash abroad" is class-pure as a
+  bigram while "cash" is global as a word — the readout tokens are words).
+- Measured NEGATIVE (kept off, documented): stopword filtering (0.036 —
+  verb+stop combos like "was taken" are the signal), term-level purity caps
+  (0.035), word-level purity caps (0.031-0.053), first-token hierarchical
+  two-stage (0.051), shorter criteria under the clean schema, unigram-only
+  criteria (0.045-0.052). The hub phrases are simultaneously the noise and
+  the signal.
+- Honest gap note: 0.081 hidden here is not model-xl's 0.284 — model-xl is a
+  14-domain consolidated fabric (45,892 nodes / 1.9M lanes) whose mining
+  recipe this sandbox rebuild does not replicate. What transfers is the
+  SCHEMA (opaque anchors + empty instructions + mined criteria + energy-norm)
+  and the measurement tooling: point `tools/bank77_analysis.py --model
+  model-xl` at any hidden file to re-run the same anatomy there.
+
+### Infrastructure
+- `tools/bank77_prepare.py`: CSV -> train/cal/hidden JSONL (firewall naming),
+  stratified carve, deterministic criteria mining, SHA-256 manifest.
+- `tools/bank77_analysis.py`: the manual benchmark — per-row probabilities
+  through the ctypes bridge; top-1/3/5, gold-rank bands, margin and
+  confidence-when-wrong, worst confusion pairs, per-class accuracy, deferral
+  anatomy, per-row JSONL dump. `--arbitrate` = anchor product-of-experts.
+- Makefile: `bank77` (prepare + learn + cal-bench), `bank77-report` (hidden
+  run). Bulk splits are gitignored (167 MB inline criteria); the tool
+  regenerates them deterministically.
+
 ## v3.0.0 — milestones 1–5: scale discipline, distinct experience, provenance, adversarial suite, multicore
 
 Every claim below is a number from a real run on this repo (commands in the

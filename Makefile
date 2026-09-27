@@ -250,6 +250,15 @@ coverage-big: models-big
 #   B-dedup: the same file with duplicate lessons skipped (dedup_skipped
 #   reports 7/8 of B's lessons as zero-information).
 # ---------------------------------------------------------------------------
+bank77: build/syfox
+	python3 tools/bank77_prepare.py --topk 20 --opaque-labels --no-instructions
+	./build/syfox learn --examples data/bank77_train.jsonl --model model-bank77-best --epochs 3
+	./build/syfox calibrate --model model-bank77-best --examples data/bank77_cal.jsonl
+	./build/syfox bench --model model-bank77-best --eval data/bank77_cal.jsonl --energy-norm
+
+bank77-report: bank77
+	python3 tools/bank77_analysis.py --model model-bank77-best --eval data/bank77_hidden.jsonl --arbitrate --dump data/bank77_hidden_predictions.jsonl | tee data/bank77_report_hidden.txt
+
 ab-distinct: build/syfox
 	@head -n 1050 data/big/tickets_en_train.jsonl > build/ab-repeat-src.jsonl
 	@for i in 1 2 3 4 5 6 7 8; do cat build/ab-repeat-src.jsonl; done > build/ab-repeat.jsonl

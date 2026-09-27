@@ -56,6 +56,9 @@ struct Args {
     bool novelty = false;            // learn --novelty: per-lesson dose by novelty (M2)
     float novelty_floor = 0.25f;     // learn --novelty-floor F (A/B knob)
     bool energy_norm = false;        // decide-side energy gain for big-corpus fabrics (M1)
+    float defer_margin = 0;          // decide --defer-margin P: defer when p1-p2 < P
+                                     // (honest uncertainty at the decision layer; the
+                                     // physics still decided — this is a disclosure knob)
     bool evidence = false;           // decide --evidence: machine-auditable evidence JSON (M3)
     bool adversarial = false;        // bench --adversarial: M4 stress suite (read-only)
     std::string mix;                 // bench --mix FILE: cross-domain vocabulary source (M4)
@@ -391,6 +394,25 @@ void cmd_decide(const Args& a) {
     syfox::Usage u;
     auto answers = eng.decide(state, questions, u);
     u.calibrated = eng.calibration().fitted;   // decide() resets Usage; set after
+    // --defer-margin P: the substrate still decides (physics untouched); a
+    // margin below P is DISCLOSED as a deferral instead of a confident-looking
+    // label. Measured motivation: reworded probe criteria can decide at
+    // |p1-p2| ~ 0.01-0.05 with confidence 0 — honest silence should extend
+    // to tied candidates, not only to a dark field.
+    if (a.defer_margin > 0) {
+        for (auto& ans : answers) {
+            if (ans.deferred || ans.probabilities.size() < 2) continue;
+            float p1 = 0, p2 = 0;
+            for (const auto& pr : ans.probabilities) {
+                if (pr.second > p1) { p2 = p1; p1 = pr.second; }
+                else if (pr.second > p2) p2 = pr.second;
+            }
+            if (p1 - p2 < a.defer_margin) {
+                ans.deferred = true;
+                ans.reason = "low_margin";
+            }
+        }
+    }
     sfx::JV out = answers_to_json(answers, u);
     if (!lang_note.empty()) out.obj["lang_note"] = sfx::JV(lang_note);
     // v3 Milestone 3: machine-auditable evidence — supporting lanes with
@@ -1126,6 +1148,7 @@ int main(int argc, char** argv) {
         else if (k == "--dedup") a.dedup = true;
         else if (k == "--novelty") a.novelty = true;
         else if (k == "--energy-norm") a.energy_norm = true;
+        else if (k == "--defer-margin") { if (i + 1 >= argc) usage_exit(); a.defer_margin = std::strtof(argv[++i], nullptr); if (a.defer_margin < 0) usage_exit(); }
         else if (k == "--evidence") a.evidence = true;
         else if (k == "--adversarial") a.adversarial = true;
         else if (k == "--mix") { if (i + 1 >= argc) usage_exit(); a.mix = argv[++i]; }

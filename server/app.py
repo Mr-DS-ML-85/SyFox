@@ -221,6 +221,20 @@ async def systemone(req: Request):
             return JSONResponse(status_code=422, content={
                 "error": {"message": str(e)}})
 
+        # options.defer_margin P: honest-uncertainty disclosure at the decision
+        # layer (CLI-equal). The substrate still decided; a p1-p2 below P is
+        # disclosed as a deferral (reason "low_margin") instead of a
+        # confident-looking label on tied candidates.
+        dm = opts.get("defer_margin")
+        if isinstance(dm, (int, float)) and dm > 0:
+            for a in answers.values():
+                if a.get("deferred"):
+                    continue
+                vals = sorted(a.get("probabilities", {}).values(), reverse=True)
+                if len(vals) >= 2 and vals[0] - vals[1] < dm:
+                    a["deferred"] = True
+                    a["reason"] = "low_margin"
+
         # v2.2 active-learning: log deferrals (state + full question schema)
         deferred = {qid: a for qid, a in answers.items() if a.get("deferred")}
         if deferred:

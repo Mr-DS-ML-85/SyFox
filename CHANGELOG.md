@@ -1,3 +1,38 @@
+## v3.1.1 — the probe experiment: criteria wording is a first-class input; honest ties via --defer-margin
+
+The model-xl diagnostic (handcrafted Bangla/English/SMS probes tying at
+~0.50/0.50 with confidence 0 and deferred:false) reproduced and explained on
+real data. Experiment: one fabric trained on real UCI SMS spam (5,574 rows,
+stratified 70/15/15), the SAME hidden rows decided under three criteria
+wordings:
+
+| decide-side criteria | hidden top-1 | mean margin |
+|---|---|---|
+| matched (trained schema) | 0.160 | 0.444 |
+| reworded (handcrafted, abstract) | 0.842 | 0.043 |
+| empty (labels only) | 0.422 | 0.017 |
+
+Findings (all measured, `tools/sms_probe_experiment.py`):
+- The criteria text at decide selects which nodes the question probes.
+  Matched-trained criteria can HURT: their state-overlapping words harvest
+  direct hits (anchor-hub noise) and land worse than the majority baseline,
+  with huge misleading margins. Abstract reworded criteria suppress the
+  harvest and let the anchor one-hop (class-typicality) carry the decision —
+  at tie-sized margins. Same fabric: accuracy swings 0.16 <-> 0.84.
+- The model-xl probe pattern (near-tied probabilities, confidence 0,
+  deferred:false) is the reworded/empty condition of this mechanism: the
+  probes were measuring a DIFFERENT system than the benchmark number
+  (SMS 0.937 was measured under the trained schema). Handcrafted probes
+  bound; held-out runs conclude. Methodology written up in docs/PROBING.md.
+- Decision-layer honesty: new `decide --defer-margin P` (and server
+  `options.defer_margin`) discloses p1-p2 below P as `deferred: true,
+  reason: "low_margin"` instead of a confident-looking label on tied
+  candidates. The substrate still decides; physics untouched. Measured live:
+  a 0.509/0.491 tie now returns a deferral, not a spam label.
+- Packaging note (from the model-xl diagnostic): a fresh checkout has no
+  build/ directory (gitignored) — run `make all` first; that also produces
+  libsyfox_core.so for the HTTP server.
+
 ## v3.1.0 — banking77: real 77-way benchmark, the manual error anatomy, and the hub-pollution fixes
 
 Real dataset, not synthetic: PolyAI banking77 — 10,003 official train rows /

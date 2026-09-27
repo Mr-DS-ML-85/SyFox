@@ -33,7 +33,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.1.0";
+inline const char* VERSION = "3.1.1";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.

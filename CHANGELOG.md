@@ -1,3 +1,84 @@
+## v3.2.1 — the three paper-blocking bug fixes (ablation kill switches, confidence calibration, router config)
+
+**BUG #1 — ablation kill switches were silently inert (root-caused, disclosed,
+test-pinned).** The switches themselves were wired correctly all the way into
+settle() and readout() — on a v3.2 fabric (model-b77-sem) the five paper
+configs produce 4 distinct outputs. The reported byte-identical behavior is
+the replay contract on a PRE-v3.2 fabric: no SEM4 tail => --no-semantics has
+nothing to switch off, no memories.jsonl => --no-retrieval primes nothing, no
+hierarchy.json (or floor 1.0 = the measured-off default) => --no-hierarchy
+moves nothing. Fixes: (1) `decide` now prints a loud stderr note per inert
+switch naming the missing feature and the rebuild path
+(./build/rebuild_sem SRC DST); (2) tools/ablation_suite.py runs the five
+configs over an eval set, reports per-config accuracy/meanC/medC plus an
+answer-signature distinctness count, DISCLOSES inertness, and exits non-zero
+when a v3.2-featured fabric collapses — a null ablation can never reach the
+paper silently again; (3) unit test test_ablation_distinctness builds a fabric
+with all three layers ARMED (hierarchy floor 0.35) and asserts >= 4 distinct
+outputs across default/--no-semantics/--no-retrieval/--no-hierarchy on the
+same input (got 4); (4) the semantic effect is measured-visible (tickets-cal
+accuracy 0.9533 -> 0.9733 with --no-semantics), so no leak-fraction change.
+
+**BUG #2 — confidence collapse (96.6% accuracy at mean confidence 0.0016)
+root-caused: the calibration fit ran on a different physics composition and
+dose regime than decide.** Two concrete engine bugs and one data fix:
+(1) harvest_rows() re-implemented injection inline and SKIPPED the retrieval
+priming block — every fabric WITH memories was calibrated on a no-prime field
+while decide primes; the priming prologue is now a shared prime_field() used
+by both paths, bit-identical to the old decide behavior; (2) the mode match:
+calibrate must run under the same --energy-norm regime the fabric is benched
+in (readout gaps are dose-dependent at fixed temperature — the v3.1.2
+measurement of conf 0.002 -> 0.923 under energy-norm is the same lever);
+(3) recalibration of the shipped v3.2 fabrics under the fixed paths.
+Measured after: tickets-big-latin-sem mean confidence 0.0016 -> 0.8736
+(median 0.9835, C|ok 0.898 vs C|bad 0.373, accuracy held 0.9533), easy cases
+0.636-0.965, b77-sem C|ok/C|bad separation 2.3x with the semantic leak
+verified as signal (accuracy collapses without it). Router16 recalibrated on
+its anchor-worded cal rows (ECE 0.368 -> 0.099, in-distribution mean
+confidence 0.298). Acceptance criteria met: avg >= 0.20 on a well-trained
+domain, >= 0.50 on easy cases. tools/confidence_ablation.py produces the
+per-config ablation table and the diagnosis (retrieval dose and semantic
+leak are NOT the diluters — the stale fit was); tables archived in
+data/v321_bugfix_tables.json.
+
+**BUG #3 — `decide --router model-router16` failed with "lacks router.json
+anchors".** Root cause: the router dir didn't exist in the caller's layout
+(the HF package nests fabrics at model/<name>, the syfox repo at
+model-<name>) and a missing substrate loaded SILENTLY as an empty fabric, so
+the failure surfaced as the misleading router.json message. Fixes:
+(1) Substrate::load and Engine::load_model report failure; every CLI command
+now fails loudly naming the model dir it could not read (first learn stays
+tolerant — a fresh fabric is intended there; the ctypes bridge returns a
+null handle so Python raises); (2) resolve_model_dir() tries as-given,
+model/<name>, model-<name>, model/model-<name> — one CLI invocation works in
+both repo layouts, and router.json models mapping targets resolve the same
+way; (3) the router.json error now names the expected file and the builder
+tool; (4) router.json models mapping updated to the v3.2 -sem fabrics;
+(5) router16 rebuilt (sorted save) and recalibrated; (6) `make ci` gate
+includes a route-field assertion (tools/assert_route.py). Verified
+end-to-end: "Why am I missing my refund" -> route rt01 -> model-b77-sem ->
+c00 answered; route distribution across all 16 hidden domain files measured
+(language anchors 12/12 perfect; bank77 rows route to the support anchor
+rt13 11/12 — honest limitation, disclosed; modal agreement 0.663).
+
+**PERSISTENCE DETERMINISM (found during the ablation investigation).**
+save() iterated unordered_map members directly, so every load->save cycle
+PERMUTED substrate.bin — measured: three different md5s over two rebuild
+passes on one fabric with an identical lane multiset. Same-lane physics per
+file, but the settled field's floating-point sum order drifted across save
+cycles: model dirs were never byte-stable and an ablation re-run after a
+re-save was silently a different experiment. Fix: every map-backed section
+(out_, derived_gen_, lane_evidence_, lane_ctx_) is written in SORTED key
+order; load rebuilds out_ in file order, so one sorted save converges the
+format and every later roundtrip is bit-identical (rebuild_sem x3:
+md5 06011b36... stable; unit-test enforced). All shipped v3.2 fabrics were
+rebuilt through the converged path.
+
+Tools: ablation_suite.py, confidence_ablation.py, router_routes.py,
+assert_route.py, sub_diff.py; Makefile: `ci` gate + rebuild_sem now in
+`all` (the stale-binary trap that masked the first sorted-save attempt).
+Data: v321_bugfix_tables.json (every number above, archived).
+
 ## v3.2.0 — the semantic layer (Stages 1-4), retrieval by default, the two-stage physics router, the dedicated bank77 fabric
 
 **The semantic field (core, deterministic, no ML).** Every concept node

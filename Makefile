@@ -3,7 +3,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic
 BUILD := build
 
-all: build/syfox build/syfox-test build/libsyfox_core.so
+all: build/syfox build/syfox-test build/libsyfox_core.so build/rebuild_sem
 
 build:
 	mkdir -p build
@@ -386,5 +386,17 @@ zeroshot-sem: build/rebuild_sem
 zeroshot: build/syfox
 	python3 tools/zeroshot_suite.py
 
-build/rebuild_sem: src/rebuild_sem.cpp core/syfox.hpp
+build/rebuild_sem: src/rebuild_sem.cpp $(CORE_HDRS)
 	$(CXX) $(CXXFLAGS) -fopenmp -I. src/rebuild_sem.cpp -o build/rebuild_sem
+
+# --- v3.2.1 CI gate: the three bug-fix regressions ---------------------------
+# Runs the unit suite, the ablation kill-switch distinctness check on the
+# dedicated bank77 fabric, and the two-stage router end-to-end. Every step
+# exits non-zero on regression, so `make ci` is the pre-commit gate.
+ci: build/syfox test
+	./build/syfox decide --router model-router16 --model model-b77-sem \
+		--energy-norm --state "Why am I missing my refund" \
+		--questions '{"intent":{"type":"choice","instructions":"","criteria":{"c00":"refund in my account","c33":"money back","c61":"app crash"}}}' \
+		| python3 tools/assert_route.py
+	python3 tools/ablation_suite.py --model model-b77-sem \
+		--eval data/bank77_cal.jsonl --limit 40 --energy-norm

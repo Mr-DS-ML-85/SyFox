@@ -79,6 +79,69 @@ struct Args {
     std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
 };
 
+// v3.2.1 — BUG #1 disclosure: a kill switch on a model that lacks the
+// corresponding feature is a silent no-op (pre-v3.2 fabric => no v4 semantic
+// tail => --no-semantics changes nothing; no memories.jsonl => --no-retrieval
+// changes nothing; no hierarchy.json => --no-hierarchy changes nothing).
+// Five ablation configs then produce byte-identical output and an ablation
+// study silently measures nothing. The flags still mean what they say — the
+// honest fix is to SAY the switch is inert, and to name the rebuild path.
+void warn_inert_switches(const syfox::Engine& eng, const Args& a,
+                         const std::string& model_dir) {
+    if (a.no_semantics && !eng.substrate().has_semantics())
+        std::cerr << "syfox: note: --no-semantics is inert on " << model_dir
+                  << " (no v3.2 semantic tail in substrate.bin; rebuild with "
+                  << "./build/rebuild_sem SRC DST or retrain under v3.2 to make "
+                  << "the switch measurable)\n";
+    if (a.no_retrieval && eng.memories().empty())
+        std::cerr << "syfox: note: --no-retrieval is inert on " << model_dir
+                  << " (no memories.jsonl in the model dir; retrieval has "
+                  << "nothing to prime)\n";
+    if (a.no_hierarchy && !eng.hierarchy_on())
+        std::cerr << "syfox: note: --no-hierarchy is inert on " << model_dir
+                  << " (no hierarchy.json in the model dir)\n";
+}
+
+// v3.2.1 — BUG #3 fix, part 1: resolve a model dir across repo layouts. The
+// syfox repo keeps fabrics at the root (model-<name>), the HuggingFace
+// package nests them (model/<name>). `decide --router model-router16` was
+// documented from the repo root and failed inside the HF package with the
+// misleading "lacks router.json anchors" (the dir itself wasn't found). One
+// resolution order serves both layouts; first candidate with substrate.bin
+// wins, and the as-given path still wins when it exists at all (the loud
+// load failure then names the real problem instead of a fake one).
+std::string resolve_model_dir(const std::string& p) {
+    if (p.empty()) return p;
+    auto has_bin = [](const std::string& d) {
+        std::ifstream f(d + "/substrate.bin");
+        return static_cast<bool>(f);
+    };
+    if (has_bin(p)) return p;
+    std::string stripped = p;
+    const std::string pfx = "model-";
+    if (p.rfind(pfx, 0) == 0) stripped = p.substr(pfx.size());
+    const std::vector<std::string> cands = {
+        "model/" + p, "model-" + stripped, "model/model-" + stripped,
+        "model/" + stripped};
+    for (const auto& c : cands)
+        if (has_bin(c)) return c;
+    return p;
+}
+
+// v3.2.1 — BUG #3 fix, part 2: honest load failure. A missing substrate used
+// to load as a silent empty fabric (all honest_silence, or the fake router
+// error). Now the CLI names the dir that failed.
+syfox::Engine& load_or_die(syfox::Engine& eng, const std::string& dir,
+                           const std::string& role) {
+    if (!eng.load_model(dir)) {
+        std::cerr << "syfox: " << role << " model \"" << dir
+                  << "\": cannot read " << dir
+                  << "/substrate.bin (no such file or directory)\n";
+        std::exit(2);
+    }
+    return eng;
+}
+
 // Apply the CLI mode overrides after load_model(). Mode-neutral by design:
 // substrate.bin stays untouched, flags live only for this process.
 void apply_modes(syfox::Engine& eng, const Args& a) {
@@ -222,7 +285,10 @@ void cmd_learn(const Args& a) {
             si::norm::grams_enabled() = (a.ngrams_mode != 0)
                 ? (a.ngrams_mode == 1) : (g.first != "latin");
             syfox::Engine eng;
-            eng.load_model(dir);                              // incremental if exists
+            // first learn in a script family has no substrate yet: a failed
+            // load here is a FRESH fabric (intended), not an error. Every
+            // other command uses load_or_die().
+            eng.load_model(resolve_model_dir(dir));
             eng.set_context(dir);                             // audit context tag (M3)
             // v3.1.3 BUGFIX: this loop MUST teach g.second (this script
             // family's rows), not epoch_rows (the whole file). The v2.2 code
@@ -271,7 +337,7 @@ void cmd_learn(const Args& a) {
         return;
     }
     syfox::Engine eng;
-    eng.load_model(a.model);                                    // incremental if model exists
+    eng.load_model(resolve_model_dir(a.model));                 // incremental if model exists (fresh = first learn)
     eng.set_context(a.model);                                   // audit context tag (M3)
     for (const auto* exp : epoch_rows) {
         std::string state = exp->at("state").as_str();
@@ -328,7 +394,7 @@ void cmd_calibrate(const Args& a) {
         model_dir = route_model(a, agg, lang_note, false);
     }
     syfox::Engine eng;
-    eng.load_model(model_dir);
+    load_or_die(eng, resolve_model_dir(model_dir), "calibration");
     if (a.energy_norm) eng.set_energy_norm(true);
     auto rows = load_jsonl(a.examples);
     auto calib_rows = eng.harvest_rows(rows);
@@ -426,20 +492,24 @@ void cmd_decide(const Args& a) {
     // fallback domain layer when the mapping misses. Both stages are
     // independent SI settles; the route is disclosed in the output.
     if (!a.router.empty()) {
+        const std::string router_dir = resolve_model_dir(a.router);
         syfox::Engine reng;
-        reng.load_model(a.router);
+        load_or_die(reng, router_dir, "router");
         apply_modes(reng, a);
         if (a.energy_norm) reng.set_energy_norm(true);   // M1 gain for the router too
         sfx::JV rschema(sfx::JVObj{});
         {
-            std::ifstream rf(a.router + "/router.json");
+            std::ifstream rf(router_dir + "/router.json");
             if (rf) {
                 std::string buf((std::istreambuf_iterator<char>(rf)), std::istreambuf_iterator<char>());
                 rschema = sfx::JV::parse(buf);
             }
         }
         if (!rschema.has("anchors") || !rschema.at("anchors").is_obj()) {
-            std::cerr << "syfox: router model " << a.router << " lacks router.json anchors\n";
+            std::cerr << "syfox: router model " << router_dir
+                      << " lacks router.json anchors (expected "
+                      << router_dir << "/router.json with an \"anchors\" object; "
+                      << "build one with tools/router_prepare.py)\n";
             std::exit(2);
         }
         sfx::JV rqs(sfx::JVObj{
@@ -466,15 +536,19 @@ void cmd_decide(const Args& a) {
         rj["top"] = sfx::JV(top3);
         if (rschema.has("models") && rschema.at("models").is_obj()
             && !ra.deferred && rschema.at("models").has(ra.choice)) {
-            model_dir = rschema.at("models").at(ra.choice).as_str();
+            // v3.2.1: the mapping target resolves across repo layouts too —
+            // an HF-packaged router.json says "model-b77-sem" while the dir
+            // lives at model/b77-sem.
+            model_dir = resolve_model_dir(rschema.at("models").at(ra.choice).as_str());
             rj["model"] = sfx::JV(model_dir);
         }
         route_report = std::move(rj);
     }
     syfox::Engine eng;
-    eng.load_model(model_dir);
+    load_or_die(eng, resolve_model_dir(model_dir), "decide");
     apply_modes(eng, a);
     if (a.energy_norm) eng.set_energy_norm(true);   // Milestone-1 gain knob
+    warn_inert_switches(eng, a, model_dir);
     // --memories FILE (v3.2): explicit memory store for decide — overrides any
     // model-dir memories.jsonl for this process. Rows: {"label":..., "state":...}.
     if (!a.memories.empty()) {
@@ -587,7 +661,7 @@ const std::vector<Demo>& demos_for(const std::string& domain) {
 
 void cmd_demo(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "demo");
     apply_modes(eng, a);
     std::cout << "SyFox demo — domain: " << (a.domain.empty() ? "tickets" : a.domain)
               << " | core: si-substrate (no transformer, no classifier)\n";
@@ -602,7 +676,7 @@ void cmd_demo(const Args& a) {
 
 void cmd_stats(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "stats");
     apply_modes(eng, a);   // stats reflects the modes this process would run under
     std::cout << sfx::JV(sfx::JVObj{
         {"nodes", static_cast<double>(eng.substrate().node_count())},
@@ -637,7 +711,7 @@ void cmd_stats(const Args& a) {
 // ---------------------------------------------------------------------------
 void cmd_bench(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "bench");
     apply_modes(eng, a);                            // --threads (M5 OMP settle), SI modes
     if (a.energy_norm) eng.set_energy_norm(true);   // Milestone-1 gain knob
     std::string eval_path = !a.eval.empty() ? a.eval : a.examples;
@@ -745,7 +819,7 @@ void cmd_bench(const Args& a) {
         std::string agg;
         for (const auto& r : rows) if (r.has("state")) agg += r.at("state").as_str() + "\n";
         const std::string model_dir = route_model(a, agg, lang_note, false);
-        if (model_dir != a.model) eng.load_model(model_dir);
+        if (model_dir != a.model) load_or_die(eng, resolve_model_dir(model_dir), "bench (--lang routed)");
     }
     // v3 Milestone 4 --adversarial: the stress suite over the eval rows.
     // Read-only for the model under test; conflicts run on a throwaway copy.
@@ -860,7 +934,7 @@ void cmd_recall(const Args& a) {
     std::string lang_note;
     const std::string model_dir = route_model(a, a.state, lang_note, false);
     syfox::Engine eng;
-    eng.load_model(model_dir);
+    load_or_die(eng, resolve_model_dir(model_dir), "recall");
     if (a.state.empty() || (a.memories.empty() && a.examples.empty())) usage_exit();
     std::vector<syfox::recall::Memory> memories;
     auto memory_from_row = [](const sfx::JV& r) -> syfox::recall::Memory {
@@ -950,7 +1024,7 @@ void cmd_active(const Args& a) {
 
 void cmd_derive(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "derive");
     // Derivation layer commands. All OFFLINE and EXPLICIT: decide() stays
     // read-only; nothing here runs implicitly. Dreaming never touches the
     // substrate — only a human-validated ledger line can become a lane.
@@ -1054,7 +1128,7 @@ void cmd_derive(const Args& a) {
 
 void cmd_dream(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "dream");
     syfox::derive::DreamConfig dc;
     auto cands = syfox::derive::dream(eng.substrate(), dc, a.seed, static_cast<int>(a.steps));
     const std::string ledger = a.model + "/mutations.jsonl";
@@ -1082,7 +1156,7 @@ void cmd_dream(const Args& a) {
 
 void cmd_promote(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "promote");
     const std::string ledger = a.model + "/mutations.jsonl";
     auto lines = load_jsonl(ledger);
     const float promote_gain = 6.0f;
@@ -1119,7 +1193,7 @@ void cmd_promote(const Args& a) {
 
 void cmd_analogs(const Args& a) {
     syfox::Engine eng;
-    eng.load_model(a.model);
+    load_or_die(eng, resolve_model_dir(a.model), "analogs");
     auto matches = syfox::derive::find_analogues(eng.substrate(), a.concept);
     sfx::JVArr arr;
     for (const auto& m : matches)

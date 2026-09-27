@@ -674,6 +674,41 @@ invariant to the source modes; confidence is concentration, not
 correctness), [docs/PROBING.md](docs/PROBING.md) for probe methodology, and
 [ROADMAP.md](ROADMAP.md) for where this is going.
 
+## v3.2.1 — the paper-blocking bug fixes
+
+Three ablation-study blockers were root-caused and fixed (full story in the
+[CHANGELOG](CHANGELOG.md), every number archived in
+`data/v321_bugfix_tables.json`):
+
+- **Ablation kill switches** were silently inert on pre-v3.2 fabrics (the
+  replay contract: no SEM4 tail, no memories, no hierarchy => nothing to
+  switch off). `decide` now discloses every inert switch on stderr,
+  `tools/ablation_suite.py` refuses to pass a null ablation, and a unit test
+  pins >= 4 distinct outputs across the five paper configs on an armed
+  fabric. On a v3.2 fabric the switches were already live (accuracy moves
+  0.9533 -> 0.9733 with `--no-semantics` on tickets-cal).
+- **Confidence collapse** (96.6% accuracy at mean confidence 0.0016) was a
+  calibration-path bug: the fit skipped the retrieval-priming block and ran
+  in a different dose regime than decide. `harvest_rows` now shares the
+  exact decide-time `prime_field` prologue, and the shipped fabrics are
+  recalibrated in their benched mode: tickets-cal mean confidence
+  **0.0016 -> 0.8736** (median 0.98, C|ok 0.898 vs C|bad 0.373, accuracy
+  held), easy cases 0.64-0.97, router16 ECE 0.368 -> 0.099.
+- **`--router model-router16`** failed with a misleading "lacks router.json
+  anchors" whenever the fabric dir wasn't found in the caller's layout —
+  a missing substrate used to load as a silent empty fabric. Model loads now
+  fail loudly naming the dir, `resolve_model_dir` accepts both repo layouts
+  (`model-router16` and `model/router16`), and `make ci` asserts the route
+  field end-to-end. Route distribution across all 16 hidden domain files:
+  language anchors 12/12, modal agreement 0.663.
+
+Also fixed on the way: `save()` iterated unordered maps, so every
+load->save cycle permuted `substrate.bin` (never byte-stable, settled-field
+sum order drifted) — persistence is now sorted-key and provably
+roundtrip-stable (unit-test enforced; all shipped fabrics rebuilt through
+the converged path). `make ci` is the pre-commit gate: unit suite +
+ablation distinctness + router route assertion.
+
 ## License & credit
 
 MIT © 2026 Mr-DS-ML-85. Core mechanics ported from the author's

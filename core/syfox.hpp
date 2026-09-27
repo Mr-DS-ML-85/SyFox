@@ -34,7 +34,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.2.0";
+inline const char* VERSION = "3.2.1";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -202,8 +202,11 @@ public:
         }
     }
 
-    void load_model(const std::string& dir) {
-        si_.load(dir + "/substrate.bin");
+    // v3.2.1: returns false when the substrate file is missing (honest load
+    // failure — callers surface a clear error instead of deciding on an
+    // empty fabric or, worse, reporting a misleading downstream message).
+    bool load_model(const std::string& dir) {
+        if (!si_.load(dir + "/substrate.bin")) return false;
         std::ifstream cf(dir + "/calibration.json");
         if (cf) { std::string buf((std::istreambuf_iterator<char>(cf)), std::istreambuf_iterator<char>());
                   calib_ = Calibration::from_json(sfx::JV::parse(buf)); }
@@ -262,6 +265,7 @@ public:
                 if (!mems.empty()) set_memories(std::move(mems));
             }
         }
+        return true;
     }
 
     // -- v3.2 retrieval-by-default (associative priming) ------------------------
@@ -610,22 +614,15 @@ public:
     }
 
     // -- DECISION ----------------------------------------------------------------
-    std::vector<Answer> decide(const std::string& state, const sfx::JV& questions, Usage& usage) {
-        usage = Usage{};
-        usage.vocabulary = si_.node_count();
-        usage.lanes = si_.lane_count();
-
-        std::vector<Answer> answers;
-        const std::vector<std::string> words = si::norm::normalize(state);
-        usage.state_tokens = words.size();
-
+    // v3.2.1: the retrieval-priming prologue is SHARED by decide() and
+    // harvest_rows(). Bug this fixes: calibration was fitted on a field that
+    // never saw the prime (harvest re-implemented injection inline and skipped
+    // the block), so every fabric WITH memories was calibrated on a different
+    // physics composition than the one decide() runs — measured consequence:
+    // 96.6% accuracy at mean confidence 0.0016 on a strong fabric. The fit and
+    // the decision must see the same field composition, bit for bit.
+    void prime_field(const std::vector<std::string>& words, Usage* usage) {
         si_.reset_field();
-        // v3.2 retrieval-by-default: if the model ships memories, the query's
-        // settled-field fingerprint ranks them (Hopfield-style resonance,
-        // recall.hpp) and the top-k outcomes inject a faint prime dose before
-        // the state settles. The prime is part of the decision composition:
-        // same state + same memories => same field, bit for bit. No memories
-        // (or --no-retrieval) => this block is skipped entirely.
         if (retrieval_on_ && !memories_.empty() && retrieval_topk_ > 0) {
             const std::vector<float> fq = recall::fingerprint(si_, words);
             struct Hit { float r; std::size_t idx; };
@@ -650,9 +647,27 @@ public:
                 for (const auto& t : si::norm::normalize(m.label))
                     if (si_.has(t)) prime.push_back(t);
                 if (!prime.empty()) si_.inject(prime, dose);
-                usage.retrieved.emplace_back(m.label, hits[i].r);
+                if (usage) usage->retrieved.emplace_back(m.label, hits[i].r);
             }
         }
+    }
+
+    std::vector<Answer> decide(const std::string& state, const sfx::JV& questions, Usage& usage) {
+        usage = Usage{};
+        usage.vocabulary = si_.node_count();
+        usage.lanes = si_.lane_count();
+
+        std::vector<Answer> answers;
+        const std::vector<std::string> words = si::norm::normalize(state);
+        usage.state_tokens = words.size();
+
+        // v3.2 retrieval-by-default: if the model ships memories, the query's
+        // settled-field fingerprint ranks them (Hopfield-style resonance,
+        // recall.hpp) and the top-k outcomes inject a faint prime dose before
+        // the state settles. The prime is part of the decision composition:
+        // same state + same memories => same field, bit for bit. No memories
+        // (or --no-retrieval) => this block primes nothing.
+        prime_field(words, &usage);
         si_.inject(words, state_dose(words));          // words at the (gained) substrate level
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
@@ -695,10 +710,13 @@ public:
             std::string state = ex.at("state").as_str();
             const sfx::JV& qs = ex.has("questions") ? ex.at("questions") : sfx::JV(sfx::JVObj{});
             if (!qs.is_obj()) continue;
-            si_.reset_field();
+            // v3.2.1: prime EXACTLY as decide() does (shared prime_field) —
+            // the fit must see the decide-time field composition. For fabrics
+            // without memories this is a bare reset, the pre-3.2 behavior.
+            const std::vector<std::string> hw0 = si::norm::normalize(state);
+            prime_field(hw0, nullptr);
             {
-                const std::vector<std::string> hw = si::norm::normalize(state);
-                si_.inject(hw, state_dose(hw));           // gained dose (Milestone-1)
+                si_.inject(hw0, state_dose(hw0));         // gained dose (Milestone-1)
             }
             if (si::norm::grams_enabled()) {
                 const std::vector<std::string> words2 = si::norm::normalize(state);

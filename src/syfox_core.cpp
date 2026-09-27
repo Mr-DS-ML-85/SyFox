@@ -36,7 +36,13 @@ SyFoxHandle* syfox_engine_create(const char* model_dir) {
     if (!model_dir) return nullptr;
     SyFoxHandle* h = new SyFoxHandle();
     h->eng = new Engine();
-    h->eng->load_model(model_dir);
+    // v3.2.1: a missing substrate is a load FAILURE (null handle => the
+    // bridge raises "cannot load model"), not a silent empty fabric.
+    if (!h->eng->load_model(model_dir)) {
+        delete h->eng;
+        delete h;
+        return nullptr;
+    }
     return h;
 }
 

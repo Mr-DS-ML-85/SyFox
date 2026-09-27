@@ -1,0 +1,63 @@
+{
+  "comment": "v3.2.1 bug-fix measurements: BUG #1 ablation distinctness, BUG #2 confidence per config (ablation-guided), BUG #3 router end-to-end. All numbers from the runs archived here; reproducible via tools/ablation_suite.py, tools/confidence_ablation.py, tools/router_routes.py, make ci.",
+  "bug2_confidence_ablation": {
+    "tickets-big-latin-sem": {
+      "eval": "data/big/tickets_en_cal.jsonl", "qkey": "department",
+      "limit": 150, "mode": "energy-norm",
+      "calibration": {"T_before": 0.0120851, "T_after": 0.0091,
+                       "ECE_before": 0.6023, "ECE_after": 0.0075, "fit_rows": 5400},
+      "configs": {
+        "default":        {"acc_answered": 0.9533, "mean_conf": 0.8736, "median_conf": 0.9835, "C|ok": 0.8981, "C|bad": 0.3729},
+        "no-retrieval":   {"acc_answered": 0.9533, "mean_conf": 0.8736, "median_conf": 0.9835, "C|ok": 0.8981, "C|bad": 0.3729},
+        "no-semantics":   {"acc_answered": 0.9733, "mean_conf": 0.9447, "median_conf": 0.9995, "C|ok": 0.9503, "C|bad": 0.7388},
+        "both off":       {"acc_answered": 0.9733, "mean_conf": 0.9447, "median_conf": 0.9995, "C|ok": 0.9503, "C|bad": 0.7388}
+      },
+      "note": "no-retrieval == both off and default == no-retrieval here because the fabric ships no memories.jsonl (retrieval inert by design); semantics is the visible layer. Pre-fix mean confidence on the same rows: 0.0016."
+    },
+    "b77-sem": {
+      "eval": "data/bank77_cal.jsonl", "qkey": "intent",
+      "limit": 150, "mode": "energy-norm",
+      "calibration": {"T_before": 0.00472645, "T_after": 0.4355,
+                       "ECE_before": 0.0989, "ECE_after": 0.0827, "fit_rows": 1003},
+      "configs": {
+        "default":        {"acc_answered": 0.0467, "mean_conf": 0.0666, "C|ok": 0.1471, "C|bad": 0.0627},
+        "no-retrieval":   {"acc_answered": 0.0467, "mean_conf": 0.0662, "C|ok": 0.1469, "C|bad": 0.0623},
+        "no-semantics":   {"acc_answered": 0.0133, "mean_conf": 0.0896, "C|ok": 0.269,  "C|bad": 0.0872},
+        "both off":       {"acc_answered": 0.0067, "mean_conf": 0.0895, "C|ok": 0.003,  "C|bad": 0.09}
+      },
+      "note": "77-way fabric, chance 0.013: the semantic leak IS the signal (accuracy collapses 0.047 -> 0.013 without it); confidence separates C|ok from C|bad 2.3x."
+    },
+    "router16": {
+      "eval": "data/router16_cal.jsonl (anchor-worded criteria, qkey=domain)",
+      "limit": 120, "mode": "energy-norm",
+      "calibration": {"T_before": 0.00491756, "T_after": 0.0579,
+                       "ECE_before": 0.3679, "ECE_after": 0.0989, "fit_rows": 160},
+      "mean_conf": 0.2982, "median_conf": 0.2705, "max_conf": 0.998,
+      "note": "16-way confidence is structurally lower than 3-way (entropy normalized by log 16). Hidden-route rows are honestly more diffuse (mean 0.003-0.012): OOD routing, disclosed."
+    }
+  },
+  "bug2_easy_cases": {
+    "model": "model-tickets-big-latin-sem", "mode": "energy-norm",
+    "cases": [
+      {"state": "I was charged twice for my subscription this month", "choice": "billing",   "conf": 0.965},
+      {"state": "the app crashes whenever I open settings",           "choice": "technical", "conf": 0.636},
+      {"state": "how much does the premium plan cost per month",      "choice": "sales",     "conf": 0.782}
+    ]
+  },
+  "bug1_ablation_distinctness": {
+    "model": "model-b77-sem", "eval": "data/bank77_cal.jsonl", "limit": 60,
+    "mode": "energy-norm",
+    "distinct_signatures": "4/5 (criterion >= 4; hierarchy ships floor=1.0 = off by measurement, disclosed)",
+    "unit_test": "test_ablation_distinctness (build/test_v321_ablation, armed floor 0.35): 4/4 distinct + save/load roundtrip byte-stable",
+    "pre_v3_2_fabric": "model-tickets-big-latin: 1/5 distinct -> ablation_suite exits 2 with the rebuild path"
+  },
+  "bug3_router": {
+    "end_to_end": "decide --router model-router16 --model model-b77-sem: state 'Why am I missing my refund' -> route rt01 (conf 0.017) -> model-b77-sem -> c00 answered",
+    "route_distribution": "tools/router_routes.py --per-domain 12 over 16 hidden files: tickets_bn->rt12 12/12, tickets_hi->rt14 12/12, tickets_ru->rt15 12/12, tickets_en->rt13 12/12, guard->rt08 9/12; bank77 rows route to rt13 (support anchor) 11/12 — the support-worded anchor matches support-ticket phrasing better than the rt01 banking anchor; modal-anchor agreement 122/184 = 0.663"
+  },
+  "persistence_fix": {
+    "bug": "save() iterated unordered_map members => every load->save cycle permuted substrate.bin (three different md5s over two rebuild passes on one fabric; lane MULTISET identical, order not)",
+    "fix": "all map-backed sections written in sorted-key order; one sorted save converges the format",
+    "verification": "rebuild_sem x3 on model-tickets-big-latin-sem: md5 06011b36... identical across passes; unit test asserts byte-stability"
+  }
+}

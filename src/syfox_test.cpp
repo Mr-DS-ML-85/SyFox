@@ -1167,6 +1167,115 @@ static void test_hierarchy() {
     CHECK(!a2[0].deferred, "hierarchy off: plain single-stage readout still answers");
 }
 
+// ---------------------------------------------------------------------------
+// v3.2.1 BUG #1 integration test — the ablation kill switches must MOVE the
+// decision on a fabric that ships all three layers. Regression this pins:
+// five ablation configs producing byte-identical output (they were inert on
+// a pre-v3.2 fabric, silently) makes ablation studies measure nothing.
+// Success criterion (paper): >=4 distinct outputs across
+//   {default, --no-semantics, --no-retrieval, --no-hierarchy}
+// on the same input, on a fabric where every layer is present AND armed
+// (hierarchy floor < 1.0 — b77-sem ships floor 1.0 = measured-off).
+// ---------------------------------------------------------------------------
+static void test_ablation_distinctness() {
+    std::cout << "[v3.2.1 ablation kill switches]\n";
+    const std::string dir = "build/test_v321_ablation";
+    (void)std::system(("rm -rf " + dir).c_str());
+    sfx::JV q = sfx::JV::parse(
+        R"({"i":{"type":"choice","instructions":"","criteria":{
+             "c01":"card arrive when order","c02":"card stuck atm",
+             "c03":"transfer not received","c04":"wrong account"}}})");
+    {
+        syfox::Engine eng;
+        // category anchors first (stage-1), then intents (stage-2) — the
+        // layout that makes the hierarchy gate actually discriminate
+        for (const auto& row : std::vector<std::pair<std::string, std::string>>{
+                 {"card never arrived when ordered", "h_card"},
+                 {"card stuck in the atm machine", "h_card"},
+                 {"money transfer not received yet", "h_transfer"},
+                 {"transfer to wrong account made", "h_transfer"},
+                 {"card never arrived when ordered", "c01 c01"},
+                 {"card stuck in the atm machine", "c02 c02"},
+                 {"money transfer not received yet", "c03 c03"},
+                 {"transfer to wrong account made", "c04 c04"},
+                 // extra lessons so resonance edges exist for the semantic field
+                 {"card did not arrive yet where is it", "c01 c01"},
+                 {"at machine swallowed the card completely", "c02 c02"},
+                 {"sent money but transfer is not received", "c03 c03"},
+                 {"wrong account number used for transfer", "c04 c04"},
+                 {"transfer delayed and money missing", "h_transfer"},
+                 {"card is missing after ordering", "h_card"}})
+            eng.learn_example(row.first, "", row.second);
+        eng.save_model(dir);
+        std::ofstream hf(dir + "/hierarchy.json");   // ARMED floor (< 1.0)
+        hf << "{\"intents\":{\"c01\":\"h_card\",\"c02\":\"h_card\","
+           << "\"c03\":\"h_transfer\",\"c04\":\"h_transfer\"},"
+           << "\"categories\":{\"h_card\":{\"criteria\":\"card atm stuck arrive\"},"
+           << "\"h_transfer\":{\"criteria\":\"transfer account money wrong\"}},\"floor\":0.35}";
+        std::ofstream mf(dir + "/memories.jsonl");
+        mf << "{\"label\":\"c01\",\"state\":\"card never arrived when ordered\"}\n"
+           << "{\"label\":\"c02\",\"state\":\"atm swallowed my card\"}\n"
+           << "{\"label\":\"c03\",\"state\":\"money transfer not received yet\"}\n"
+           << "{\"label\":\"c04\",\"state\":\"transfer to wrong account made\"}\n";
+    }
+    syfox::Engine base;
+    CHECK(base.load_model(dir), "ablation fabric loads");
+    const std::string probe = "the card never arrived after ordering";
+    const std::string probe2 = "money transfer has not been received";
+    struct Cfg { const char* name; bool sem, ret, hier; };
+    const Cfg cfgs[4] = {
+        {"default", true, true, true},
+        {"no-semantics", false, true, true},
+        {"no-retrieval", true, false, true},
+        {"no-hierarchy", true, true, false},
+    };
+    std::size_t distinct = 0;
+    std::vector<std::string> sig;
+    for (const auto& c : cfgs) {
+        syfox::Engine eng;
+        eng.load_model(dir);
+        eng.substrate().set_semantics(c.sem);
+        eng.set_retrieval(c.ret);
+        eng.set_hierarchy(c.hier);
+        std::string s;
+        for (const std::string& st : {probe, probe2}) {
+            syfox::Usage u;
+            auto a = eng.decide(st, q, u);
+            s += a[0].choice + ":" + std::to_string(a[0].confidence) + ":"
+               + std::to_string(u.settled_energy) + ";";
+        }
+        // semantic field changes the settled energy => the confidence string
+        // separates configs even when the argmax agrees
+        if (sig.empty() || std::find(sig.begin(), sig.end(), s) == sig.end())
+            ++distinct;
+        sig.push_back(s);
+    }
+    CHECK(distinct >= 4, "5-config ablation yields >=4 distinct outputs (got "
+          + std::to_string(distinct) + ")");
+
+    // -- persistence byte-stability (v3.2.1 sorted-save fix) -----------------
+    // load -> save -> load -> save must be byte-identical: the paper's model
+    // dirs and ablation tables need reproducible files, and per-save lane
+    // permutation silently drifted settled-field sum order across cycles.
+    const std::string d2 = dir + "_pass2";
+    {
+        syfox::Engine eng;
+        eng.load_model(dir);
+        eng.save_model(d2);
+        syfox::Engine eng2;
+        eng2.load_model(d2);
+        eng2.save_model(dir + "_pass3");
+    }
+    auto file_bytes = [](const std::string& p) {
+        std::ifstream f(p + "/substrate.bin", std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+    };
+    CHECK(file_bytes(d2) == file_bytes(dir + "_pass3"),
+          "save/load roundtrip is byte-stable (sorted persistence)");
+    (void)std::system(("rm -rf " + d2 + " " + dir + "_pass3").c_str());
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -1197,6 +1306,7 @@ int main() {
     test_context_lanes();
     test_retrieval_default();
     test_hierarchy();
+    test_ablation_distinctness();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

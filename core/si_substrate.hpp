@@ -734,6 +734,16 @@ public:
     void build_semantics(int threads = 0);
 
     // -- persistence (binary, deterministic) -------------------------------------
+    // v3.2.1 BUGFIX — save() used to iterate unordered_map members (out_,
+    // derived_gen_, lane_evidence_, lane_ctx_) directly, so every load->save
+    // cycle permuted the file (measured: three different md5s over two
+    // rebuild passes on one fabric; the lane MULTISET is identical, the ORDER
+    // is not). Consequences: model dirs were never byte-stable, and the
+    // settled field's floating-point sum order drifted across save cycles.
+    // Fix: every map-backed section is written in SORTED KEY order. Load
+    // rebuilds out_ in file order, so iteration order is a pure function of
+    // the file => one sorted save converges the format and every later
+    // roundtrip is bit-identical. Same lanes, same weights: no physics change.
     void save(const std::string& path) const {
         std::ofstream f(path, std::ios::binary);
         std::uint32_t n = static_cast<std::uint32_t>(nodes_.size());
@@ -747,16 +757,26 @@ public:
         std::uint32_t lanes = 0;
         for (const auto& kv : out_) lanes += static_cast<std::uint32_t>(kv.second.size());
         f.write(reinterpret_cast<const char*>(&lanes), 4);
-        for (const auto& kv : out_)
-            for (const auto& l : kv.second) {
-                f.write(reinterpret_cast<const char*>(&kv.first), 4);
+        std::vector<const std::pair<const NodeId, std::vector<std::pair<NodeId, float>>>*> sorted_out;
+        sorted_out.reserve(out_.size());
+        for (const auto& kv : out_) sorted_out.push_back(&kv);
+        std::sort(sorted_out.begin(), sorted_out.end(),
+                  [](const auto* x, const auto* y) { return x->first < y->first; });
+        for (const auto* kv : sorted_out)
+            for (const auto& l : kv->second) {
+                f.write(reinterpret_cast<const char*>(&kv->first), 4);
                 f.write(reinterpret_cast<const char*>(&l.first), 4);
                 f.write(reinterpret_cast<const char*>(&l.second), 4);
             }
         // v2 provenance tail — old (v1) files simply end here; load() detects EOF.
-        std::uint32_t dc = static_cast<std::uint32_t>(derived_gen_.size());
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> sorted_derived;
+        sorted_derived.reserve(derived_gen_.size());
+        for (const auto& kv : derived_gen_) sorted_derived.emplace_back(kv.first, kv.second);
+        std::sort(sorted_derived.begin(), sorted_derived.end(),
+                  [](const auto& x, const auto& y) { return x.first < y.first; });
+        std::uint32_t dc = static_cast<std::uint32_t>(sorted_derived.size());
         f.write(reinterpret_cast<const char*>(&dc), 4);
-        for (const auto& kv : derived_gen_) {
+        for (const auto& kv : sorted_derived) {
             std::uint32_t a = static_cast<std::uint32_t>(kv.first >> 32);
             std::uint32_t b = static_cast<std::uint32_t>(kv.first & 0xffffffffull);
             f.write(reinterpret_cast<const char*>(&a), 4);
@@ -764,9 +784,14 @@ public:
             f.write(reinterpret_cast<const char*>(&kv.second), 4);
         }
         // v3 evidence tail — v2 files end here; load() detects EOF.
-        std::uint32_t ec = static_cast<std::uint32_t>(lane_evidence_.size());
+        std::vector<std::uint64_t> sorted_ev;
+        sorted_ev.reserve(lane_evidence_.size());
+        for (const auto& kv : lane_evidence_) sorted_ev.push_back(kv.first);
+        std::sort(sorted_ev.begin(), sorted_ev.end());
+        std::uint32_t ec = static_cast<std::uint32_t>(sorted_ev.size());
         f.write(reinterpret_cast<const char*>(&ec), 4);
-        for (const auto& kv : lane_evidence_) {
+        for (const auto& key : sorted_ev) {
+            const auto& kv = *lane_evidence_.find(key);
             std::uint32_t a = static_cast<std::uint32_t>(kv.first >> 32);
             std::uint32_t b = static_cast<std::uint32_t>(kv.first & 0xffffffffull);
             f.write(reinterpret_cast<const char*>(&a), 4);
@@ -801,9 +826,14 @@ public:
                 f.write(reinterpret_cast<const char*>(&e.second), 4);
             }
         }
-        const std::uint32_t ctxc = static_cast<std::uint32_t>(lane_ctx_.size());
+        std::vector<std::uint64_t> sorted_ctx;
+        sorted_ctx.reserve(lane_ctx_.size());
+        for (const auto& kv : lane_ctx_) sorted_ctx.push_back(kv.first);
+        std::sort(sorted_ctx.begin(), sorted_ctx.end());
+        const std::uint32_t ctxc = static_cast<std::uint32_t>(sorted_ctx.size());
         f.write(reinterpret_cast<const char*>(&ctxc), 4);
-        for (const auto& kv : lane_ctx_) {
+        for (const auto& key : sorted_ctx) {
+            const auto& kv = *lane_ctx_.find(key);
             f.write(reinterpret_cast<const char*>(&kv.first), 8);
             std::uint32_t rq = static_cast<std::uint32_t>(kv.second.required.size());
             f.write(reinterpret_cast<const char*>(&rq), 4);
@@ -814,9 +844,13 @@ public:
         }
     }
 
-    void load(const std::string& path) {
+    // v3.2.1: reports failure. A missing substrate used to load SILENTLY as an
+    // empty fabric (every decide then deferred with honest_silence, and a
+    // --router mis-path surfaced as the misleading "lacks router.json anchors").
+    // Honest failure: false <=> the file could not be opened.
+    bool load(const std::string& path) {
         std::ifstream f(path, std::ios::binary);
-        if (!f) return;
+        if (!f) return false;
         nodes_.clear(); index_.clear(); out_.clear();
         csr_dirty_ = true;
         std::uint32_t n = 0; f.read(reinterpret_cast<char*>(&n), 4);
@@ -924,6 +958,7 @@ public:
                 }
             }
         }
+        return true;
     }
 
     const SubstrateConfig& config() const { return cfg_; }

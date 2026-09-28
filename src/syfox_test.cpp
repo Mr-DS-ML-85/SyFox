@@ -2194,6 +2194,192 @@ static void test_fabric36() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v3.8.0 — physics-native thinking mechanisms (no token prediction, no ML):
+//   TASK 1 adaptive depth, TASK 2 multi-vector spectral channels,
+//   TASK 3 causal WHAT/WHY/HOW lanes, TASK 4 energy self-verification.
+// ---------------------------------------------------------------------------
+// the choice question used by the self-verify gate checks (criteria
+// descriptions match the taught outcome words so candidates read energy)
+static sfx::JV q_choice() {
+    return sfx::JV::parse(
+        R"({"action":{"type":"choice","instructions":"next move",)"
+        R"("criteria":{"flee":"run away escape avoid","fight":"attack sword combat",)"
+        R"("dig_in":"hide build shelter"}}})");
+}
+
+static void test_thinking() {
+    std::cout << "[thinking: adaptive depth / self-verify / multi-vector / causal]\n";
+    sfx::JV q = sfx::JV::parse(
+        R"({"q1":{"type":"choice","criteria":{"x":"x context","y":"y context"}}})");
+
+    // ---- TASK 1: adaptive depth ------------------------------------------
+    {
+        syfox::Engine e;
+        e.set_adaptive_depth(true);
+        e.set_defer_margin(0);
+        e.learn_example("alpha beta gamma", "", "x outcome");
+        e.learn_example("delta epsilon gamma", "", "y outcome");
+        syfox::Usage u1, u2;
+        e.decide("alpha beta gamma", q, u1);            // known + lane-rich: easy
+        e.decide("zzz qqx wnv", q, u2);                 // unknown vocabulary: hard
+        CHECK(u1.adaptive_depth && u2.adaptive_depth, "adaptive depth disclosed");
+        CHECK(u1.k_base == 8, "base k_settle reported");
+        CHECK(u2.difficulty > u1.difficulty, "unknown state measures harder");
+        CHECK(u2.k_used >= u1.k_used, "harder state gets at least as many passes");
+        CHECK(u2.k_used <= u1.k_base + 8, "depth stays inside the max-extra bound");
+        syfox::Usage u3;
+        e.decide("zzz qqx wnv", q, u3);
+        CHECK(u3.k_used == u2.k_used && u3.difficulty == u2.difficulty,
+              "adaptive depth deterministic per state");
+        // ratchet guard: the base never grows across decides
+        for (int i = 0; i < 3; ++i) { syfox::Usage uu; e.decide("alpha beta gamma", q, uu); }
+        syfox::Usage u4;
+        e.decide("alpha beta gamma", q, u4);
+        CHECK(u4.k_base == 8 && u4.k_used == u1.k_used, "no depth ratchet across decides");
+        // flag off: base depth, untouched physics
+        syfox::Engine e2;
+        e2.learn_example("alpha beta gamma", "", "x outcome");
+        syfox::Usage u5;
+        e2.decide("alpha beta gamma", q, u5);
+        CHECK(!u5.adaptive_depth && u5.k_used == u5.k_base, "flag off keeps the base depth");
+    }
+
+    // ---- TASK 4: energy self-verification ---------------------------------
+    {
+        syfox::Engine e;
+        e.learn_example("alpha beta gamma", "", "x outcome");
+        e.learn_example("delta epsilon gamma", "", "y outcome");
+        syfox::Usage u;
+        e.decide("alpha beta gamma", q, u);
+        CHECK(u.field_passes == 8, "trace records the settle passes");
+        CHECK(u.field_motion_rate > 0.10f, "motion rate measured above zero");
+        CHECK(u.settled_energy > 0.0f, "settled energy present");
+        CHECK(!u.field_converged, "eps break disclosed honestly (rare under decay)");
+        // the gate: any motion above a 0 floor defers; a 1.0 floor never does.
+        // The gate fires on an answer, so the fabric must first produce one:
+        // the train_choice_engine shape (state tokens bound to the criteria
+        // description words) clears the unknown-candidates floor.
+        const char* sv_state = "zombies appear at night, health is low";
+        syfox::Engine e2;
+        e2.set_self_verify(true);
+        e2.set_self_verify_floor(0.0f);
+        e2.set_defer_margin(0);              // isolate the gate from the tie gate
+        e2.learn_example("the bot sees zombies at night with low health",
+                         "next move", "flee run away escape avoid");
+        syfox::Usage u2;
+        auto a2 = e2.decide(sv_state, q_choice(), u2);
+        CHECK(a2[0].deferred && a2[0].reason == "unconverged_field",
+              "self-verify defers a moving field on demand");
+        syfox::Engine e3;
+        e3.set_self_verify(true);
+        e3.set_self_verify_floor(0.99f);
+        e3.set_defer_margin(0);
+        e3.learn_example("the bot sees zombies at night with low health",
+                         "next move", "flee run away escape avoid");
+        syfox::Usage u3;
+        auto a3 = e3.decide(sv_state, q_choice(), u3);
+        CHECK(!a3[0].deferred, "gate stays silent below the floor");
+    }
+
+    // ---- TASK 2: multi-vector spectral channels ---------------------------
+    {
+        syfox::Engine e;
+        e.set_multi_vector(true, 4);
+        e.learn_example("alpha beta gamma", "", "x outcome");
+        e.learn_example("delta epsilon zeta", "", "y outcome");
+        syfox::Usage u0;
+        e.decide("alpha beta gamma", q, u0);
+        CHECK(!u0.multi_vector_active, "multi-vector is an honest no-op without a distvec field");
+        // with a distvec fabric: channels run, deterministic, field differs
+        const std::string dir = "build/test_thinking_mv";
+        {
+            syfox::Engine e2;
+            e2.set_distvec(true);
+            e2.learn_example("alpha beta gamma", "", "x outcome");
+            e2.learn_example("delta epsilon zeta", "", "y outcome");
+            e2.save_model(dir);
+        }
+        syfox::Engine e3;
+        e3.set_multi_vector(true, 4);
+        CHECK(e3.load_model(dir), "distvec test fabric loads");
+        syfox::Usage u2, u3;
+        auto a2 = e3.decide("alpha beta gamma", q, u2);
+        auto a3 = e3.decide("alpha beta gamma", q, u3);
+        CHECK(u2.multi_vector_active && u2.multi_vector_channels >= 1,
+              "channels ran on a distvec fabric (effective rank, honestly)");
+        CHECK(a2[0].choice == a3[0].choice && u2.settled_energy == u3.settled_energy,
+              "multi-vector superposition is deterministic");
+        // the superposition differs from the single-view field
+        syfox::Engine e4;
+        e4.load_model(dir);
+        syfox::Usage u4;
+        e4.decide("alpha beta gamma", q, u4);
+        CHECK(!u4.multi_vector_active && u4.settled_energy != u2.settled_energy,
+              "superposed field differs from the single view");
+        (void)std::system(("rm -rf " + dir).c_str());
+    }
+
+    // ---- TASK 3: causal WHAT/WHY/HOW lanes ---------------------------------
+    {
+        // CauseFirst "so": L?>R (cause before the cue)
+        auto cw = si::norm::normalize("the account was overcharged so the customer demanded a refund");
+        auto cp = si::roles::causal_pairs_of(cw);
+        CHECK(cp.size() == 1, "one causal pair for one connective");
+        CHECK(!cp.empty() && cp[0].find("?>") != std::string::npos,
+              "WHY pair carries the ?> signature");
+        // EffectFirst "because": the node name puts the CAUSE first
+        auto bw = si::norm::normalize("the flight was delayed because of the storm");
+        auto bp = si::roles::causal_pairs_of(bw);
+        CHECK(bp.size() == 1 && !bp.empty() && bp[0].rfind("storm", 0) == 0,
+              "because flips the pair so the cause leads the node name");
+        // Instrumental "by": means!>goal
+        auto hw = si::norm::normalize("she passed the exam by studying nightly");
+        auto hp = si::roles::causal_pairs_of(hw);
+        CHECK(hp.size() == 1 && !hp.empty() && hp[0].find("!>") != std::string::npos,
+              "HOW pair carries the !> signature");
+        // fabric behavior: causal nodes interned, energized, and useful.
+        // The probe sentences must MATCH the learned causal pairs — a pair
+        // node exists only when learn and decide share the (stemmed cause,
+        // connective, stemmed effect) triple.
+        si::roles::causal_lanes_enabled() = true;
+        si::roles::typed_lanes_enabled() = true;
+        syfox::Engine ce;
+        ce.set_defer_margin(0);
+        const char* learn_a = "the account was overcharged so the agent issued a refund";
+        ce.learn_example(learn_a, "", "refund outcome");
+        ce.learn_example("the card was billed twice so the agent returned the money", "", "refund outcome");
+        ce.learn_example("the pipe burst so the technician shut the water main", "", "shutoff outcome");
+        ce.learn_example("the fuse blew so the electrician replaced the fuse", "", "shutoff outcome");
+        auto lp = si::roles::causal_pairs_of(si::norm::normalize(learn_a));
+        bool has_causal = false;
+        for (const auto& p : lp) if (ce.substrate().has(p)) has_causal = true;
+        CHECK(has_causal, "causal pair nodes interned at learn");
+        syfox::Usage uc;
+        auto ac = ce.decide("the customer was overcharged so the agent called back", q, uc);
+        CHECK(uc.causal_tokens > 0, "causal nodes energized at decide");
+        (void)ac;
+        // replay contract: a causal-off fabric is a no-op with the flag on
+        si::roles::causal_lanes_enabled() = false;
+        si::roles::typed_lanes_enabled() = false;
+        syfox::Engine be;
+        be.set_defer_margin(0);
+        be.learn_example("the account was overcharged so the agent issued a refund", "", "refund outcome");
+        be.learn_example("the pipe burst so the technician shut the water main", "", "shutoff outcome");
+        bool bag_has_causal = false;
+        for (const auto& p : cp) if (be.substrate().has(p)) bag_has_causal = true;
+        CHECK(!bag_has_causal, "causal-off fabric interned no causal nodes");
+        syfox::Usage uo1, uo2;
+        si::roles::causal_lanes_enabled() = false;
+        auto ao1 = be.decide("the account was overcharged so the agent issued a refund", q, uo1);
+        si::roles::causal_lanes_enabled() = true;
+        auto ao2 = be.decide("the account was overcharged so the agent issued a refund", q, uo2);
+        CHECK(ao1[0].choice == ao2[0].choice && uo1.settled_energy == uo2.settled_energy,
+              "causal injection is a no-op on fabrics without causal nodes");
+        si::roles::causal_lanes_enabled() = false;
+    }
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -2235,6 +2421,7 @@ int main() {
     test_pretrain();
     test_typed_lanes();
     test_tools_registry();
+    test_thinking();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

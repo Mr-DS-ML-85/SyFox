@@ -38,7 +38,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.7.0";
+inline const char* VERSION = "3.8.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -64,6 +64,9 @@ inline constexpr float kBigramDose = 0.5f;
 // dose (same grounding argument as the bigrams; role evidence is another
 // subordinate channel, not the headline).
 inline constexpr float kTypedDose = 0.5f;
+// v3.8.0 (TASK 3): decide-side CAUSAL pair injection dose as a fraction of
+// the state dose (same pattern as the bigram and typed doses).
+inline constexpr float kCausalDose = 0.5f;
 // v3.7.0 (Move 2): pretrain error-weighting cap. The masked-basin loss is
 // in (0,1]; a lane that failed to light its basin binds at up to full
 // Hebbian strength, a basin that already wins binds at the residual.
@@ -157,6 +160,27 @@ struct Usage {
     std::string tool_name;
     std::string tool_expression;
     std::string tool_value;
+    // v3.8.0 TASK 4 (EBT lineage) — energy self-verification, ALWAYS disclosed:
+    // the settle's own convergence trace. motion_rate is the last pass's
+    // relative energy movement (decay baseline ~0.18; structure still
+    // travelling shows above it). The OPT-IN self-verify gate defers choice
+    // answers measured on a still-moving field.
+    bool  field_converged = false;   // true when the eps break fired
+    float field_motion_rate = 0.0f;  // last-pass relative motion
+    int   field_passes = 0;          // settle passes executed
+    // v3.8.0 TASK 1 (Thinking-Without-Tokens lineage) — adaptive depth:
+    // difficulty estimated from the state (unknown-token fraction + lane
+    // isolation), settle depth k = base + round(difficulty * max_extra).
+    // Both disclosed; the physics per pass is byte-identical.
+    bool  adaptive_depth = false;
+    float difficulty = 0.0f;
+    int   k_used = 0;
+    int   k_base = 0;
+    // v3.8.0 TASK 2 (CSM lineage) — multi-vector spectral channels:
+    bool  multi_vector_active = false;
+    int   multi_vector_channels = 0;
+    // v3.8.0 TASK 3 — causal pair nodes the state energized:
+    std::size_t causal_tokens = 0;
 };
 
 struct Calibration {
@@ -189,7 +213,7 @@ struct Calibration {
 // ---------------------------------------------------------------------------
 class Engine {
 public:
-    explicit Engine(si::SubstrateConfig cfg = {}) : si_(cfg) {}
+    explicit Engine(si::SubstrateConfig cfg = {}) : si_(cfg), adaptive_base_k_(cfg.k_settle) {}
 
     si::Substrate& substrate() { return si_; }
     const si::Substrate& substrate() const { return si_; }
@@ -320,6 +344,28 @@ public:
     // defers choice answers whose real margin was not earned by structure.
     void set_perturb_check(bool on) { perturb_on_ = on; }
     bool perturb_check_on() const { return perturb_on_; }
+    // v3.8.0 TASK 1 — adaptive depth (default off = bit-identical replay):
+    // harder states get more settle passes. k_used = k_settle(base) +
+    // round(difficulty * max_extra), difficulty in [0,1] from the state's
+    // unknown-token fraction and lane isolation, both measured on the fabric
+    // BEFORE the settle. Deterministic per state; harvest_rows mirrors the
+    // rule so the calibration fit sees the same depth as the decision.
+    void set_adaptive_depth(bool on) { adaptive_depth_on_ = on; }
+    bool adaptive_depth_on() const { return adaptive_depth_on_; }
+    void set_adaptive_max_k(int k) { adaptive_max_k_ = std::max(0, k); }
+    // v3.8.0 TASK 4 — self-verification gate (default off): when the field
+    // was still MOVING above the floor on its final pass (motion_rate >
+    // floor), a choice answer defers with reason "unconverged_field" — the
+    // readout measured a transient, not an attractor.
+    void set_self_verify(bool on) { self_verify_on_ = on; }
+    bool self_verify_on() const { return self_verify_on_; }
+    void set_self_verify_floor(float f) { self_verify_floor_ = std::max(0.0f, f); }
+    // v3.8.0 TASK 2 — multi-vector spectral channels (default off)
+    void set_multi_vector(bool on, int k) {
+        multi_vector_on_ = on;
+        multi_vector_k_ = std::max(1, std::min(64, k));
+    }
+    bool multi_vector_on() const { return multi_vector_on_; }
 
     // v3.7.0 (Move 1) — dense distributional field at save time (distvec.hpp).
     // Default OFF: the PPMI+SVD build is a once-per-save fabric construction
@@ -568,6 +614,15 @@ public:
                 if (!(augment && si_.has(tp))) si_.intern(tp);
                 state_full.push_back(tp);
             }
+        // v3.8.0 (TASK 3): widen with CAUSAL pair nodes — cause?>effect and
+        // means!>goal signatures from the deterministic connective scan.
+        // Same intern/df/bind pipeline as the typed pairs; fabrics learned
+        // with causal lanes off contain none (replay no-op).
+        if (si::roles::causal_lanes_enabled())
+            for (const auto& cp : si::roles::causal_pairs_of(words)) {
+                if (!(augment && si_.has(cp))) si_.intern(cp);
+                state_full.push_back(cp);
+            }
         {
             std::unordered_set<std::string> df_seen;
             for (const auto& w : words)
@@ -578,6 +633,9 @@ public:
             if (si::roles::typed_lanes_enabled())
                 for (const auto& tp : si::roles::typed_pairs_of(words))
                     if (df_seen.insert(tp).second && si_.has(tp)) si_.note_df(si_.find(tp));
+            if (si::roles::causal_lanes_enabled())
+                for (const auto& cp : si::roles::causal_pairs_of(words))
+                    if (df_seen.insert(cp).second && si_.has(cp)) si_.note_df(si_.find(cp));
         }
         si_.hebbian_lesson(state_full, outcome, eta);
         // v3.2 Stage 2: context-signature accumulation on the state->outcome
@@ -775,6 +833,12 @@ public:
                 if (!(augment && si_.has(tp))) si_.intern(tp);
                 state_full.push_back(tp);
             }
+        // v3.8.0 (TASK 3): causal pair widening, mirrored from learn_example.
+        if (si::roles::causal_lanes_enabled())
+            for (const auto& cp : si::roles::causal_pairs_of(words)) {
+                if (!(augment && si_.has(cp))) si_.intern(cp);
+                state_full.push_back(cp);
+            }
         {
             std::unordered_set<std::string> df_seen;
             for (const auto& w : words)
@@ -785,6 +849,9 @@ public:
             if (si::roles::typed_lanes_enabled())
                 for (const auto& tp : si::roles::typed_pairs_of(words))
                     if (df_seen.insert(tp).second && si_.has(tp)) si_.note_df(si_.find(tp));
+            if (si::roles::causal_lanes_enabled())
+                for (const auto& cp : si::roles::causal_pairs_of(words))
+                    if (df_seen.insert(cp).second && si_.has(cp)) si_.note_df(si_.find(cp));
         }
         if (y) {
             si_.hebbian_lesson(state_full, instr, 2.0f * eta);   // supporting evidence binds hard
@@ -815,6 +882,116 @@ public:
         if (present == 0 || sum_sqrt <= 0.0) return si_.config().inject_energy;
         return si_.config().inject_energy
              * static_cast<float>(sum_sqrt / present);
+    }
+
+    // v3.8.0 (TASK 1) — problem difficulty from the state, BEFORE any settle.
+    // Two measured proxies, equally weighted, clamped to [0,1]:
+    //   unknown_frac — fraction of state tokens the fabric has never seen
+    //                  (the OOD axis: dark nodes defer for a reason);
+    //   isolated_frac — fraction of KNOWN tokens with zero lanes (the state
+    //                  exists in the fabric but has no structure to travel:
+    //                  energy cannot diffuse, more passes add nothing until
+    //                  the lanes are found — the multi-hop walk pays here).
+    // Deterministic per (state, fabric); the same number drives decide() and
+    // harvest_rows() so the fit and the decision share one depth.
+    float state_difficulty(const std::vector<std::string>& words) const {
+        if (words.empty()) return 1.0f;
+        int present = 0, isolated = 0;
+        for (const auto& w : words) {
+            if (!si_.has(w)) continue;
+            ++present;
+            if (si_.readout_neighbours(si_.find(w)) == 0) ++isolated;
+        }
+        const float unknown_frac = 1.0f - static_cast<float>(present)
+                                       / static_cast<float>(words.size());
+        const float isolated_frac = present > 0
+            ? static_cast<float>(isolated) / static_cast<float>(present) : 1.0f;
+        float d = 0.5f * (unknown_frac + isolated_frac);
+        return std::min(1.0f, std::max(0.0f, d));
+    }
+
+    // v3.8.0 (TASK 1) — the ONE adaptive-depth rule shared by decide() and
+    // harvest_rows() (the v3.2.1 fit==decide lesson). Returns k_used and
+    // writes the difficulty. With the flag off this is the untouched base.
+    int apply_adaptive_depth(const std::vector<std::string>& words,
+                             float* difficulty_out) {
+        // base is fixed at CONSTRUCTION: si_.set_k_settle() below mutates the
+        // substrate config, and re-reading it here would ratchet the depth
+        // up one decide() at a time (the second call would treat the last
+        // k_used as the new base).
+        const int base = adaptive_base_k_;
+        si_.set_k_settle(base);
+        if (!adaptive_depth_on_) {
+            if (difficulty_out) *difficulty_out = state_difficulty(words);
+            return base;
+        }
+        const float d = state_difficulty(words);
+        if (difficulty_out) *difficulty_out = d;
+        const int extra = static_cast<int>(std::lround(
+            static_cast<double>(d) * static_cast<double>(adaptive_max_k_)));
+        const int k_used = base + extra;
+        si_.set_k_settle(k_used);
+        return k_used;
+    }
+
+    // v3.8.0 (TASK 2) — multi-vector state: settle the SAME injection under
+    // K spectral channel gates and SUPERPOSE (mean) the settled fields.
+    // Used by decide() and harvest_rows() (the fit/decide parity lesson).
+    // Requires a --distvec fabric (the gates are its leading spectral axes);
+    // otherwise an honest no-op (disclosed in usage when available).
+    bool apply_multi_vector(const std::vector<std::string>& words, Usage* usage) {
+        if (!multi_vector_on_) return false;
+        if (!si_.has_distvecs() || si_.dist_dims() < multi_vector_k_) return false;
+        const int D = si_.dist_dims();
+        const std::vector<float>& vecs = si_.distvecs();
+        const std::size_t n = si_.node_count();
+        std::vector<float> field_sum(n, 0.0f);
+        int channels = 0;
+        for (int c = 0; c < multi_vector_k_; ++c) {
+            std::vector<float> coords(n);
+            float mx = 0.0f;
+            for (std::size_t i = 0; i < n; ++i) {
+                const float v = vecs[i * D + c];
+                coords[i] = v;
+                mx = std::max(mx, std::fabs(v));
+            }
+            if (mx <= 0.0f) continue;                     // dead axis: skip
+            si_.set_channel_gate(std::move(coords), 0.5f * mx);
+            si_.reset_field();
+            si_.inject(words, state_dose(words));
+            if (si::norm::bigrams_enabled() && words.size() >= 2) {
+                std::vector<std::string> bgs;
+                for (const auto& bg : si::norm::bigrams_of(words))
+                    if (si_.has(bg)) bgs.push_back(bg);
+                if (!bgs.empty()) si_.inject(bgs, state_dose(words) * kBigramDose);
+            }
+            if (si::roles::typed_lanes_enabled() && words.size() >= 2) {
+                std::vector<std::string> tps;
+                for (const auto& tp : si::roles::typed_pairs_of(words))
+                    if (si_.has(tp)) tps.push_back(tp);
+                if (!tps.empty()) si_.inject(tps, state_dose(words) * kTypedDose);
+            }
+            if (si::roles::causal_lanes_enabled() && words.size() >= 3) {
+                std::vector<std::string> cps;
+                for (const auto& cp : si::roles::causal_pairs_of(words))
+                    if (si_.has(cp)) cps.push_back(cp);
+                if (!cps.empty()) si_.inject(cps, state_dose(words) * kCausalDose);
+            }
+            si_.settle();
+            for (std::size_t i = 0; i < n; ++i)
+                field_sum[i] += si_.node_energy(static_cast<si::NodeId>(i));
+            ++channels;
+            si_.clear_channel_gate();
+        }
+        if (channels == 0) return false;
+        const float inv = 1.0f / static_cast<float>(channels);
+        for (std::size_t i = 0; i < n; ++i) field_sum[i] *= inv;
+        si_.restore_field(field_sum);
+        if (usage) {
+            usage->multi_vector_active = true;
+            usage->multi_vector_channels = channels;
+        }
+        return true;
     }
 
     // -- DECISION ----------------------------------------------------------------
@@ -864,6 +1041,14 @@ public:
         std::vector<Answer> answers;
         const std::vector<std::string> words = si::norm::normalize(state);
         usage.state_tokens = words.size();
+
+        // v3.8.0 (TASK 1) adaptive depth: measure the problem BEFORE any
+        // settle; when the flag is on, harder states get more passes.
+        // Disclosure lands in usage either way; with the flag off the base
+        // k_settle is untouched (bit-identical replay).
+        usage.adaptive_depth = adaptive_depth_on_;
+        usage.k_base = si_.config().k_settle;
+        usage.k_used = apply_adaptive_depth(words, &usage.difficulty);
 
         // v3.7.0 (Move 4) — generalized tool scope: the field's job stops at a
         // relevance heuristic; a detected computation is handed to the VERIFIED
@@ -955,6 +1140,18 @@ public:
             if (!tps.empty()) si_.inject(tps, state_dose(words) * kTypedDose);
         }
         usage.typed_tokens = typed_hits;
+        // v3.8.0 (TASK 3): inject the state's CAUSAL pair nodes the fabric
+        // actually carries. Fabrics learned with causal lanes off contain no
+        // ?> / !> nodes -> has() filters everything -> no-op (replay).
+        std::size_t causal_hits = 0;
+        if (si::roles::causal_lanes_enabled() && words.size() >= 3) {
+            std::vector<std::string> cps;
+            for (const auto& cp : si::roles::causal_pairs_of(words))
+                if (si_.has(cp)) cps.push_back(cp);
+            causal_hits = cps.size();
+            if (!cps.empty()) si_.inject(cps, state_dose(words) * kCausalDose);
+        }
+        usage.causal_tokens = causal_hits;
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
             for (const auto& w : words)
@@ -965,6 +1162,18 @@ public:
             usage.state_tokens += bridges.size();
         }
         si_.settle();
+        // v3.8.0 (TASK 4): capture the MAIN settle's self-verification trace
+        // before any second settle (perturb check) can overwrite it.
+        {
+            const auto& tr = si_.last_settle_trace();
+            usage.field_passes = tr.passes;
+            usage.field_converged = tr.eps_break;
+            usage.field_motion_rate = tr.motion_rate();
+        }
+        // v3.8.0 (TASK 2): multi-vector state — settle the same injection
+        // under K spectral channel gates and superpose the settled fields.
+        // No-op (honestly disclosed) on fabrics without a distvec field.
+        apply_multi_vector(words, &usage);
         // v3.4 question-context gating, STAGE 2: compose the settled state
         // field with the settled question field,
         // e = (1-alpha)*state + alpha*context (alpha default 0.5). The field
@@ -1031,6 +1240,13 @@ public:
                         if (si_.has(tp)) ptps.push_back(tp);
                     if (!ptps.empty()) si_.inject(ptps, state_dose(pw) * kTypedDose);
                 }
+                // v3.8.0 (TASK 3): causal pairs of the broken stream, mirrored.
+                if (si::roles::causal_lanes_enabled()) {
+                    std::vector<std::string> pcps;
+                    for (const auto& cp : si::roles::causal_pairs_of(pw))
+                        if (si_.has(cp)) pcps.push_back(cp);
+                    if (!pcps.empty()) si_.inject(pcps, state_dose(pw) * kCausalDose);
+                }
                 si_.settle();
                 const auto pert_m = margins(*first_choice);
                 si_.restore_field(saved);                        // measure what decide() measured
@@ -1069,6 +1285,14 @@ public:
                 a.deferred = true;
                 a.reason = "perturbation_tie";
             }
+            // v3.8.0 (TASK 4): self-verification — a choice answer measured on
+            // a field that was STILL MOVING above the floor is a transient,
+            // not an attractor reading. Opt-in; disclose always.
+            if (a.type == "choice" && !a.deferred && self_verify_on_
+                && usage.field_motion_rate > self_verify_floor_) {
+                a.deferred = true;
+                a.reason = "unconverged_field";
+            }
             answers.push_back(a);
         }
         return answers;
@@ -1086,6 +1310,9 @@ public:
             // without memories this is a bare reset, the pre-3.2 behavior.
             const std::vector<std::string> hw0 = si::norm::normalize(state);
             prime_field(hw0, nullptr);
+            // v3.8.0 (TASK 1) fit/decide parity: the calibration fit must see
+            // the SAME adaptive depth the decision will use.
+            apply_adaptive_depth(hw0, nullptr);
             {
                 si_.inject(hw0, state_dose(hw0));         // gained dose (Milestone-1)
             }
@@ -1106,6 +1333,13 @@ public:
                     if (si_.has(tp)) htps.push_back(tp);
                 if (!htps.empty()) si_.inject(htps, state_dose(hw0) * kTypedDose);
             }
+            // v3.8.0 (TASK 3): causal pair injection mirrored from decide().
+            if (si::roles::causal_lanes_enabled() && hw0.size() >= 3) {
+                std::vector<std::string> hcps;
+                for (const auto& cp : si::roles::causal_pairs_of(hw0))
+                    if (si_.has(cp)) hcps.push_back(cp);
+                if (!hcps.empty()) si_.inject(hcps, state_dose(hw0) * kCausalDose);
+            }
             if (si::norm::grams_enabled()) {
                 const std::vector<std::string> words2 = si::norm::normalize(state);
                 std::vector<std::string> bridges;
@@ -1116,6 +1350,9 @@ public:
                 si_.inject(bridges, kBridgeEnergy);
             }
             si_.settle();
+            // v3.8.0 (TASK 2) fit/decide parity: the fit sees the same
+            // multi-vector superposition the decision sees.
+            apply_multi_vector(hw0, nullptr);
             if (si_.silent()) continue;
             for (const auto& qkv : qs.obj) {
                 const sfx::JV& q = qkv.second;
@@ -1745,6 +1982,18 @@ private:
     bool distvec_on_ = false;         // v3.7.0 Move 1: PPMI+SVD resonance edges at save (default OFF)
     bool distvec_dirty_ = true;       // fabric moved since the last distvec build
     long distvec_dims_ = 0;           // v3.7.0: embedding width override (0 = default 300)
+    // v3.8.0 TASK 1 + TASK 4: adaptive settle depth and self-verification
+    bool  adaptive_depth_on_ = false;
+    int   adaptive_max_k_ = 8;        // extra passes at difficulty 1.0
+    int   adaptive_base_k_;           // fixed at construction (ratchet guard)
+    bool  self_verify_on_ = false;
+    // Default floor measured on the v3.8 bench fabrics: a SETTLED field's
+    // final-pass motion_rate reads 0.189-0.212 across tickets/game/guard
+    // (the ~0.18 decay baseline + residual structure). 0.25 sits ~0.04 above
+    // the worst settled baseline; fields still routing energy read higher.
+    float self_verify_floor_ = 0.25f;
+    bool  multi_vector_on_ = false;   // v3.8.0 TASK 2 (default OFF)
+    int   multi_vector_k_ = 8;        // channel count
     bool tools_check_on_ = false;     // v3.7.0 Move 4: decide-time tool disclosure (default OFF)
     // Milestone-3 audit state
     std::string context_ = "default";

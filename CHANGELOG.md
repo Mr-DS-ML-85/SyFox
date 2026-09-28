@@ -1,3 +1,46 @@
+## v3.8.0 — physics-native thinking (no token prediction, no ML, physics frozen)
+
+Four opt-in mechanisms + the v3.7.1 scaling fix. Spec: deepen the field's
+thinking without token prediction; SI core untouched; bit-identical replay on
+default flags (bench verified against the v3.7 record).
+
+- v3.7.1 DISTVEC SCALING FIX: measured O(n^1.9) build (76 s @ 5,595 nodes,
+  156 s @ 7,985, ~15 h extrapolated @ 94,773) root-caused to the exact
+  neighbour scan (O(n^2*k), cap 8000 -> 2000), strided row-major MGS with
+  ~840k OpenMP regions per call (-> column-major blocked BCGS2), and the
+  subspace/Ritz kernels (-> contiguous cm passes, cached init hashes).
+  Measured: 17.1 -> 7.2 s @ 5,107 nodes; 95.4 s @ 40,850; ~15 h -> ~5 min
+  extrapolated at the generalist size. Determinism md5-verified.
+- TASK 1 ADAPTIVE DEPTH (`--adaptive-depth`, `--adaptive-max-k`): difficulty
+  = unknown-token fraction + lane isolation, k = base + round(d*max_extra)
+  (8..16 defaults), deterministic, ratchet-guarded, mirrored in
+  harvest_rows; disclosed as difficulty/k_settle_used/k_settle_base.
+- TASK 2 MULTI-VECTOR (`--multi-vector`, `--multi-vector-k`): K=8 spectral
+  channel gates from the distvec axes (lane flow scaled by
+  exp(-(u_k(a)-u_k(b))^2/2s^2)), frozen physics per channel, readout on the
+  mean superposed field; honest no-op without --distvec; dead axes skipped.
+- TASK 3 CAUSAL SIGNATURES (`--causal-lanes`): cause?>effect and
+  means!>goal pair nodes from a deterministic connective scan (stemmed
+  forms), interned/df-noted/bound like the bigrams, injected in
+  decide/harvest/perturb at kCausalDose=0.5; replay no-op on old fabrics.
+- TASK 4 ENERGY SELF-VERIFICATION: settle trace (passes, final/initial
+  energy, relative motion rate) always in the decide usage; opt-in
+  `--self-verify` defers choice answers measured on fields still moving
+  above the floor (default 0.25, measured settled baseline 0.189-0.212),
+  reason `unconverged_field`.
+- TESTS: test_thinking group (adaptive depth incl. ratchet guard,
+  self-verify gate both sides, multi-vector no-op/determinism/effect,
+  causal emission directions + fabric interning + replay both ways); full
+  suite green; readout-silence ALL PASS; jas-test ALL PASS; bench
+  bit-identical (tickets 1.000/1.000 defer 0.063, game defer 0.333, guard
+  0.778, OOD defer 1.0 x3, deterministic x3).
+- MEASURED: think30 suite (`make think30` -> data/think30_tables.json) —
+  30 tests, 6 categories x 5: baseline 0.467 (14/30) -> thinking flags
+  0.600 (18/30) -> +multi-vector 0.633 (19/30). Honesty category 0/5 ->
+  5/5 (noise answers on near-vocabulary OOD states now defer); chains
+  0/5 -> 3/5. Causal categories showed no additional delta at demo scale
+  (bigram lanes already carry the signal; disclosed honestly).
+
 ## v3.6.0 — the fabric-construction papers land + the JEV head-to-head
 
 Implements the top of v3.5's paper port order on the v3.5.0 tree (settle

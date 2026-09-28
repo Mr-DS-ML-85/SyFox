@@ -110,6 +110,16 @@ struct Args {
     bool distvec = false;            // --distvec: PPMI+SVD resonance edges at save (learn/pretrain)
     bool tools_check = false;        // decide --tools: disclose the oracle derivation in usage
     long distvec_dims = 0;           // --distvec-dims K (0 = default 300)
+    // v3.8.0 physics-native thinking (no token prediction, no ML):
+    // TASK 1 adaptive depth, TASK 4 energy self-verification, TASK 2
+    // multi-vector spectral channels, TASK 3 causal WHAT/WHY/HOW lanes
+    bool adaptive_depth = false;     // --adaptive-depth: difficulty-scaled k_settle
+    long adaptive_max_k = 8;         // --adaptive-max-k K (extra passes at difficulty 1.0)
+    bool self_verify = false;        // --self-verify: defer on still-moving field
+    float self_verify_floor = 0;     // --self-verify-floor F (0 = engine default 0.02)
+    bool multi_vector = false;       // --multi-vector: K=8 spectral energy channels
+    long multi_vector_k = 8;         // --multi-vector-k K (channel count, default 8)
+    int causal_lanes_mode = 0;       // --causal-lanes on|off: 1/-1 explicit; 0 = default OFF
 };
 
 // v3.2.1 — BUG #1 disclosure: a kill switch on a model that lacks the
@@ -212,6 +222,17 @@ void apply_modes(syfox::Engine& eng, const Args& a) {
     if (a.ctx_alpha > 0) eng.set_ctx_alpha(a.ctx_alpha);
     // v3.6.0 BED §8 perturbation-contrast check (opt-in; default OFF)
     if (a.perturb_check) eng.set_perturb_check(true);
+    // v3.8.0 TASK 1 adaptive depth (opt-in; default OFF = bit-identical)
+    if (a.adaptive_depth) eng.set_adaptive_depth(true);
+    if (a.adaptive_max_k >= 0 && a.adaptive_max_k != 8) eng.set_adaptive_max_k(static_cast<int>(a.adaptive_max_k));
+    // v3.8.0 TASK 4 self-verification (opt-in; disclosure is always on)
+    if (a.self_verify) eng.set_self_verify(true);
+    if (a.self_verify_floor > 0) eng.set_self_verify_floor(a.self_verify_floor);
+    // v3.8.0 TASK 2 multi-vector spectral channels (opt-in; default OFF)
+    if (a.multi_vector) eng.set_multi_vector(true, static_cast<int>(a.multi_vector_k));
+    // v3.8.0 TASK 3 causal WHAT/WHY/HOW lanes (--causal-lanes on|off)
+    if (a.causal_lanes_mode != 0)
+        si::roles::causal_lanes_enabled() = (a.causal_lanes_mode == 1);
     // v3.6.0 ordered bigram lanes (--bigrams on|off; default ON — decide-side
     // injection is a no-op on fabrics without bigram nodes)
     if (a.bigrams_mode != 0)
@@ -319,6 +340,10 @@ void cmd_learn(const Args& a) {
     // (a seed lexicon is not yet a general grammar).
     if (a.typed_lanes_mode != 0)
         si::roles::typed_lanes_enabled() = (a.typed_lanes_mode == 1);
+    // v3.8.0 causal WHAT/WHY/HOW lanes: explicit --causal-lanes wins; default
+    // OFF (a connective table is a seed lexicon, disclosed as such).
+    if (a.causal_lanes_mode != 0)
+        si::roles::causal_lanes_enabled() = (a.causal_lanes_mode == 1);
     // Milestone-1 firewall: hidden/calibration splits never teach the fabric.
     if (!syfox::firewall::learn_may_read(a.examples)) {
         std::cerr << "syfox: firewall: " << a.examples << " is a "
@@ -588,6 +613,25 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
         usage["perturb_margin_real"] = std::round(u.perturb_margin_real * 1000.0f) / 1000.0f;
         usage["perturb_margin_broken"] = std::round(u.perturb_margin_broken * 1000.0f) / 1000.0f;
     }
+    // v3.8.0 TASK 4: energy self-verification — always disclosed
+    usage["settle_passes"] = static_cast<double>(u.field_passes);
+    usage["field_converged"] = sfx::JV(u.field_converged);
+    usage["field_motion_rate"] = std::round(u.field_motion_rate * 10000.0f) / 10000.0f;
+    // v3.8.0 TASK 1: adaptive depth disclosure
+    if (u.adaptive_depth) {
+        usage["adaptive_depth"] = sfx::JV(true);
+        usage["difficulty"] = std::round(u.difficulty * 1000.0f) / 1000.0f;
+        usage["k_settle_used"] = static_cast<double>(u.k_used);
+        usage["k_settle_base"] = static_cast<double>(u.k_base);
+    }
+    // v3.8.0 TASK 2: multi-vector disclosure
+    if (u.multi_vector_active) {
+        usage["multi_vector"] = sfx::JV(true);
+        usage["multi_vector_channels"] = static_cast<double>(u.multi_vector_channels);
+    }
+    // v3.8.0 TASK 3: causal lanes energized
+    if (u.causal_tokens > 0)
+        usage["causal_tokens"] = static_cast<double>(u.causal_tokens);
     return sfx::JV(sfx::JVObj{{"answers", sfx::JV(out)}, {"usage", sfx::JV(usage)}});
 }
 
@@ -1830,6 +1874,20 @@ int main(int argc, char** argv) {
             else usage_exit();
         }
         else if (k == "--perturb-check") a.perturb_check = true;
+        // v3.8.0 physics-native thinking flags
+        else if (k == "--adaptive-depth") a.adaptive_depth = true;
+        else if (k == "--adaptive-max-k") { if (i + 1 >= argc) usage_exit(); a.adaptive_max_k = std::strtol(argv[++i], nullptr, 10); if (a.adaptive_max_k < 0 || a.adaptive_max_k > 64) usage_exit(); }
+        else if (k == "--self-verify") a.self_verify = true;
+        else if (k == "--self-verify-floor") { if (i + 1 >= argc) usage_exit(); a.self_verify_floor = std::strtof(argv[++i], nullptr); if (a.self_verify_floor < 0 || a.self_verify_floor > 1) usage_exit(); }
+        else if (k == "--multi-vector") a.multi_vector = true;
+        else if (k == "--multi-vector-k") { if (i + 1 >= argc) usage_exit(); a.multi_vector_k = std::strtol(argv[++i], nullptr, 10); if (a.multi_vector_k < 1 || a.multi_vector_k > 64) usage_exit(); }
+        else if (k == "--causal-lanes") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.causal_lanes_mode = 1;
+            else if (v == "off") a.causal_lanes_mode = -1;
+            else usage_exit();
+        }
         else if (k == "--evidence") a.evidence = true;
         else if (k == "--adversarial") a.adversarial = true;
         else if (k == "--mix") { if (i + 1 >= argc) usage_exit(); a.mix = argv[++i]; }

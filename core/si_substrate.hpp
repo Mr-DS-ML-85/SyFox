@@ -299,6 +299,61 @@ public:
     // miller_window is on; otherwise always config().source_cap)
     float last_source_cap() const { return last_cap_; }
 
+    // -- v3.8.0 (TASK 4) ENERGY SELF-VERIFICATION: the settle's own trace -----
+    // EBT lineage, physics-native: a decision's confidence has a THIRD
+    // measurement besides margin and calibration — whether the field had
+    // finished MOVING when the readout looked at it. Every pass the energy
+    // does two things: it DECAYS (uniform, 0.82 baseline — dissipates but
+    // moves nothing between nodes) and it DIFFUSES (routes energy along
+    // lanes — the actual computation). The trace records, for the last pass
+    // executed:
+    //   motion_rate — sum_i |e_new[i] - e_old[i]| / sum_i e_old[i]. The
+    //                 decay baseline contributes ~0.18 of this; anything
+    //                 measurably above is still-travelling structure.
+    //   passes      — passes executed (== k_settle unless the eps break hit).
+    // The eps break itself (dissipated < 1e-4) almost never fires under
+    // decay-dominated dissipation, so motion_rate is the honest "did it
+    // converge" signal; passes and both energies are disclosed for context.
+    struct SettleTrace {
+        int   passes = 0;
+        int   k_requested = 0;
+        float initial_energy = 0.0f;
+        float final_energy = 0.0f;
+        float motion_sum = 0.0f;      // last-pass sum |e_new - e_old|
+        float motion_base = 0.0f;     // last-pass sum e_old (rate denominator)
+        bool  eps_break = false;      // broke early via the eps relaxation
+        float motion_rate() const {
+            return motion_base > 0.0f ? motion_sum / motion_base : 0.0f;
+        }
+    };
+    const SettleTrace& last_settle_trace() const { return last_trace_; }
+
+    // v3.8.0 (TASK 1) adaptive depth: k_settle is an existing CONFIG knob
+    // ("max settle passes"), not a physics equation — adapting it per
+    // decision scales THINKING DEPTH with problem difficulty while the
+    // settle equations stay byte-identical. The Engine computes the
+    // difficulty and sets the depth before each settle.
+    void set_k_settle(int k) { cfg_.k_settle = std::max(1, k); }
+
+    // -- v3.8.0 (TASK 2) SPECTRAL CHANNEL GATE --------------------------------
+    // Multi-vector state: the SAME fabric settled under K different
+    // lane-flow gates, one per leading distvec spectral axis. The gate for
+    // lane (a,b) in channel k is exp(-(u_k(a)-u_k(b))^2 / (2 sigma_k^2)) —
+    // lanes between nodes with similar k-th spectral coordinate carry full
+    // flow, lanes between spectrally distant nodes are damped. Each channel
+    // is one VIEW of the same Hebbian graph (same physics, same decay 0.82
+    // / diffusion 0.45, energy conserved per pass exactly as always); the
+    // readout superposes the K settled fields (mean). Requires a --distvec
+    // fabric (the gates are its spectral coordinates); the gate multiplies
+    // the context factor inside lane_flow_factor, and when INACTIVE the
+    // factor math is bit-identical to v3.7.
+    void set_channel_gate(std::vector<float> coords, float sigma) {
+        channel_coords_ = std::move(coords);
+        channel_sigma_ = sigma > 0.0f ? sigma : 1.0f;
+    }
+    void clear_channel_gate() { channel_coords_.clear(); channel_sigma_ = 0.0f; }
+    bool channel_gate_active() const { return !channel_coords_.empty(); }
+
     // -- SETTLE ---------------------------------------------------------------
     // One pass = dissipative diffusion along lanes + source gating.
     // Energy is CONSERVED per pass up to decay: each node retains
@@ -314,6 +369,8 @@ public:
     void settle() {
         std::vector<float> next(nodes_.size(), 0.0f);
         std::vector<std::size_t> active;
+        last_trace_ = SettleTrace{};
+        last_trace_.k_requested = cfg_.k_settle;
 
         // M5: build/refresh the CSR mirror if the fabric moved. The build is
         // order-preserving (per-source vector copied verbatim), so switching
@@ -353,6 +410,7 @@ public:
         for (int pass = 0; pass < cfg_.k_settle; ++pass) {
             float total_before = 0.0f;
             for (const auto& nd : nodes_) total_before += nd.energy;
+            if (pass == 0) last_trace_.initial_energy = total_before;
             if (total_before <= 0.0f) return;             // nothing to settle
 
             std::fill(next.begin(), next.end(), 0.0f);
@@ -394,13 +452,15 @@ public:
                     if (!is_source[i]) { scatter[i] += nd.energy * cfg_.decay; continue; }  // gated: decay only
                     const std::size_t b = csr_off_[i], e = csr_off_[i + 1];
                     float out_w = 0.0f;
-                    if (sem_active() && !lane_ctx_.empty()) {
+                    if (sem_active() && (!lane_ctx_.empty() || channel_gate_active())) {
                         // v3.2 Stage 2: context-sensitive lanes — each lane's
                         // EFFECTIVE weight is w * factor(f). The node's total
                         // outflow scales by (sum w*f / sum w): damped lanes
                         // carry less, the energy stays home. All factors 1.0
                         // reproduces the plain path bit-for-bit (same float
                         // sum order, 1.0f multiplies are exact).
+                        // v3.8.0 TASK 2: the branch also runs when ONLY the
+                        // spectral channel gate is active (no lane contexts).
                         float raw_w = 0.0f, eff_w = 0.0f;
                         for (std::size_t k = b; k < e; ++k) {
                             const float f = lane_flow_factor(i, csr_dst_[k]);
@@ -466,6 +526,16 @@ public:
             // pass. Updated before the energies are committed, so the next
             // pass's source ranking sees it. Element-wise (no accumulation):
             // parallel-safe without touching the determinism contract.
+            // v3.8.0 TASK 4: the SAME pre-commit ΔE accumulates (serially,
+            // after the parallel salience pass) into the settle trace —
+            // relative motion of the field this pass. Must read BEFORE the
+            // commit, where next and energy still differ.
+            {
+                float motion = 0.0f;
+                for (std::size_t i = 0; i < n; ++i)
+                    motion += std::fabs(next[i] - nodes_[i].energy);
+                last_trace_.motion_sum = motion;
+            }
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) if (nthreads > 1)
 #endif
@@ -484,7 +554,13 @@ public:
 
             float total_after = 0.0f;
             for (const auto& nd : nodes_) total_after += nd.energy;
-            if (total_before - total_after < cfg_.eps) break;  // relaxed
+            last_trace_.passes = pass + 1;
+            last_trace_.motion_base = total_before;
+            last_trace_.final_energy = total_after;
+            if (total_before - total_after < cfg_.eps) {
+                last_trace_.eps_break = true;
+                break;  // relaxed
+            }
         }
     }
 
@@ -1360,6 +1436,10 @@ private:
     int  hop_depth_ = 1;                               // v3.4 readout walk depth (1 = legacy)
     std::uint64_t state_hash_ = 0;   // decision fingerprint for Miller sampling
     float last_cap_ = 0.0f;          // cap used by the last settle()
+    SettleTrace last_trace_;         // v3.8.0 TASK 4: settle self-verification trace
+    // v3.8.0 TASK 2: spectral channel gate (empty = inactive)
+    std::vector<float> channel_coords_;
+    float channel_sigma_ = 0.0f;
 
     // -- M5: CSR MIRROR of the out-lane fabric (settle hot path) -------------
     // Flattened contiguous buffers (offsets + targets + weights) built lazily
@@ -1406,19 +1486,33 @@ private:
 
     // Stage 2 settle-side factor: how much of a lane's weight flows this pass
     float lane_flow_factor(NodeId a, NodeId b) const {
+        // v3.8.0 TASK 2: the return value is now f_ctx * f_channel. When the
+        // channel gate is inactive the second factor is skipped entirely and
+        // every branch below returns the exact v3.7 value (bit-identity).
+        float f = 1.0f;
         auto it = lane_ctx_.find(lane_key(a, b));
-        if (it == lane_ctx_.end()) return 1.0f;
-        const LaneCtx& sig = it->second;
-        for (const NodeId w : sig.forbidden)
-            if (present_.count(w)) return cfg_.ctx_forbidden;
-        if (sig.required.empty()) return 1.0f;
-        std::size_t matched = 0;
-        for (const NodeId w : sig.required)
-            if (present_.count(w)) ++matched;
-        if (matched == sig.required.size()) return 1.0f;
-        return cfg_.ctx_missing
-             + (1.0f - cfg_.ctx_missing)
-             * (static_cast<float>(matched) / static_cast<float>(sig.required.size()));
+        if (it != lane_ctx_.end()) {
+            const LaneCtx& sig = it->second;
+            bool forbidden_hit = false;
+            for (const NodeId w : sig.forbidden)
+                if (present_.count(w)) { forbidden_hit = true; break; }
+            if (forbidden_hit) {
+                f = cfg_.ctx_forbidden;
+            } else if (!sig.required.empty()) {
+                std::size_t matched = 0;
+                for (const NodeId w : sig.required)
+                    if (present_.count(w)) ++matched;
+                if (matched < sig.required.size())
+                    f = cfg_.ctx_missing
+                      + (1.0f - cfg_.ctx_missing)
+                      * (static_cast<float>(matched) / static_cast<float>(sig.required.size()));
+            }
+        }
+        if (!channel_coords_.empty()) {
+            const float d = channel_coords_[a] - channel_coords_[b];
+            f *= std::exp(-(d * d) / (2.0f * channel_sigma_ * channel_sigma_));
+        }
+        return f;
     }
 
     void drop_lane_ctx(NodeId a, NodeId b) {

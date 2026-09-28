@@ -1107,6 +1107,102 @@ carries them.
   fixed-threshold floor itself stays: a bridge that reaches only dust still
   defers, by design.
 
+## v3.8 — physics-native thinking: adaptive depth, multi-vector state, causal signatures, energy self-verification
+
+The v3.8 spec: make the field THINK deeper without token prediction, without
+ML/NN/transformer, without touching the frozen SI physics (decay 0.82 /
+diffusion 0.45 / dual-channel readout / Hebbian). Four mechanisms, each
+opt-in, each deterministic, each a no-op on existing fabrics (the replay
+contract holds; bench bit-identical to v3.7). Plus the v3.7.1 scaling fix
+that made --distvec survivable at real fabric sizes.
+
+**v3.7.1 — distvec SCALING FIX (prerequisite).** The v3.7.0 build was
+measured O(n^1.9): 76 s at 5,595 nodes, 156 s at 7,985, timeout past 9.3k,
+~15 hours extrapolated at 94,773 nodes — a cost, not a win. Root causes
+removed: the exact neighbour scan (O(n^2*k)) now caps at 2,000 nodes (larger
+fabrics use the documented 2-hop lane closure); MGS orthonormalization moved
+to a column-major blocked BCGS2 basis (contiguous kernels, O(k/32) OpenMP
+regions instead of ~840k strided ones); the subspace walk, Rayleigh-Ritz and
+Ritz rotation rebuilt on the same basis; init hashes cached per node.
+Measured A/B (same corpora, same machine): 17.1 s -> 7.2 s at 5,107 nodes;
+14.5 s at 10,216; 36.9 s at 20,398; 95.4 s at 40,850 — near-linear through
+10k, ~1.36 exponent at large sizes from RAM streaming. Extrapolated generalist
+build: ~15 hours -> ~5 minutes (~180x). Same-name rebuilds md5-identical.
+
+**TASK 1 — adaptive depth (`--adaptive-depth`, `--adaptive-max-k`).**
+Thinking-Without-Tokens lineage: depth is compute. Before each settle the
+engine measures the problem — unknown-token fraction (the OOD axis) and lane
+isolation (known tokens with zero lanes to travel) — into a difficulty in
+[0,1], and settles k = base + round(difficulty * max_extra) passes (defaults
+8..16). Same state -> same depth, bit for bit; the base is pinned at engine
+construction so repeated decisions cannot ratchet; harvest_rows mirrors the
+rule (the v3.2.1 fit==decide lesson). The settle equations per pass are
+byte-identical — only their count scales with difficulty. Disclosed in usage
+as difficulty / k_settle_used / k_settle_base.
+
+**TASK 2 — multi-vector state (`--multi-vector`, `--multi-vector-k`).**
+CSM lineage: the state is not one energy vector but K superposed views.
+On a --distvec fabric, the engine settles the SAME injection K times (default
+8), each under a spectral channel gate: lane (a,b) carries flow scaled by
+exp(-(u_k(a)-u_k(b))^2 / 2 sigma_k^2), where u_k is the fabric's k-th leading
+distributional axis — lanes between spectrally close nodes flow freely,
+distant ones are damped. Each channel runs the frozen physics exactly; the
+readout measures the MEAN of the K settled fields (the multi-vector state).
+Channels with dead axes are skipped and disclosed. No distvec field -> honest
+no-op. Deterministic; unit-tested for determinism, no-op, and effect.
+
+**TASK 3 — causal signatures (`--causal-lanes`).** WHAT/WHY/HOW relation
+types on lanes: a deterministic connective scan interns cause?>effect nodes
+("so/therefore/cause/lead/trigger/produce" keep text order; "because/since/
+due" flip it so the cause leads the name) and means!>goal nodes ("by/via/
+through/using/how"). Interned, df-noted and bound to outcome anchors exactly
+like the v3.6 bigrams and v3.7 typed pairs; decide/harvest/perturb inject the
+carried pairs at kCausalDose=0.5 (fit/decide parity). Cross-domain reasoning
+uses the signature: "overcharg?>agent" composes with any other ?>-typed
+fabric structure even when no surface token overlaps. Fabrics learned without
+the flag contain no causal nodes -> every decide-side block is a no-op
+(replay contract, unit-tested both ways).
+
+**TASK 4 — energy self-verification (always disclosed; gate opt-in
+`--self-verify`, `--self-verify-floor`).** EBT lineage: the settle's own
+convergence trace is a third confidence measurement besides margin and
+calibration — whether the field had finished MOVING. Every pass the energy
+decays (~0.18 baseline, moves nothing) and diffuses (the actual computation);
+the trace records the last pass's relative motion sum|de|/sum e. Measured
+settled baselines: 0.189-0.212 across the bench fabrics, so the default
+floor is 0.25; a choice answer measured on a field still routing energy
+above the floor defers with reason `unconverged_field`. The trace (passes /
+motion_rate / eps-break) is ALWAYS in the decide usage JSON.
+
+**MEASURED — the think30 suite (`make think30` -> data/think30_tables.json;
+tools/think30_probes.py; every number from an actual run in this tree).**
+30 tests, 6 categories x 5: A choice (baseline competence), B why, C how,
+D cross-domain causal transfer, E multi-hop chains, F honesty (unanswerable
+states that MUST defer). Configs share probe files; fabrics differ only in
+the construction flags (3-epoch consolidation + calibrate, disclosed):
+  baseline (v3.7-style fabric, plain decide)      accuracy 0.467 (14/30)
+  thinking (causal+typed fabric, all four flags)  accuracy 0.600 (18/30)
+  multivector (thinking + --distvec --multi-vector) accuracy 0.633 (19/30)
+Per-category movement against the baseline: E chains 0/5 -> 3/5 (adaptive
+depth + self-verify let long chains run to their attractor instead of
+answering transients); F honesty 0/5 -> 5/5 (the calibrated baseline SHIPS
+noise answers on near-vocabulary OOD states — self-verify + perturb-check
+catch every one); A 4/5 -> 5/5 under multi-vector. The B/C/D causal
+categories measured 3-4/5 in BOTH configs at this fabric scale: the v3.6
+bigram lanes already carry most of the signal here, so the causal signature
+shows no additional accuracy delta at demo scale (honest; the unit tests
+pin the mechanism, the think30 D-probes pin the routing). DEFER BEHAVIOUR:
+the thinking configs defer more and answer better — selective accuracy over
+answered rows rose from 14/14 to 18/19 with deferrals disclosed per reason.
+
+**Boundary update.** Temporal ordering: carries adjacency (v3.6) and now
+role-typed and causally-typed structure (v3.8) on fabrics built with the
+flags on. The four v3.8 mechanisms are decision-layer and fabric-side only —
+the impossibility register's THEOREM entries are untouched; what changed is
+that the engine now MEASURES and discloses when it is thinking deeper
+(adaptive depth), seeing more (multi-vector), reasoning by relation type
+(causal lanes), and whether it finished thinking (self-verification).
+
 ## License & credit
 
 MIT © 2026 Mr-DS-ML-85. Core mechanics ported from the author's

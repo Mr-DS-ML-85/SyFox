@@ -238,5 +238,85 @@ inline std::vector<std::string> typed_pairs_of(const std::vector<std::string>& w
     return out;
 }
 
+// ============================================================================
+// v3.8.0 (TASK 2 of the physics-native thinking spec) — CAUSAL SIGNATURES.
+// WHAT/WHY/HOW relation types on lanes. The typed pairs above encode WHO DID
+// WHAT TO WHOM (scene grammar); they do not encode WHY it happened or HOW.
+// Cross-domain reasoning — the analogy class — needs relation types that
+// survive the domain nouns: "refund because overcharge" (tickets) and
+// "restart because crash" (tech) share the CAUSE?>EFFECT signature even
+// when no token overlaps, so a lane typed ?> between a cause and its effect
+// composes with the same signature in another domain.
+//
+// Deterministic connective scan (stemmed forms — normalize() runs Porter):
+//   CauseFirst   "so, therefore/thus, cause(s/d), lead(s), trigger(s),
+//                 produc(e/ed)"   ->  pair "L?>R"   (L causes R)
+//   EffectFirst  "because, since, due" -> pair "R?>L" (R causes L)
+//   Instrumental "by, via, through, using, how" -> "R!>L" (R is the means
+//                 to L; goal before the cue, means after)
+// L/R = nearest non-function, non-cue tokens on each side (one pair per cue
+// hit). Node names live in the same disjoint '#>'-mangled namespace as the
+// typed pairs; OLD fabrics contain none, so every decide-side block is a
+// no-op on them (replay contract, same as bigrams/typed).
+// Default OFF (--causal-lanes on|off) — a connective table is a seed
+// lexicon, disclosed as such.
+// ============================================================================
+inline bool& causal_lanes_enabled() { static bool on = false; return on; }
+
+enum class CausalKind { CauseFirst, EffectFirst, Instrumental };
+
+inline bool causal_cue(const std::string& t, CausalKind* kind) {
+    static const struct { const char* form; CausalKind k; } kCues[] = {
+        {"so", CausalKind::CauseFirst},
+        {"therefor", CausalKind::CauseFirst}, {"therefore", CausalKind::CauseFirst},
+        {"thu", CausalKind::CauseFirst}, {"thus", CausalKind::CauseFirst},
+        {"caus", CausalKind::CauseFirst}, {"cause", CausalKind::CauseFirst},
+        {"lead", CausalKind::CauseFirst}, {"leads", CausalKind::CauseFirst},
+        {"trigger", CausalKind::CauseFirst}, {"triggers", CausalKind::CauseFirst},
+        {"produc", CausalKind::CauseFirst}, {"produce", CausalKind::CauseFirst},
+        {"becaus", CausalKind::EffectFirst}, {"because", CausalKind::EffectFirst},
+        {"sinc", CausalKind::EffectFirst}, {"since", CausalKind::EffectFirst},
+        {"due", CausalKind::EffectFirst},
+        {"by", CausalKind::Instrumental}, {"via", CausalKind::Instrumental},
+        {"through", CausalKind::Instrumental},
+        {"us", CausalKind::Instrumental}, {"using", CausalKind::Instrumental},
+        {"how", CausalKind::Instrumental},
+    };
+    for (const auto& c : kCues)
+        if (t == c.form) { if (kind) *kind = c.k; return true; }
+    return false;
+}
+
+inline std::vector<std::string> causal_pairs_of(const std::vector<std::string>& words) {
+    std::vector<std::string> out;
+    const std::size_t n = words.size();
+    if (n < 3) return out;
+    for (std::size_t i = 0; i < n; ++i) {
+        CausalKind kind;
+        if (!causal_cue(words[i], &kind)) continue;
+        std::ptrdiff_t L = -1, R = -1;
+        for (std::ptrdiff_t j = static_cast<std::ptrdiff_t>(i); j-- > 0;) {
+            const std::string& w = words[static_cast<std::size_t>(j)];
+            if (!is_function_word(w) && !causal_cue(w, nullptr)) { L = j; break; }
+        }
+        for (std::size_t j = i + 1; j < n; ++j) {
+            const std::string& w = words[j];
+            if (!is_function_word(w) && !causal_cue(w, nullptr)) { R = static_cast<std::ptrdiff_t>(j); break; }
+        }
+        if (L < 0 || R < 0) continue;
+        const std::string& lw = words[static_cast<std::size_t>(L)];
+        const std::string& rw = words[static_cast<std::size_t>(R)];
+        switch (kind) {
+            case CausalKind::CauseFirst:
+                out.push_back(lw + "?>" + rw); break;      // L causes R
+            case CausalKind::EffectFirst:
+                out.push_back(rw + "?>" + lw); break;      // R causes L
+            case CausalKind::Instrumental:
+                out.push_back(rw + "!>" + lw); break;      // R is the means to L
+        }
+    }
+    return out;
+}
+
 } // namespace roles
 } // namespace si

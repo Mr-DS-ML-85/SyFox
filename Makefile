@@ -171,6 +171,12 @@ readout-silence: build/syfox
 jas-test: build/syfox
 	bash tests/jas_test.sh
 
+# v3.8.0 physics-native thinking suite: 30 tests across 6 categories
+# (choice / why / how / cross-domain / chains / honesty) measured on
+# baseline vs thinking-flag configs. Every number from an actual run.
+think30: build/syfox
+	python3 tools/think30_probes.py --json-out data/think30_tables.json
+
 # Jev-parity eval suite on the three seed models.
 #   make bench           -> train split (in-sample; labelled as such)
 #   make bench-heldout   -> held-out split (the honest headline number)

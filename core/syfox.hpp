@@ -35,7 +35,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.3.1";
+inline const char* VERSION = "3.4.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -120,6 +120,10 @@ struct Usage {
     // v3.2 retrieval-by-default: the memories that primed this decision
     // (label, resonance) pairs, strongest first; empty when retrieval off.
     std::vector<std::pair<std::string, float>> retrieved;
+    // v3.4 question-context gate disclosure: true when the two-stage settle
+    // composed the field with the settled question field at ctx_alpha.
+    bool ctx_gate = false;
+    float ctx_alpha = 0.0f;
 };
 
 struct Calibration {
@@ -232,6 +236,25 @@ public:
         question_gate_floor_ = std::min(1.0f, std::max(0.0f, f));
     }
     float question_gate_floor() const { return question_gate_floor_; }
+
+    // v3.4 — honest defer for near-ties (engine-level, so CLI, C API, HTTP
+    // bridge and bench share ONE behavior): when the top two probabilities
+    // are closer than this margin the readout does not carry a decision and
+    // the answer defers with reason "ambiguous_tie" instead of shipping a
+    // coin-flip as a confident label. 0 disables. Default 0.05 (the
+    // reported near-ties sit at 0.004-0.010 probability gaps).
+    void set_defer_margin(float m) { defer_margin_ = std::max(0.0f, m); }
+    float defer_margin() const { return defer_margin_; }
+
+    // v3.4 — question-context gating (two-stage settle, opt-in). Stage 1
+    // settles the question's own tokens into a context field; stage 2
+    // re-settles the state and composes the field as
+    // (1-alpha)*state + alpha*context before readout. Deterministic;
+    // settle() physics untouched — this is a decision-layer composition.
+    void set_ctx_gate(bool on) { ctx_gate_on_ = on; }
+    bool ctx_gate_on() const { return ctx_gate_on_; }
+    void set_ctx_alpha(float a) { ctx_alpha_ = std::min(1.0f, std::max(0.0f, a)); }
+    float ctx_alpha() const { return ctx_alpha_; }
 
     // v3.2.1: returns false when the substrate file is missing (honest load
     // failure — callers surface a clear error instead of deciding on an
@@ -692,6 +715,41 @@ public:
         const std::vector<std::string> words = si::norm::normalize(state);
         usage.state_tokens = words.size();
 
+        // v3.4 question-context gating, STAGE 1 (opt-in): settle the question's
+        // own tokens (instructions + criteria descriptions, no labels) into a
+        // context field. The question drives the fabric's lanes from ITS side,
+        // so question-relevant entities carry energy before the state even
+        // arrives. Deterministic; settle() untouched.
+        std::vector<float> ctx_field;
+        if (ctx_gate_on_) {
+            std::vector<std::string> qtoks;
+            for (const auto& qkv : questions.obj) {
+                const sfx::JV& q = qkv.second;
+                if (q.has("instructions"))
+                    for (const auto& w : si::norm::normalize(q.at("instructions").as_str()))
+                        qtoks.push_back(w);
+                if (q.has("criteria")) {
+                    const sfx::JV& crit = q.at("criteria");
+                    if (crit.is_obj())
+                        for (const auto& kv : crit.obj)
+                            for (const auto& w : si::norm::normalize(kv.second.as_str()))
+                                qtoks.push_back(w);
+                    else if (crit.is_arr())
+                        for (const auto& v : crit.arr)
+                            for (const auto& w : si::norm::normalize(v.as_str()))
+                                qtoks.push_back(w);
+                }
+            }
+            if (!qtoks.empty()) {
+                si_.reset_field();
+                si_.inject(qtoks, state_dose(qtoks));
+                si_.settle();
+                ctx_field.resize(si_.node_count());
+                for (std::size_t i = 0; i < ctx_field.size(); ++i)
+                    ctx_field[i] = si_.node_energy(static_cast<si::NodeId>(i));
+            }
+        }
+
         // v3.2 retrieval-by-default: if the model ships memories, the query's
         // settled-field fingerprint ranks them (Hopfield-style resonance,
         // recall.hpp) and the top-k outcomes inject a faint prime dose before
@@ -710,6 +768,16 @@ public:
             usage.state_tokens += bridges.size();
         }
         si_.settle();
+        // v3.4 question-context gating, STAGE 2: compose the settled state
+        // field with the settled question field,
+        // e = (1-alpha)*state + alpha*context (alpha default 0.5). The field
+        // is measured afterward exactly as always; the composition is
+        // disclosed as ctx_gate in the usage block.
+        if (!ctx_field.empty()) {
+            si_.blend_field(ctx_field, ctx_alpha_);
+            usage.ctx_gate = true;
+            usage.ctx_alpha = ctx_alpha_;
+        }
         usage.settled_energy = si_.total_energy();
         // v3.3.1 readout-silence visibility (opt-in): SYFOX_DEBUG_READOUT=1
         // prints the decide-level field so honest_silence vs readout-level
@@ -1129,6 +1197,13 @@ private:
                 else if (v > p2) p2 = v;
             }
             if (p1 - p2 <= 1e-9f) a.tied = true;
+            // v3.4 honest defer for near-ties: a margin this thin is not a
+            // decision, it is a coin-flip the readout cannot settle. Defer
+            // with reason ambiguous_tie (engine-level; 0 disables).
+            if (defer_margin_ > 0.0f && p1 - p2 < defer_margin_) {
+                a.deferred = true;
+                a.reason = "ambiguous_tie";
+            }
         }
     }
 
@@ -1149,6 +1224,19 @@ private:
         }
         a.value = val;
         a.confidence = entropy_confidence(p);
+        // v3.4 honest defer for near-ties, score flavor: same margin over the
+        // level probabilities — a near-tied scale is an ambiguous_tie too.
+        if (p.size() >= 2) {
+            float p1 = 0.0f, p2 = 0.0f;
+            for (float v : p) {
+                if (v > p1) { p2 = p1; p1 = v; }
+                else if (v > p2) p2 = v;
+            }
+            if (defer_margin_ > 0.0f && p1 - p2 < defer_margin_) {
+                a.deferred = true;
+                a.reason = "ambiguous_tie";
+            }
+        }
     }
 
     void decide_noul(const sfx::JV& q, Answer& a) {
@@ -1251,6 +1339,9 @@ private:
     // with --question-gate / opts.question_gate, floor tuned by measurement.
     bool question_gate_on_ = false;
     float question_gate_floor_ = 0.25f;
+    float defer_margin_ = 0.05f;      // v3.4 near-tie defer margin (0 = off)
+    bool ctx_gate_on_ = false;        // v3.4 question-context two-stage settle (default OFF)
+    float ctx_alpha_ = 0.5f;          // v3.4 context-field weight in the composed field
     // Milestone-3 audit state
     std::string context_ = "default";
     std::uint64_t teach_seq_ = 0;

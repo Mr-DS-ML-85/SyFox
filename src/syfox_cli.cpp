@@ -56,9 +56,10 @@ struct Args {
     bool novelty = false;            // learn --novelty: per-lesson dose by novelty (M2)
     float novelty_floor = 0.25f;     // learn --novelty-floor F (A/B knob)
     bool energy_norm = false;        // decide-side energy gain for big-corpus fabrics (M1)
-    float defer_margin = 0;          // decide --defer-margin P: defer when p1-p2 < P
-                                     // (honest uncertainty at the decision layer; the
-                                     // physics still decided — this is a disclosure knob)
+    float defer_margin = -1;         // v3.4: engine default ON at 0.05 (reason ambiguous_tie);
+                                     // --defer-margin P overrides, --no-defer disables.
+                                     // (v3.1-3.3 this was a CLI post-pass with reason low_margin,
+                                     // default OFF — now the engine owns it for CLI+API+bench parity)
     bool evidence = false;           // decide --evidence: machine-auditable evidence JSON (M3)
     bool adversarial = false;        // bench --adversarial: M4 stress suite (read-only)
     std::string mix;                 // bench --mix FILE: cross-domain vocabulary source (M4)
@@ -74,6 +75,10 @@ struct Args {
     bool no_semantics = false;       // --no-semantics: runtime kill switch for the semantic field
     bool no_retrieval = false;       // --no-retrieval: skip associative priming
     bool no_hierarchy = false;       // --no-hierarchy: skip stage-1 category gating
+    bool no_defer = false;           // --no-defer: disable v3.4 near-tie defer (engine default ON)
+    long hops = -1;                  // --hops N: v3.4 multi-hop readout walk depth (engine default 1 = legacy)
+    bool ctx_gate = false;           // --ctx-gate: v3.4 two-stage question-context settle
+    float ctx_alpha = 0;             // --ctx-alpha F (0 = engine default 0.5)
     long retrieval_topk = -1;        // --retrieval-topk N (-1 = engine default 5)
     float retrieval_dose = 0;        // --retrieval-dose F (0 = engine default 0.30)
     std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
@@ -169,6 +174,17 @@ void apply_modes(syfox::Engine& eng, const Args& a) {
     // v3.3 question-conditioned readout knobs (opt-in)
     if (a.question_gate) eng.set_question_gate(true);
     if (a.question_gate_floor > 0) eng.set_question_gate_floor(a.question_gate_floor);
+    // v3.4 honest defer for near-ties: engine default ON at margin 0.05
+    // (reason ambiguous_tie). --defer-margin P overrides; --no-defer
+    // restores the v3.3 answer-always behavior.
+    if (a.no_defer) eng.set_defer_margin(0);
+    else if (a.defer_margin >= 0) eng.set_defer_margin(a.defer_margin);
+    // v3.4 multi-hop readout walk (engine default 1 = legacy single-hop,
+    // bit-identical; depths 2-8 walk lanes with 1/sqrt(hop+1) damping)
+    if (a.hops >= 0) eng.substrate().set_hop_depth(static_cast<int>(a.hops));
+    // v3.4 question-context two-stage settle (opt-in; alpha default 0.5)
+    if (a.ctx_gate) eng.set_ctx_gate(true);
+    if (a.ctx_alpha > 0) eng.set_ctx_alpha(a.ctx_alpha);
     // v3 Milestone 5: --threads N controls deterministic parallel settle on
     // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
     // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
@@ -495,6 +511,10 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
                 {"resonance", std::round(r.second * 1000.0f) / 1000.0f}}));
         usage["retrieval"] = sfx::JV(ret);          // v3.2: memories that primed this decision
     }
+    if (u.ctx_gate) {                               // v3.4: two-stage settle disclosure
+        usage["ctx_gate"] = sfx::JV(true);
+        usage["ctx_alpha"] = std::round(u.ctx_alpha * 1000.0) / 1000.0;
+    }
     return sfx::JV(sfx::JVObj{{"answers", sfx::JV(out)}, {"usage", sfx::JV(usage)}});
 }
 
@@ -587,25 +607,6 @@ void cmd_decide(const Args& a) {
     syfox::Usage u;
     auto answers = eng.decide(state, questions, u);
     u.calibrated = eng.calibration().fitted;   // decide() resets Usage; set after
-    // --defer-margin P: the substrate still decides (physics untouched); a
-    // margin below P is DISCLOSED as a deferral instead of a confident-looking
-    // label. Measured motivation: reworded probe criteria can decide at
-    // |p1-p2| ~ 0.01-0.05 with confidence 0 — honest silence should extend
-    // to tied candidates, not only to a dark field.
-    if (a.defer_margin > 0) {
-        for (auto& ans : answers) {
-            if (ans.deferred || ans.probabilities.size() < 2) continue;
-            float p1 = 0, p2 = 0;
-            for (const auto& pr : ans.probabilities) {
-                if (pr.second > p1) { p2 = p1; p1 = pr.second; }
-                else if (pr.second > p2) p2 = pr.second;
-            }
-            if (p1 - p2 < a.defer_margin) {
-                ans.deferred = true;
-                ans.reason = "low_margin";
-            }
-        }
-    }
     sfx::JV out = answers_to_json(answers, u);
     if (!lang_note.empty()) out.obj["lang_note"] = sfx::JV(lang_note);
     if (!route_report.empty()) out.obj["route"] = sfx::JV(route_report);
@@ -1345,7 +1346,28 @@ void usage_exit() {
         "  Measured: fixes question-relevance probes (who/latest), costs 5.3\n"
         "  points on tickets-cal — hence opt-in, like the energy-norm gain.\n"
         "  Replies also disclose tied:true on exact top-2 probability ties, and\n"
-        "  defer with reason unknown_candidates when NO candidate carries energy.\n";
+        "  defer with reason unknown_candidates when NO candidate carries energy.\n"
+        "honest defer for near-ties (v3.4, engine default ON): when the top two\n"
+        "  probabilities are closer than the margin (default 0.05), the readout\n"
+        "  does not carry a decision and the answer defers with reason\n"
+        "  ambiguous_tie instead of a confident-looking coin-flip. The engine\n"
+        "  owns it, so CLI, C API, HTTP bridge and bench share one behavior.\n"
+        "  Flags: --defer-margin P (override), --no-defer (v3.3 answer-always).\n"
+        "multi-hop readout walk (v3.4, opt-in): --hops N walks lanes BFS-style\n"
+        "  from each probe anchor up to N levels with per-hop damping\n"
+        "  hop_coupling/sqrt(hop+1) (hop 1 x0.707 ... hop 4 x0.447), levels\n"
+        "  visited in ascending node-id order, width-capped at 64 per level —\n"
+        "  deterministic. Default N=1 is the legacy single-hop readout,\n"
+        "  bit-identical to every earlier version. Measured on chain probes:\n"
+        "  2-hop chains already work at N=1 (diffusion); 3-4 hop chains gain\n"
+        "  real margin at N=4. Readout-layer only; settle physics untouched.\n"
+        "question-context gate (v3.4, opt-in): two-stage settle — stage 1\n"
+        "  settles the question's own tokens (instructions + criteria\n"
+        "  descriptions, no labels) into a context field; stage 2 re-settles the\n"
+        "  state and the final field composes as (1-alpha)*state + alpha*context\n"
+        "  (alpha default 0.5). Disclosed as usage.ctx_gate/ctx_alpha. Flags:\n"
+        "  --ctx-gate (enable), --ctx-alpha F. Deterministic; settle physics\n"
+        "  untouched (two settled fields composed at the decision layer).\n";
     std::exit(2);
 }
 
@@ -1388,6 +1410,10 @@ int main(int argc, char** argv) {
         else if (k == "--novelty") a.novelty = true;
         else if (k == "--energy-norm") a.energy_norm = true;
         else if (k == "--defer-margin") { if (i + 1 >= argc) usage_exit(); a.defer_margin = std::strtof(argv[++i], nullptr); if (a.defer_margin < 0) usage_exit(); }
+        else if (k == "--no-defer") a.no_defer = true;
+        else if (k == "--hops") { if (i + 1 >= argc) usage_exit(); a.hops = std::strtol(argv[++i], nullptr, 10); if (a.hops < 1 || a.hops > 8) usage_exit(); }
+        else if (k == "--ctx-gate") a.ctx_gate = true;
+        else if (k == "--ctx-alpha") { if (i + 1 >= argc) usage_exit(); a.ctx_alpha = std::strtof(argv[++i], nullptr); if (a.ctx_alpha <= 0 || a.ctx_alpha > 1) usage_exit(); }
         else if (k == "--evidence") a.evidence = true;
         else if (k == "--adversarial") a.adversarial = true;
         else if (k == "--mix") { if (i + 1 >= argc) usage_exit(); a.mix = argv[++i]; }

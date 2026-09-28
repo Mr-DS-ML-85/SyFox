@@ -692,6 +692,9 @@ static void test_multilingual_e2e() {
     // with sub-word bridges enabled (they are load-bearing for typo routing)
     si::norm::grams_enabled() = true;
     Engine eng;
+    eng.set_defer_margin(0);   // v3.4: this group pins the pre-defer argmax contract;
+                               // the 2-candidate heldout rows are near-ties by design,
+                               // the defer contract is pinned in test_defer_ties()
     const char* bn_billing[] = {
         "আমার কার্ড থেকে দুইবার টাকা কেটেছে অতিরিক্ত টাকা ফেরত দিন",
         "সাবস্ক্রিপশন বাতিল করেছি তবুও আবার চার্জ করেছে টাকা ফেরত চাই",
@@ -749,6 +752,8 @@ static void test_typo_corruption() {
 static void test_m3_contradiction() {
     std::cout << "[m3 contradiction]\n";
     syfox::Engine eng;
+    eng.set_defer_margin(0);   // v3.4: evidence-ledger contract - near-tie defer
+                               // would hide the winning lanes from evidence_json
     eng.set_context("test-contradiction");
     // first lesson: this state routes to billing
     eng.learn_example("the invoice charged my card twice",
@@ -830,6 +835,7 @@ static void test_m3_ledger_persistence() {
     std::uint64_t sup_before = 0, conflicts_before = 0;
     {
         syfox::Engine eng;
+        eng.set_defer_margin(0);   // v3.4: ledger round-trip pins lane evidence, not the defer contract
         eng.set_context("persist-probe");
         eng.learn_example("laptop screen flickers on lid open", "route the ticket",
                           "technical hardware team");
@@ -849,6 +855,8 @@ static void test_m3_ledger_persistence() {
     }
     syfox::Engine eng2;
     eng2.load_model(dir);
+    eng2.set_defer_margin(0);   // v3.4: same contract as above — this block
+                                // re-derives lane evidence for the round-trip
     CHECK(eng2.conflicts().size() == conflicts_before, "conflicts survive load");
     CHECK(eng2.teach_events() >= 2, "teach counter survives load");
     // re-deriving evidence on the loaded engine finds the same ledger rows
@@ -1154,6 +1162,7 @@ static void test_hierarchy() {
     }
     syfox::Engine eng;
     eng.load_model(dir);
+    eng.set_defer_margin(0);   // v3.4: hierarchy contract test; defer pinned in test_defer_ties
     CHECK(eng.hierarchy_on(), "hierarchy loaded from model dir");
     sfx::JV q = sfx::JV::parse(
         R"({"i":{"type":"choice","instructions":"","criteria":{
@@ -1310,6 +1319,7 @@ static void test_question_gate() {
     {
         syfox::Engine e2;
         e2.load_model(dir);
+        e2.set_defer_margin(0);   // v3.4: pins the pre-defer readout contract; defer -> test_defer_ties
         syfox::Usage u;
         auto a = e2.decide(state, q, u);
         CHECK(!a[0].deferred && a[0].choice == "tariq",
@@ -1373,6 +1383,257 @@ static void test_question_gate() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v3.4 honest defer for near-ties (engine default margin 0.05): when the top
+// two probabilities are closer than the margin, the readout does not carry a
+// decision — the answer defers with reason ambiguous_tie instead of shipping
+// a coin-flip as a confident label. 0 disables (v3.3 answer-always). The
+// near-tie fabric below is the bengali 2-candidate one: its heldout rows
+// settle near-uniform (p1-p2 < 0.05 measured), which makes the case
+// deterministic. score flavor uses the v3.3 exact-tie fabric (symmetric
+// single-lesson binding, semantics stripped).
+// ---------------------------------------------------------------------------
+static void test_defer_ties() {
+    std::cout << "[v3.4 honest defer for near-ties]\n";
+    const std::string dir = "build/test_v34_defer";
+    (void)std::system(("rm -rf " + dir).c_str());
+    sfx::JV q = sfx::JV::parse(
+        R"({"department":{"type":"choice","instructions":"Which team should handle this",)"
+        R"("criteria":{"billing":"payment or subscription issues","technical":"bugs or integration problems"}}})");
+    // the multilingual 6-lesson fabric: its heldout rows settle near-uniform
+    // (p1-p2 < 0.05 measured) while the typo row separates (gap >= 0.05
+    // measured — the v2.2 typo test passes under the default margin).
+    {
+        si::norm::grams_enabled() = true;
+        syfox::Engine eng;
+        const char* bn_billing[] = {
+            "\xe0\xa6\x86\xe0\xa6\xae\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa6\x95\xe0\xa6\xbe\xe0\xa6\xb0\xe0\xa7\x8d\xe0\xa6\xa1 \xe0\xa6\xa5\xe0\xa7\x87\xe0\xa6\x95\xe0\xa7\x87 \xe0\xa6\xa6\xe0\xa7\x81\xe0\xa6\x87\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa6\x9f\xe0\xa6\xbe\xe0\xa6\x95\xe0\xa6\xbe \xe0\xa6\x95\xe0\xa7\x87\xe0\xa6\x9f\xe0\xa7\x87\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\x85\xe0\xa6\xa4\xe0\xa6\xbf\xe0\xa6\xb0\xe0\xa6\xbf\xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\xa4 \xe0\xa6\x9f\xe0\xa6\xbe\xe0\xa6\x95\xe0\xa6\xbe \xe0\xa6\xab\xe0\xa7\x87\xe0\xa6\xb0\xe0\xa6\xa4 \xe0\xa6\xa6\xe0\xa6\xbf\xe0\xa6\xa8",
+            "\xe0\xa6\xb8\xe0\xa6\xbe\xe0\xa6\xac\xe0\xa6\xb8\xe0\xa7\x8d\xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\xb0\xe0\xa6\xbf\xe0\xa6\xaa\xe0\xa6\xb6\xe0\xa6\xa8 \xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\xa4\xe0\xa6\xbf\xe0\xa6\xb2 \xe0\xa6\x95\xe0\xa6\xb0\xe0\xa7\x87\xe0\xa6\x9b\xe0\xa6\xbf \xe0\xa6\xa4\xe0\xa6\xac\xe0\xa7\x81\xe0\xa6\x93 \xe0\xa6\x86\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa6\x9a\xe0\xa6\xbe\xe0\xa6\xb0\xe0\xa7\x8d\xe0\xa6\x9c \xe0\xa6\x95\xe0\xa6\xb0\xe0\xa7\x87\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\x9f\xe0\xa6\xbe\xe0\xa6\x95\xe0\xa6\xbe \xe0\xa6\xab\xe0\xa7\x87\xe0\xa6\xb0\xe0\xa6\xa4 \xe0\xa6\x9a\xe0\xa6\xbe\xe0\xa6\x87",
+            "\xe0\xa6\x97\xe0\xa6\xa4 \xe0\xa6\xae\xe0\xa6\xbe\xe0\xa6\xb8\xe0\xa7\x87\xe0\xa6\xb0 \xe0\xa6\x87\xe0\xa6\xa8\xe0\xa6\xad\xe0\xa7\x9f\xe0\xa7\x87\xe0\xa6\xb8\xe0\xa7\x87 \xe0\xa6\xad\xe0\xa7\x81\xe0\xa6\xb2 \xe0\xa6\x9f\xe0\xa6\xbe\xe0\xa6\x95\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa6\xaa\xe0\xa6\xb0\xe0\xa6\xbf\xe0\xa6\xae\xe0\xa6\xbe\xe0\xa6\xa3 \xe0\xa6\x86\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\xa0\xe0\xa6\xbf\xe0\xa6\x95 \xe0\xa6\x95\xe0\xa6\xb0\xe0\xa7\x81\xe0\xa6\xa8"};
+        const char* bn_technical[] = {
+            "\xe0\xa6\x85\xe0\xa7\x8d\xe0\xa6\xaf\xe0\xa6\xbe\xe0\xa6\xaa\xe0\xa6\x9f\xe0\xa6\xbf \xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\xb0\xe0\xa6\xac\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\xb0\xe0\xa7\x8d\xe0\xa6\xaf\xe0\xa6\xbe\xe0\xa6\xb6 \xe0\xa6\x95\xe0\xa6\xb0\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\xb2\xe0\xa6\x97\xe0\xa6\x87\xe0\xa6\xa8 \xe0\xa6\x95\xe0\xa6\xb0\xe0\xa6\xa4\xe0\xa7\x87 \xe0\xa6\xaa\xe0\xa6\xbe\xe0\xa6\xb0\xe0\xa6\x9b\xe0\xa6\xbf \xe0\xa6\xa8\xe0\xa6\xbe",
+            "\xe0\xa6\xaa\xe0\xa7\x87\xe0\xa6\xae\xe0\xa7\x87\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\x9f \xe0\xa6\x97\xe0\xa7\x87\xe0\xa6\x9f\xe0\xa6\x93\xe0\xa7\x9f\xe0\xa7\x87 \xe0\xa6\x95\xe0\xa6\xbe\xe0\xa6\x9c \xe0\xa6\x95\xe0\xa6\xb0\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\xa8\xe0\xa6\xbe \xe0\xa6\x8f\xe0\xa6\xb0\xe0\xa6\xb0 \xe0\xa6\xa6\xe0\xa7\x87\xe0\xa6\x96\xe0\xa6\xbe\xe0\xa6\x9a\xe0\xa7\x8d\xe0\xa6\x9b\xe0\xa7\x87",
+            "\xe0\xa6\x93\xe0\xa6\xaf\xe0\xa6\xbc\xe0\xa7\x87\xe0\xa6\xac\xe0\xa6\xb9\xe0\xa7\x81\xe0\xa6\x95 \xe0\xa6\x87\xe0\xa6\xad\xe0\xa7\x87\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\x9f \xe0\xa6\x95\xe0\xa6\xbe\xe0\xa6\xa8\xe0\xa7\x87\xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\x9f \xe0\xa6\xb9\xe0\xa6\x9a\xe0\xa7\x9b\xe0\xa7\x87 \xe0\xa6\xa8\xe0\xa6\xbe \xe0\xa6\x87\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\x9f\xe0\xa6\xbf\xe0\xa6\x97\xe0\xa7\x8d\xe0\xa6\xb0\xe0\xa7\x87\xe0\xa6\xb6\xe0\xa6\xa8 \xe0\xa6\xac\xe0\xa7\x8d\xe0\xa6\xaf\xe0\xa6\xb0\xe0\xa7\x8d\xe0\xa6\xa5"};
+        for (const auto* st : bn_billing)
+            eng.learn_example(st, "Which team should handle this", "billing payment or subscription issues");
+        for (const auto* st : bn_technical)
+            eng.learn_example(st, "Which team should handle this", "technical bugs or integration problems");
+        eng.save_model(dir);
+        si::norm::grams_enabled() = false;
+    }
+    // 1) engine default (margin 0.05): the near-tie heldout row defers, the
+    //    decisive typo row still answers.
+    {
+        syfox::Engine eng;
+        CHECK(eng.load_model(dir), "defer probe fabric loads");
+        CHECK(eng.defer_margin() == 0.05f, "engine default margin is 0.05");
+        si::norm::grams_enabled() = true;
+        syfox::Usage u;
+        auto a = eng.decide("\xe0\xa6\x85\xe0\xa6\xb0\xe0\xa7\x8d\xe0\xa6\xa1\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa7\xaa\xe0\xa7\xaa\xe0\xa7\xa7\xe0\xa7\xa8 \xe0\xa6\x8f\xe0\xa6\xb0 \xe0\xa6\x9c\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\xaf \xe0\xa6\x85\xe0\xa6\xa4\xe0\xa6\xbf\xe0\xa6\xb0\xe0\xa6\xbf\xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\xa4 \xe0\xa6\xaa\xe0\xa7\x87\xe0\xa6\xae\xe0\xa7\x87\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\x9f \xe0\xa6\xb9\xe0\xa6\xaf\xe0\xa6\xbc\xe0\xa7\x87\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\x93\xe0\xa6\x87 \xe0\xa6\x9f\xe0\xa6\xbe\xe0\xa6\x95\xe0\xa6\xbe \xe0\xa6\xab\xe0\xa7\x87\xe0\xa6\xb0\xe0\xa6\xa4 \xe0\xa6\x9a\xe0\xa6\xbe\xe0\xa6\x87", q, u);
+        CHECK(a[0].deferred && a[0].reason == "ambiguous_tie",
+              "near-tie defers (ambiguous_tie)");
+        CHECK(!a[0].probabilities.empty(), "deferred reply still carries probabilities");
+        si::norm::grams_enabled() = false;
+    }
+    // 1b) decisive rows still answer under the default margin: measured on a
+    //     6-lesson English 2-class fabric, the query/probability gap is 0.296
+    //     (p1 0.648 / p2 0.352) — well clear of the 0.05 margin.
+    {
+        syfox::Engine eng;
+        const char* bill[] = {"my card was charged twice please refund the extra money",
+                              "my card got charged two times refund the money back",
+                              "i want my money back the card charge was wrong"};
+        const char* tech[] = {"the app crashes when i open the login screen",
+                              "app crashes on the login page every time",
+                              "the login screen is broken the app keeps crashing"};
+        for (const auto* st : bill)
+            eng.learn_example(st, "", "billing");
+        for (const auto* st : tech)
+            eng.learn_example(st, "", "technical");
+        sfx::JV dq = sfx::JV::parse(
+            R"({"d":{"type":"choice","instructions":"","criteria":{"billing":"billing","technical":"technical"}}})");
+        syfox::Usage u;
+        auto b = eng.decide("i was charged twice refund the money please", dq, u);
+        CHECK(!b[0].deferred && b[0].choice == "billing",
+              "decisive row still answers under default margin");
+    }
+    // 2) margin 0 restores the v3.3 answer-always behavior on the same row.
+    {
+        syfox::Engine eng;
+        eng.load_model(dir);
+        eng.set_defer_margin(0);
+        si::norm::grams_enabled() = true;
+        syfox::Usage u;
+        auto a = eng.decide("\xe0\xa6\x85\xe0\xa6\xb0\xe0\xa7\x8d\xe0\xa6\xa1\xe0\xa6\xbe\xe0\xa6\xb0 \xe0\xa7\xaa\xe0\xa7\xaa\xe0\xa7\xa7\xe0\xa7\xa8 \xe0\xa6\x8f\xe0\xa6\xb0 \xe0\xa6\x9c\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\xaf \xe0\xa6\x85\xe0\xa6\xa4\xe0\xa6\xbf\xe0\xa6\xb0\xe0\xa6\xbf\xe0\xa6\x95\xe0\xa7\x8d\xe0\xa6\xa4 \xe0\xa6\xaa\xe0\xa7\x87\xe0\xa6\xae\xe0\xa7\x87\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\xa8\xe0\xa7\x8d\xe0\xa6\x9f \xe0\xa6\xb9\xe0\xa6\xaf\xe0\xa6\xbc\xe0\xa7\x87\xe0\xa6\x9b\xe0\xa7\x87 \xe0\xa6\x93\xe0\xa6\x87 \xe0\xa6\x9f\xe0\xa6\xbe\xe0\xa6\x95\xe0\xa6\xbe \xe0\xa6\xab\xe0\xa7\x87\xe0\xa6\xb0\xe0\xa6\xa4 \xe0\xa6\x9a\xe0\xa6\xbe\xe0\xa6\x87", q, u);
+        CHECK(!a[0].deferred && a[0].choice == "billing",
+              "margin 0 answers the same near-tie (v3.3 behavior)");
+        si::norm::grams_enabled() = false;
+    }
+    // 3) score flavor: near-tied levels defer too (exact-tie fabric,
+    //    semantics stripped — same construction as the v3.3 tie test).
+    {
+        syfox::Engine e3;
+        e3.substrate().set_semantics(false);
+        e3.learn_example("alpha beta gamma delta", "", "aaa bbb");
+        sfx::JV sq = sfx::JV::parse(
+            R"({"s":{"type":"score","instructions":"","criteria":["aaa","bbb"]}})");
+        syfox::Usage u;
+        auto a = e3.decide("alpha beta gamma delta", sq, u);
+        CHECK(a[0].deferred && a[0].reason == "ambiguous_tie",
+              "score near-tie defers (ambiguous_tie)");
+    }
+    (void)std::system(("rm -rf " + dir).c_str());
+}
+
+// ---------------------------------------------------------------------------
+// v3.4 multi-hop readout walk (--hops N): BFS over lanes from each probe
+// anchor, per-hop damping hop_coupling/sqrt(hop+1), ascending node-id
+// ordering, width cap 64. Default depth 1 must stay bit-identical to the
+// legacy single-hop readout (replay contract); depth 4 must carry REAL extra
+// margin on multi-hop chains (measured on the probe fabric) and be
+// deterministic.
+// ---------------------------------------------------------------------------
+static void test_multi_hop() {
+    std::cout << "[v3.4 multi-hop readout walk]\n";
+    CHECK(si::Substrate().hop_depth() == 1, "default hop depth is 1 (legacy)");
+    {
+        si::Substrate sub;
+        sub.set_hop_depth(0);  CHECK(sub.hop_depth() == 1, "hop depth clamps low to 1");
+        sub.set_hop_depth(99); CHECK(sub.hop_depth() == 8, "hop depth clamps high to 8");
+    }
+    const std::string dir = "build/test_v34_hops";
+    (void)std::system(("rm -rf " + dir).c_str());
+    sfx::JV chain_q = sfx::JV::parse(
+        R"({"i":{"type":"choice","instructions":"","criteria":{
+             "sparrow":"sparrow","bird":"bird","animal":"animal"}}})");
+    {
+        syfox::Engine eng;
+        eng.learn_example("a sparrow is a bird", "", "bird");
+        eng.learn_example("a bird is an animal", "", "animal");
+        eng.learn_example("the bird has feathers and wings", "", "bird");
+        eng.save_model(dir);
+    }
+    syfox::Engine eng;
+    CHECK(eng.load_model(dir), "hop chain fabric loads");
+    const std::string state = "a sparrow is a bird";
+
+    // 1) legacy depth: same engine, default and explicit 1 agree exactly.
+    {
+        syfox::Engine e1; e1.load_model(dir);
+        syfox::Engine e2; e2.load_model(dir);
+        e2.substrate().set_hop_depth(1);
+        syfox::Usage u1, u2;
+        auto a1 = e1.decide(state, chain_q, u1);
+        auto a2 = e2.decide(state, chain_q, u2);
+        CHECK(a1[0].choice == a2[0].choice &&
+              std::fabs(a1[0].confidence - a2[0].confidence) < 1e-9f,
+              "default depth == explicit depth 1 (legacy bit-identity)");
+    }
+    // 2) depth 4 keeps the answer and is deterministic across replays.
+    {
+        syfox::Engine e4; e4.load_model(dir);
+        e4.substrate().set_hop_depth(4);
+        syfox::Usage u;
+        auto a = e4.decide(state, chain_q, u);
+        CHECK(!a[0].deferred, "depth-4 chain answers");
+        syfox::Usage u2;
+        auto b = e4.decide(state, chain_q, u2);
+        CHECK(b[0].choice == a[0].choice &&
+              std::fabs(b[0].confidence - a[0].confidence) < 1e-9f,
+              "depth-4 walk is deterministic");
+    }
+    // 3) deeper walk carries at least the legacy margin on the chain
+    //    (measured on the probe fabric: 3-4 hop targets gain margin).
+    {
+        syfox::Engine e1; e1.load_model(dir);
+        syfox::Engine e4; e4.load_model(dir);
+        e4.substrate().set_hop_depth(4);
+        syfox::Usage u1, u4;
+        auto a1 = e1.decide(state, chain_q, u1);
+        auto a4 = e4.decide(state, chain_q, u4);
+        // margins: top-2 probability gap
+        auto gap = [](const std::vector<std::pair<std::string, float>>& ps) {
+            float p1 = 0, p2 = 0;
+            for (const auto& kv : ps) {
+                if (kv.second > p1) { p2 = p1; p1 = kv.second; }
+                else if (kv.second > p2) p2 = kv.second;
+            }
+            return p1 - p2;
+        };
+        CHECK(a4[0].choice == a1[0].choice && gap(a4[0].probabilities) >= gap(a1[0].probabilities) - 1e-6f,
+              "depth-4 keeps the chain answer with no margin loss");
+    }
+    (void)std::system(("rm -rf " + dir).c_str());
+}
+
+// ---------------------------------------------------------------------------
+// v3.4 question-context gate (two-stage settle, opt-in): stage 1 settles the
+// question's tokens into a context field; stage 2 composes the settled state
+// field as (1-alpha)*state + alpha*context (alpha default 0.5). Measured on
+// the radio probe: the answer holds, confidence moves (0.056 -> 0.061), OOD
+// abstention is preserved. Deterministic; disclosed in usage.
+// ---------------------------------------------------------------------------
+static void test_ctx_gate() {
+    std::cout << "[v3.4 question-context gate]\n";
+    const std::string dir = "build/test_v34_ctx";
+    (void)std::system(("rm -rf " + dir).c_str());
+    sfx::JV q = sfx::JV::parse(
+        R"({"q":{"type":"choice","instructions":"Who found the radio?",
+                "criteria":{"tariq":"the person who found it",
+                             "salma":"a person present",
+                             "radio":"the object found"}}})");
+    {
+        syfox::Engine eng;
+        eng.learn_example("tariq found the radio in the lab", "", "tariq");
+        eng.learn_example("the radio was found by tariq", "", "tariq");
+        eng.learn_example("who found the radio tariq did", "", "tariq");
+        eng.learn_example("salma was there in the room", "", "salma");
+        eng.learn_example("salma saw the radio on the table", "", "salma");
+        eng.save_model(dir);
+    }
+    const std::string state = "The radio was found by Tariq. Salma was there.";
+    // 1) default OFF: no composition, no disclosure.
+    {
+        syfox::Engine eng;
+        CHECK(eng.load_model(dir), "ctx probe fabric loads");
+        syfox::Usage u;
+        auto a = eng.decide(state, q, u);
+        CHECK(!u.ctx_gate && !a[0].deferred && a[0].choice == "tariq",
+              "ctx gate OFF: plain decide unchanged");
+    }
+    // 2) ON: composition disclosed, answer holds, deterministic.
+    {
+        syfox::Engine eng;
+        eng.load_model(dir);
+        eng.set_ctx_gate(true);
+        CHECK(eng.ctx_gate_on(), "ctx gate toggles on");
+        syfox::Usage u;
+        auto a = eng.decide(state, q, u);
+        CHECK(u.ctx_gate && std::fabs(u.ctx_alpha - 0.5f) < 1e-9f,
+              "ctx gate ON: composition disclosed at alpha 0.5");
+        CHECK(!a[0].deferred && a[0].choice == "tariq",
+              "ctx gate ON: question-relevant answer holds");
+        syfox::Usage u2;
+        auto b = eng.decide(state, q, u2);
+        CHECK(b[0].choice == a[0].choice &&
+              std::fabs(b[0].confidence - a[0].confidence) < 1e-9f,
+              "ctx gate ON: deterministic");
+    }
+    // 3) OOD abstention survives the composition.
+    {
+        syfox::Engine eng;
+        eng.load_model(dir);
+        eng.set_ctx_gate(true);
+        sfx::JV oq = sfx::JV::parse(
+            R"({"i":{"type":"choice","instructions":"What is the submarine's name?",
+                    "criteria":{"zzz":"zzz","qqq":"qqq"}}})");
+        syfox::Usage u;
+        auto a = eng.decide("The purple elephant boarded the spaceship.", oq, u);
+        CHECK(a[0].deferred, "ctx gate ON: OOD abstention preserved");
+    }
+    (void)std::system(("rm -rf " + dir).c_str());
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -1405,6 +1666,9 @@ int main() {
     test_hierarchy();
     test_ablation_distinctness();
     test_question_gate();
+    test_defer_ties();
+    test_multi_hop();
+    test_ctx_gate();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

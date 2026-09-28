@@ -751,6 +751,73 @@ Synthetic-Intelligence substrate (full story in the
   honest-silence contract above, debug-visible via `SYFOX_DEBUG_READOUT=1`,
   and pinned by `tests/readout_silence_test.sh` / `make readout-silence`.
 
+## v3.4 — honest defer for ties, multi-hop readout, question-context gate
+
+Three decision-layer mechanisms (the SI substrate physics stays frozen; every
+knob is measured, deterministic, and disclosed):
+
+- **Honest defer for near-ties (engine default ON, margin 0.05)**: when the
+  top two probabilities are closer than the margin, the readout does not
+  carry a decision — the answer defers with `reason: ambiguous_tie` instead
+  of shipping a coin-flip as a confident label. The engine owns it, so CLI,
+  C API, HTTP bridge and bench share one behavior (the v3.1 CLI post-pass
+  `low_margin` is gone). Flags: `--defer-margin P`, `--no-defer`. Measured:
+  tickets bench score accuracy 0.938 → **1.000** with defer rate 0.063 (the
+  one wrong score row was a near-tie, now honestly deferred); the 6-row game
+  toy fabric's decisions all sit at mean margin 0.023, so they now disclose
+  as all-deferred (`choice_defer_rate: 1.0`) instead of noise-answering.
+  Bench JSON gained `choice_defer_rate` / `score_defer_rate` so selective
+  accuracy reads honestly (accuracy over ANSWERED questions, defers counted
+  separately).
+- **Multi-hop readout walk (opt-in, `--hops N`, default 1 = legacy)**: walks
+  lanes BFS-style from each probe anchor up to N levels with per-hop damping
+  `hop_coupling/sqrt(hop+1)` (hop 1 ×0.707 … hop 4 ×0.447), levels visited in
+  ascending node-id order, width-capped at 64 per level. Deterministic;
+  default N=1 is bit-identical to every earlier version (test-enforced).
+  Measured on chain probes: 2-hop chains already answer at N=1 (diffusion
+  carries them); the walk lifts far targets into readout visibility
+  (3-hop target 0.1061 → 0.1097; 4-hop target 0.210 vs ~dust at legacy) —
+  but damped lanes keep far targets near-tied, and the honest-defer layer
+  refuses to dress them as confident answers. Faint multi-hop signal is now
+  VISIBLE and HONEST instead of confident noise.
+- **Question-context gate (opt-in, `--ctx-gate`, `--ctx-alpha F`)**:
+  two-stage settle — stage 1 settles the question's own tokens
+  (instructions + criteria descriptions, no labels) into a context field;
+  stage 2 re-settles the state and the final field composes as
+  `(1-alpha)*state + alpha*context` (alpha default 0.5). Disclosed as
+  `usage.ctx_gate` / `usage.ctx_alpha`. Measured: who-found answer holds with
+  confidence 0.056 → 0.061; OOD abstention preserved; temporal probes hold
+  (with a disclosed confidence tradeoff). Deterministic; two settled fields
+  composed at the decision layer — settle physics untouched.
+
+## Architectural boundaries (System-2 limits — honest list)
+
+These are NOT bugs; they are capabilities a bag-of-words SI core does not
+have and cannot fake. Each is measured; none is hidden by a confident-looking
+wrong answer — the v3.4 defer layer converts most of them into honest
+deferrals.
+
+- **Multi-hop propagation beyond 2 hops stays near-tied.** Diffusion carries
+  2-hop chains (alarm → lights answers at depth 1); 3-4 hop targets gain only
+  damped scraps of energy (`1/sqrt(hop+1)` × per-lesson lane decay), so they
+  defer as `ambiguous_tie` rather than answer. A typed or weighted relational
+  fabric would be needed for crisp transitive chains.
+- **Arithmetic.** No numeric circuit exists in the physics; temperature/
+  counting questions answered by token salience alone (architectural limit,
+  documented since v3.3, shared with the upstream repo).
+- **Temporal ordering is training-side, not inference-side.** "Latest/after"
+  probes answer only when the fabric carries lanes that encode the ordering
+  (the latest-temperature probe answers via the question gate at conf 0.117);
+  a fabric without such lanes cannot infer order at readout.
+- **Subject-object reversal.** The core is deliberately bag-of-words: lanes
+  connect co-occurring concepts without typing them, so "who found the radio"
+  and "what did the radio find" read the same lanes. The original research
+  repo's TYPED graph edges are exactly what this core omits by design.
+- **OOD with lit candidates.** Fully dark candidates defer
+  (`unknown_candidates`); but a state-lit OOD question whose candidates all
+  sit in the fabric can still pick a confident wrong answer — abstention is
+  only as good as the energy gap, which is why the defer margin exists.
+
 ## License & credit
 
 MIT © 2026 Mr-DS-ML-85. Core mechanics ported from the author's

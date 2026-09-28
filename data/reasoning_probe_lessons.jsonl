@@ -12,3 +12,10 @@
 {"state": "the temperature rose to twenty five degrees at noon", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twentyfive": "twentyfive"}}}, "labels": {"i": "twentyfive"}}
 {"state": "the temperature fell to twenty two degrees in the evening", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twentytwo": "twentytwo"}}}, "labels": {"i": "twentytwo"}}
 {"state": "the latest temperature reading was twenty two degrees", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"twentytwo": "twentytwo"}}}, "labels": {"i": "twentytwo"}}
+{"state": "a sparrow is a bird", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"bird": "bird"}}}, "labels": {"i": "bird"}}
+{"state": "a bird is an animal", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"animal": "animal"}}}, "labels": {"i": "animal"}}
+{"state": "a sparrow has feathers and wings", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"bird": "bird"}}}, "labels": {"i": "bird"}}
+{"state": "alpha relays to bravo", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"bravo": "bravo"}}}, "labels": {"i": "bravo"}}
+{"state": "bravo relays to charlie", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"charlie": "charlie"}}}, "labels": {"i": "charlie"}}
+{"state": "charlie relays to delta", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"delta": "delta"}}}, "labels": {"i": "delta"}}
+{"state": "delta relays to echo", "questions": {"i": {"type": "choice", "instructions": "", "criteria": {"echo": "echo"}}}, "labels": {"i": "echo"}}

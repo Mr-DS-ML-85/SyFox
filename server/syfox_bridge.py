@@ -81,6 +81,11 @@ class SyFoxEngine:
                                        default off; measured trade-off: fixes
                                        reasoning probes, hurts tickets-cal 0.9533->0.9000)
             question_gate_floor float -> v3.3 floor for gated candidates (0..1, default 0.25)
+            defer_margin    float  -> v3.4 near-tie defer margin (default 0.05 engine-side)
+            no_defer        bool   -> v3.4 disable the near-tie defer
+            hops            int    -> v3.4 multi-hop readout walk depth (1 = legacy, default)
+            ctx_gate        bool   -> v3.4 question-context two-stage settle (opt-in)
+            ctx_alpha       float  -> v3.4 context weight in the composed field (0..1, default 0.5)
         Returns (answers, usage) plus "evidence" key when requested.
         usage carries "retrieval": [{label, resonance}] when priming fired.
         """

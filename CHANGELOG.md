@@ -1,3 +1,71 @@
+## v3.4.0 — honest defer for ties, multi-hop readout walk, question-context gate
+
+Three decision-layer mechanisms; the SI substrate physics (decay 0.82,
+diffusion 0.45, K_settle 8, silence floors) stays frozen. Everything is
+measured, deterministic, and disclosed.
+
+**HONEST DEFER FOR NEAR-TIES (engine default ON, margin 0.05).** When the
+top two probabilities are closer than the margin the readout does not carry
+a decision: the answer defers with `reason: ambiguous_tie` instead of
+shipping a coin-flip as a confident label. Engine-level (members
+`defer_margin_`, `set_defer_margin`), so CLI, C API, HTTP bridge and bench
+share ONE behavior — the v3.1 CLI post-pass (`low_margin`, default OFF) is
+removed; `--defer-margin P` now sets the engine knob and `--no-defer`
+restores the v3.3 answer-always behavior (both verified end-to-end on a
+measured gap-0.186 fabric: default answers, `--defer-margin 0.25` defers
+`ambiguous_tie`, `--no-defer` overrides). Score questions defer on the same
+margin over level probabilities. MEASURED bench impact (train-split,
+v3.3.1 -> v3.4.0): tickets choice 0.875 unchanged (defer 0), score 0.938 ->
+1.000 with defer 0.063 (the one wrong score row was a near-tie, now honestly
+deferred); guard 0.778 unchanged (defer 0); the 6-row game toy fabric
+discloses as all-deferred (`choice_defer_rate` 1.0 — its decisions sit at
+mean margin 0.023, i.e. they never carried signal; v3.3's 1.000 was
+in-sample noise-picking that happened to be right). Bench JSON gained
+`choice_defer_rate`/`score_defer_rate` (accuracy over ANSWERED questions,
+defers counted separately — selective accuracy reads honestly). Unit tests:
+5 legacy groups pin `set_defer_margin(0)` (bengali argmax, M3 contradiction
+evidence, M3 ledger persistence, hierarchy, question-gate readout contract),
+new group `test_defer_ties` pins the defer (near-tie defers with
+probabilities intact, decisive row answers, margin 0 answers the same
+near-tie, score flavor defers).
+
+**MULTI-HOP READOUT WALK (opt-in, `--hops N`, default 1 = legacy).**
+`Substrate::set_hop_depth` (clamped 1..8): depths > 1 walk lanes BFS-style
+from each probe anchor up to N levels with per-hop damping
+`hop_coupling/sqrt(hop+1)` (hop 1 x0.707 ... hop 4 x0.447), levels collected
+in ascending NodeId order (std::map), width-capped at 64 nodes per level
+(`kHopWidthCap`), never revisited — deterministic and bounded. Default
+depth 1 keeps the legacy single-hop code path BIT-IDENTICAL (test-enforced:
+default == explicit 1). MEASURED on chain probes (2-hop already answers at
+N=1 — diffusion carries alarm->lights at probs 0.314 top, unchanged at N=4;
+3-hop sparrow->animal target 0.1061 -> 0.1097; 4-hop relay far target echo
+visible at 0.210 at N=4) — damped lanes keep far targets near-tied, so the
+reported conf-0.019 noise answers now surface as honest `ambiguous_tie`
+deferrals instead. Probe suite extended with the Test 18 (sparrow->bird->
+animal) and Test 21 (alpha..echo 4-hop relay) analogs + hops configs;
+unit group `test_multi_hop` pins default/clamp/bit-identity/determinism.
+
+**QUESTION-CONTEXT GATE (opt-in, `--ctx-gate`, `--ctx-alpha F`).** Two-stage
+settle: stage 1 settles the question's own tokens (instructions + criteria
+descriptions, NO labels) into a context field; stage 2 re-settles the state
+(prime + state + bridges, unchanged) and `Substrate::blend_field` composes
+`e = (1-alpha)*state + alpha*context` (alpha default 0.5, clamped [0,1]).
+Two ALREADY-SETTLED fields composed at the decision layer — settle() physics
+untouched, deterministic, disclosed as `usage.ctx_gate`/`usage.ctx_alpha`.
+MEASURED on the probe fabric: who-found answer holds (Tariq), confidence
+0.056 -> 0.061; OOD submarine probe still abstains (`unknown_candidates`);
+latest-temperature holds with a disclosed confidence tradeoff (0.007 ->
+0.003). Unit group `test_ctx_gate` pins OFF-unchanged / ON-disclosure /
+answer-holds / determinism / OOD-preserved.
+
+**Surface.** CLI `--defer-margin P` (engine knob), `--no-defer`, `--hops N`
+(1..8), `--ctx-gate`, `--ctx-alpha F`; C API decide opts `defer_margin`,
+`no_defer`, `hops`, `ctx_gate`, `ctx_alpha`; bridge opts docs; usage JSON
+`ctx_gate`/`ctx_alpha` disclosure. README: v3.4 section + "Architectural
+boundaries (System-2 limits)" honest list. Verified: full unit suite passes
+(incl. 3 new groups), `make readout-silence` ALL PASS, bench deterministic
+x3 with OOD defer 1.0 x3. VERSION 3.3.1 -> 3.4.0.
+
 ## v3.3.1 — readout-silence threshold made explicit (BLOCKER fix)
 
 **The reported false defer, root-caused on the shipped tree.** The report

@@ -43,6 +43,14 @@ LESSONS = [
     ("the temperature rose to twenty five degrees at noon", "twentyfive"),
     ("the temperature fell to twenty two degrees in the evening", "twentytwo"),
     ("the latest temperature reading was twenty two degrees", "twentytwo"),
+    # --- v3.4 multi-hop chains (reported Tests 18/21 analogs) ---
+    ("a sparrow is a bird", "bird"),
+    ("a bird is an animal", "animal"),
+    ("a sparrow has feathers and wings", "bird"),
+    ("alpha relays to bravo", "bravo"),
+    ("bravo relays to charlie", "charlie"),
+    ("charlie relays to delta", "delta"),
+    ("delta relays to echo", "echo"),
     # --- OOD block: no submarine / favorite-color lessons anywhere ---
 ]
 
@@ -86,6 +94,22 @@ PROBES = [
                     "criteria": {"twenty": "20 degrees", "twentyfive": "25 degrees",
                                  "twentytwo": "22 degrees"}}},
         "expect": "twentytwo", "reported_failure": "chose 20",
+    },
+    {
+        "name": "Test 18: sparrow->bird->animal (3-hop)",
+        "state": "What is a sparrow?",
+        "q": {"i": {"type": "choice", "instructions": "What is a sparrow?",
+                    "criteria": {"sparrow": "sparrow", "bird": "bird",
+                                 "animal": "animal"}}},
+        "expect": "animal (2 lane hops)", "reported_failure": "near-uniform, conf 0.019",
+    },
+    {
+        "name": "Test 21: alpha..echo relay (4-hop)",
+        "state": "Where does the alpha relay to?",
+        "q": {"i": {"type": "choice", "instructions": "Where does the alpha relay to?",
+                    "criteria": {"bravo": "bravo", "charlie": "charlie",
+                                 "delta": "delta", "echo": "echo"}}},
+        "expect": "echo (4 lane hops)", "reported_failure": "barely propagates",
     },
     {
         "name": "Test 17: OOD submarine color",
@@ -138,6 +162,9 @@ def main():
         ("gate ON floor 0.10", ["--question-gate", "--question-gate-floor", "0.10"]),
         ("gate ON floor 0.25", ["--question-gate"]),
         ("gate ON floor 0.50", ["--question-gate", "--question-gate-floor", "0.50"]),
+        ("hops 1 (legacy)", []),
+        ("hops 2", ["--hops", "2"]),
+        ("hops 4", ["--hops", "4"]),
     ]
     table = {}
     for cname, extra in configs:

@@ -222,6 +222,16 @@ char* syfox_decide_ex(SyFoxHandle* h, const char* state, const char* questions_j
                 if (o.has("question_gate"))   h->eng->set_question_gate(truthy(o.at("question_gate")));
                 if (o.has("question_gate_floor"))
                     h->eng->set_question_gate_floor(static_cast<float>(o.at("question_gate_floor").as_num(0.25)));
+                // v3.4 honest defer + multi-hop walk + question-context gate
+                if (o.has("defer_margin"))
+                    h->eng->set_defer_margin(static_cast<float>(o.at("defer_margin").as_num(0.05)));
+                if (o.has("no_defer") && truthy(o.at("no_defer")))
+                    h->eng->set_defer_margin(0);
+                if (o.has("hops"))
+                    h->eng->substrate().set_hop_depth(static_cast<int>(o.at("hops").as_num(1)));
+                if (o.has("ctx_gate"))        h->eng->set_ctx_gate(truthy(o.at("ctx_gate")));
+                if (o.has("ctx_alpha"))
+                    h->eng->set_ctx_alpha(static_cast<float>(o.at("ctx_alpha").as_num(0.5)));
             }
         } catch (...) { /* opts are optional; a bad opts object is ignored */ }
     }

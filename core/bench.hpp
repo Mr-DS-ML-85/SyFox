@@ -242,6 +242,10 @@ struct PassResult {
     QType choice, score;
     long noul_tp = 0, noul_fp = 0, noul_tn = 0, noul_fn = 0;  // pred true = HOLD
     long deferred = 0, noul_n = 0;
+    // v3.4: totals across answered + deferred, so the defer rate is disclosed
+    // next to selective accuracy (a 0.000 accuracy with n=0 means "all deferred",
+    // not "all wrong")
+    long choice_total = 0, score_total = 0;
     std::vector<double> latency_us;
 
     static int ece_bin(float conf) {
@@ -313,6 +317,8 @@ inline PassResult run_pass(Engine& eng, const std::vector<Probe>& probes, int la
             const std::string type = q.at("type").as_str();
             const std::string stored =
                 p.labels.count(qkv.first) ? p.labels.at(qkv.first) : "";
+            if (type == "choice") ++pr.choice_total;
+            else if (type == "score") ++pr.score_total;
             if (a.deferred) continue;
             if (type == "choice" || type == "score") {
                 PassResult::QType& agg = (type == "choice") ? pr.choice : pr.score;
@@ -354,6 +360,7 @@ struct BenchReport {
     // routing (Jev: 4-workflow accuracy 67.8%)
     double choice_accuracy = 0, score_accuracy = 0;
     long   choice_n = 0, score_n = 0;
+    double choice_defer_rate = 0, score_defer_rate = 0;   // v3.4 selective-accuracy disclosure
     double choice_ece = 0, score_ece = 0;
     double conf_correct = 0, conf_wrong = 0;      // choice+score, confidence gap
     double mean_margin = 0; long close_calls = 0, margin_n = 0;
@@ -376,8 +383,10 @@ struct BenchReport {
         sfx::JVObj routing;
         routing["choice_accuracy"] = r2(choice_accuracy);
         routing["choice_n"] = static_cast<double>(choice_n);
+        routing["choice_defer_rate"] = r2(choice_defer_rate);
         routing["score_accuracy"] = r2(score_accuracy);
         routing["score_n"] = static_cast<double>(score_n);
+        routing["score_defer_rate"] = r2(score_defer_rate);
         routing["mean_margin"] = r2(mean_margin);
         routing["close_calls"] = static_cast<double>(close_calls);
         routing["margin_n"] = static_cast<double>(margin_n);
@@ -457,6 +466,11 @@ inline BenchReport run(Engine& eng, const std::vector<sfx::JV>& eval_rows,
     if (pr.choice.n > 0) rep.choice_accuracy = static_cast<double>(pr.choice.correct) / pr.choice.n;
     if (pr.score.n  > 0) rep.score_accuracy  = static_cast<double>(pr.score.correct)  / pr.score.n;
     rep.choice_n = pr.choice.n; rep.score_n = pr.score.n;
+    // v3.4: defer rates over ALL choice/score questions (answered + deferred)
+    if (pr.choice_total > 0)
+        rep.choice_defer_rate = 1.0 - static_cast<double>(pr.choice.n) / pr.choice_total;
+    if (pr.score_total > 0)
+        rep.score_defer_rate = 1.0 - static_cast<double>(pr.score.n) / pr.score_total;
     rep.choice_ece = PassResult::ece(pr.choice.ece_bins);
     rep.score_ece  = PassResult::ece(pr.score.ece_bins);
     // margins/close-calls from the mixed probes when we have them (that is

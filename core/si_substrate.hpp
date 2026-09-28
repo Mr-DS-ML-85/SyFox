@@ -90,6 +90,10 @@ using NodeId = std::uint32_t;
 // ---------------------------------------------------------------------------
 inline constexpr std::size_t SEM_DIMS = 64;
 
+// v3.4 multi-hop readout walk: max nodes expanded per hop level (smallest
+// NodeIds first, deterministic). Bounds the walk at O(levels x 64).
+inline constexpr std::size_t kHopWidthCap = 64;
+
 // v3.2 context signature attached to a lane (read-side of Stage 2).
 struct LaneCtx {
     std::vector<NodeId> required;    // all of these should be in the state
@@ -479,12 +483,48 @@ public:
             const auto lane_it = out_.find(it->second);
             if (lane_it == out_.end() || lane_it->second.empty()) continue;
             if (mode == ReadoutMode::Specific) {
-                float wsum = 0.0f, flow = 0.0f;
-                for (const auto& lane : lane_it->second) {
-                    wsum += lane.second;
-                    flow += lane.second * nodes_[lane.first].energy;
+                if (hop_depth_ <= 1) {
+                    // legacy single-hop path — bit-identical to pre-v3.4
+                    float wsum = 0.0f, flow = 0.0f;
+                    for (const auto& lane : lane_it->second) {
+                        wsum += lane.second;
+                        flow += lane.second * nodes_[lane.first].energy;
+                    }
+                    if (wsum > 0.0f) r += cfg_.hop_coupling * flow / wsum;
+                } else {
+                    // v3.4 multi-hop walk: BFS over lanes from this anchor.
+                    // Level h contributes hop_coupling/sqrt(h+1) of the
+                    // weight-averaged energy there. Deterministic: candidate
+                    // nodes collect in ascending NodeId order (std::map),
+                    // width-capped, never revisited.
+                    std::vector<char> visited(nodes_.size(), 0);
+                    visited[it->second] = 1;
+                    std::vector<NodeId> frontier{it->second};
+                    for (int hop = 1; hop <= hop_depth_ && !frontier.empty(); ++hop) {
+                        std::map<NodeId, float> next_w;
+                        for (NodeId u : frontier) {
+                            const auto uit = out_.find(u);
+                            if (uit == out_.end()) continue;
+                            for (const auto& lane : uit->second)
+                                if (!visited[lane.first])
+                                    next_w[lane.first] += lane.second;
+                        }
+                        if (next_w.empty()) break;
+                        std::vector<NodeId> level;
+                        float wsum = 0.0f, flow = 0.0f;
+                        for (const auto& kv : next_w) {
+                            if (level.size() >= kHopWidthCap) break;
+                            level.push_back(kv.first);
+                            wsum += kv.second;
+                            flow += kv.second * nodes_[kv.first].energy;
+                        }
+                        for (NodeId v : level) visited[v] = 1;
+                        const float damp = cfg_.hop_coupling
+                            / std::sqrt(static_cast<float>(hop + 1));
+                        if (wsum > 0.0f) r += damp * flow / wsum;
+                        frontier.swap(level);
+                    }
                 }
-                if (wsum > 0.0f) r += cfg_.hop_coupling * flow / wsum;
             } else {                                      // Support: active lane mass
                 for (const auto& lane : lane_it->second)
                     r += cfg_.hop_coupling * lane.second * nodes_[lane.first].energy;
@@ -506,6 +546,17 @@ public:
         float s = 0.0f;
         for (const auto& n : nodes_) s += n.energy;
         return s;
+    }
+
+    // v3.4 — decision-layer field composition (question-context gate): blend
+    // the settled state field with an ALREADY-SETTLED context field,
+    // e = (1-alpha)*e + alpha*ctx. Settle() physics is untouched — this
+    // composes two settled fields at the decision layer, so the question can
+    // carry part of the readout field without rewriting the dynamics.
+    void blend_field(const std::vector<float>& ctx, float alpha) {
+        const std::size_t n = std::min(nodes_.size(), ctx.size());
+        for (std::size_t i = 0; i < n; ++i)
+            nodes_[i].energy = (1.0f - alpha) * nodes_[i].energy + alpha * ctx[i];
     }
 
     float node_energy(NodeId id) const {
@@ -678,6 +729,16 @@ public:
 
     bool has_semantics() const { return !semvecs_.empty(); }
     void set_semantics(bool on) { sem_enabled_ = on; }
+
+    // v3.4 — multi-hop readout walk depth. 1 (default) = the legacy single-hop
+    // readout, bit-identical to every earlier version (replay contract).
+    // Depths 2..8 walk lanes BFS-style from each probe anchor with per-hop
+    // damping hop_coupling/sqrt(hop+1): hop 1 x0.707, hop 2 x0.577, hop 3
+    // x0.500, hop 4 x0.447. Levels are visited in ascending NodeId order and
+    // capped at 64 nodes per level, so the walk is deterministic and
+    // bounded. Readout-layer only: settle() physics untouched.
+    void set_hop_depth(int d) { hop_depth_ = std::max(1, std::min(8, d)); }
+    int hop_depth() const { return hop_depth_; }
     std::size_t resonance_edge_count() const { return sem_edge_count_; }
     std::size_t lane_context_count() const { return lane_ctx_.size(); }
 
@@ -1144,6 +1205,7 @@ private:
     std::unordered_map<std::uint64_t, std::unordered_map<NodeId, float>> lane_ctx_acc_; // learn-time scratch
     std::unordered_set<NodeId> present_;               // tokens injected since last reset_field()
     bool sem_enabled_ = true;                          // runtime kill switch (--no-semantics)
+    int  hop_depth_ = 1;                               // v3.4 readout walk depth (1 = legacy)
     std::uint64_t state_hash_ = 0;   // decision fingerprint for Miller sampling
     float last_cap_ = 0.0f;          // cap used by the last settle()
 

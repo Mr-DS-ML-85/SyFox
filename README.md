@@ -1203,6 +1203,105 @@ that the engine now MEASURES and discloses when it is thinking deeper
 (adaptive depth), seeing more (multi-vector), reasoning by relation type
 (causal lanes), and whether it finished thinking (self-verification).
 
+## v3.9 — the constructive substrate: SI's Layer-2 reasoning stack, ported at last
+
+The v3.9 audit made two charges, both verified and both answered here.
+
+**Charge 1: "SyFox is not a port of SI — it shares two constants."** TRUE for
+the physics, and the false advertising is gone: `si_substrate.hpp` now states
+the honest lineage in its header (shared: substrate architecture, salience
+integrator, selection modes; different by design: scalar energy vs SI's
+mass-spring oscillators, undirected lanes vs stiffness/resonance tunnels,
+pass-counted settles vs dt=0.02 ticks, native 0.82/0.45 constants). What the
+audit ALSO surfaced was the real gap: syfox had SI's Layer-1 field but NONE
+of its Layer-2 constructive substrate — no typed knowledge graph, no chaining,
+no proof traces, no rule induction, no discovery queries, no knowledge base.
+v3.9 ports that stack, faithfully, into `core/reason.hpp` (1,500+ lines,
+self-contained):
+
+- **The typed graph** (`sxr::ConceptGraph`): directed edges with FULL
+  provenance (rule, parent_a, parent_b, step); O(1) existence, O(deg)
+  neighbourhoods; bounded retraction (RADE semantics — removing a premise
+  retracts exactly its derived descendants).
+- **The nine reasoning primitives** (synthetic-intelligence.md §4.4):
+  transitive, deduction (modus ponens), inheritance (class-property flow),
+  negation (contrapositive), case analysis (disjunction elimination),
+  induction (schematic, min-witnesses), analogy (structure-mapping transfer),
+  abduction (backward-only), recursion (the fixpoint loop). Forward chaining
+  to fixpoint under a tension budget (Axiom II), backward chaining with
+  adaptive iterative deepening, cycle-safe via an active goal stack.
+- **Proof traces**: every derived edge reconstructs its full derivation chain;
+  the verifier re-checks each derivation against the rule set down to the
+  premises before an answer is trusted.
+- **The meta-learner** (§5.3.3): contiguous derivation sub-chains are counted
+  across queries; a chain that saves ≥ 2 bits is promoted to a macro-rule.
+  The thinker index (§3.4) measures C (composition) vs R (retrieval).
+- **The six discovery queries** (inference.hpp): isolated subgraphs, dangling
+  nodes, the exact missing bridge (bidirectional BFS), symmetry gaps (the
+  Maxwell displacement-current pattern), anomalies, and the gap-query
+  classifier. `syfox discover` runs them.
+- **The .axioms knowledge format** — SI's own data files
+  (syllogism.axioms, insulin_pathway.axioms, maxwell_equations.axioms, ...)
+  load unchanged. New commands: `syfox axioms --load FILE`, `syfox ask
+  --query "subject relation object" [--backward]`, `syfox reason`,
+  `syfox discover [--query "..."]`, `syfox thinker --queries FILE`,
+  `syfox audit`. Loading axioms interns their concepts into the fabric AND
+  lays axiom lanes — one vocabulary, two stores. The RADE proof pass
+  (`--proof`) cites the typed path behind a choice answer;
+  `--require-proof` defers choices the knowledge layer cannot justify.
+
+**Charge 2: "many papers unimplemented."** The remaining never-ported
+mechanisms land here, each opt-in, each with a replay contract, each a
+measurement-first port from the digest agents' reading of the papers:
+
+| paper | mechanism | flag / command |
+|---|---|---|
+| RADE | premise-cited proof pass at decide | `--proof` / `--require-proof` |
+| CMD §4 | wavefront gate: candidates the query reached | `--wavefront-gate` |
+| MCPE/CPME | momentum readout: echo suppression | `--momentum-readout` |
+| HTR §2.2 | coherence gate: structural rise vs field (ΔR) | `--coherence-gate` |
+| VGHT | coincidence-gated hop walk C=σ(12(E·E−0.05)) | `--vght-gate` |
+| P-CMA (shell) | gradient-free CEM over source-cap variants | `--cem-plan` |
+| MAA | fragment abduction for unknown tokens | `--fragment-abduction` |
+| fixes.md | OOD signature density gate (kNN over answered signatures) | `--ood-knn` |
+| RIFA SIL | contradiction tension accumulator + conflict-zone defer | `--tension-gate` |
+| CME | graded fingerprint re-teach (half dose) | `--fingerprints` |
+| CMD §2.5 | sentinel bigrams (word-boundary position) | `--sentinels on` |
+| RB (surrogate) | pro/con negation-scoped lane namespaces | `--pro-con on` |
+| CPME-II (discrete) | per-lane order evidence Φ-blend, ORD1 tail | `--order-consolidation on` |
+| CMA/CCH | DERIVED-vs-INDUCED path-additivity audit | `syfox audit` |
+
+Measured (think30, same 30 probes, every number from an actual run in this
+tree): baseline 0.467 → thinking 0.600 (v3.8) → multivector 0.633 (v3.8) →
+**v3.9 stack 0.700 (21/30)** — thinking flags + `--wavefront-gate
+--cem-plan` on a `--distvec --multi-vector` fabric. The bench replay is
+bit-identical to v3.8 (tickets 1.000/1.000, guard 0.778, game defer 0.333,
+OOD defer 1.0 ×3, deterministic). JEV head-to-head unchanged where measured
+(95.5% answered, n=44, ≤591 µs vs 70–500 ms) and extended where only syfox
+can answer: proof traces, discovery queries, the thinker index, and the
+axiom format are axes JEV does not implement or publish.
+
+**Honest negatives, measured and disclosed.** Not every paper mechanism
+helps at demo scale, and the suite says so: `--momentum-readout` alone moved
+think30 0.600 → 0.533 (its peak-diffusion-gain form suppresses too much on
+8-pass burst fields — kept as an instrument, not in the recommended stack);
+`--coherence-gate` and `--vght-gate` alone measured 0.567; the learn-side
+flags (`--fingerprints --sentinels --order-consolidation --pro-con`) changed
+demo-scale fabrics for the worse (0.433 combined) and are documented as
+corpus-scale features. `--cem-plan` alone is exactly neutral (0.600) and
+becomes positive in combination. The CSAT boundary theorem is now documented
+in the substrate header: global viscosity/decay modulation is rank-preserving
+and can never change an arg-max readout — any readout-affecting mechanism
+must couple per-node, which is why the settle physics stays frozen.
+
+**Remaining non-ports (paper verdicts, unchanged):** BSMA (no mechanism —
+the irreducibility fixpoint is already syfox's SettleTrace), CSAT (per-node
+chaotic decay mutates frozen physics; global form proven readout-neutral),
+liouville_analog/cr_bound (theory capstones), bmsa_new/prm/ntda/srg
+(design-only or retracted), CMC/HRM/cb/SCER-doctrine (dead with their
+substrates or incompatible with honest silence), ZeroGrad + ANQ LEA
+(already absorbed into the lineage physics).
+
 ## License & credit
 
 MIT © 2026 Mr-DS-ML-85. Core mechanics ported from the author's

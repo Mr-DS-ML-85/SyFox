@@ -1,9 +1,31 @@
 // ============================================================================
 //  SyFox — si_substrate.hpp
 //  ---------------------------------------------------------------------------
-//  THE CORE. A faithful standalone port of the Synthetic-Intelligence
-//  physics substrate mechanics (Mr-DS-ML-85/Synthetic-Intelligence, physics.hpp
-//  lineage). Nothing here is a transformer, neural network, or pattern-matching
+//  THE CORE. An INDEPENDENT REIMPLEMENTATION of the Synthetic-Intelligence
+//  substrate concept (Mr-DS-ML-85/Synthetic-Intelligence) — not a port of its
+//  physics. HONEST LINEAGE (v3.9 audit; what is shared vs what differs):
+//
+//    SHARED with SI: the substrate ARCHITECTURE — concept nodes, weighted
+//    lanes, energy injection, dissipative settle, a salience integrator of
+//    the physics.hpp cavity lineage (s = tanh(s·decay + gain·|motion|)),
+//    Hebbian learning with decay and lane caps, resonance-sweep readout,
+//    honest silence. The salience_gating / miller_window selection modes are
+//    direct ports of the SI selection layer (TSDA live-cap "7 ± 2").
+//
+//    DIFFERENT from SI (by design, for scale and bit-determinism): the state
+//    variable is a single scalar energy per node — NOT SI's mass-spring
+//    oscillator (x, v with x_E/v_E/x_I/v_I coupled fields, physics.hpp:53);
+//    edges are undirected weight lanes — NOT SI's tunnels with stiffness /
+//    polarity / resonance_omega / Q-gating (physics.hpp:117-131); time is
+//    pass-counted settle iterations with an eps early stop — NOT SI's
+//    dt=0.02 fixed-tick integration; decay 0.82 and diffusion 0.45 are
+//    SyFox-native constants with no SI source (SI damps velocity at
+//    friction=0.006 and derives coupling per relation from fan-out). SI's
+//    Layer-2 constructive substrate (typed graph, nine reasoning primitives,
+//    chaining, proof traces) now lives beside this field in core/reason.hpp —
+//    ported faithfully THERE, v3.9.
+//
+//  Nothing here is a transformer, neural network, or pattern-matching
 //  classifier. Decisions emerge from field dynamics only:
 //
 //    1. INJECTION   — state tokens deposit energy on concept nodes,
@@ -37,6 +59,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
@@ -295,6 +318,11 @@ public:
         return it == index_.end() ? 0.0f : nodes_[it->second].salience;
     }
 
+    // v3.9.0 accessors: intern-order label lookup (deterministic scans) and
+    // the decision fingerprint (CEM variant draws, miller discipline).
+    const std::string& label_of(NodeId id) const { return nodes_[id].concept; }
+    std::uint64_t state_hash() const { return state_hash_; }
+
     // the source cap actually used by the last settle() (sampled value when
     // miller_window is on; otherwise always config().source_cap)
     float last_source_cap() const { return last_cap_; }
@@ -328,12 +356,69 @@ public:
     };
     const SettleTrace& last_settle_trace() const { return last_trace_; }
 
+    // -- v3.9.0 (MCPE §1 / CPME §2) MOMENTUM READOUT STATE --------------------
+    // Emission should couple to nodes that RECEIVED diffusion, never to the
+    // just-injected prompt tokens (the parrot effect). CPME's P_i is the
+    // delta of a low-pass envelope; syfox's regime is a FIXED 8-pass burst
+    // with decay 0.82, where every node's late trajectory is decay-dominated
+    // (both a raw final-pass delta and a beta=0.9 envelope measured EVERY
+    // bench candidate echo-suppressed). The faithful adaptation of the same
+    // principle to the burst regime: momentum = the node's PEAK DIFFUSION
+    // GAIN over passes 1..k,  max_p (E_p - E_{p-1}). An injected token only
+    // decays after pass 0 => gain <= 0 => echo-suppressed. An anchor that
+    // diffusion reached gained energy at some pass => eligible. Read-only
+    // over the physics; off = zero cost, replay bit-identical.
+    void set_momentum(bool on) { momentum_on_ = on; }
+    bool momentum_on() const { return momentum_on_; }
+    float node_momentum(NodeId id) const {
+        if (!momentum_on_ || id >= max_gain_.size()) return 0.0f;
+        return max_gain_[id];
+    }
+
+    // -- v3.9.0 (VGHT §2) COINCIDENCE GATE AT READOUT -------------------------
+    // Cross-context bridges conduct only under simultaneous dual excitation:
+    // a lane (u,v) traversed by the multi-hop readout walk contributes
+    // w * C(u,v) with C = sigmoid(kappa*(E_u*E_v - theta_critical)),
+    // kappa = 12, theta_critical = 0.05 — the paper's own constants. Either
+    // endpoint dark => C ~ 0: spurious one-sided evidence cannot recruit a
+    // distant subgraph. Pure readout arithmetic — the settled field is
+    // measured, never rewritten; off = the walk is byte-identical to v3.8.
+    void set_vght_gate(bool on) { vght_on_ = on; }
+    bool vght_gate_on() const { return vght_on_; }
+    void reset_vght_stats() const { vght_gated_sum_ = 0.0f; vght_walked_ = 0; }
+    float vght_gated_frac() const {
+        return vght_walked_ ? vght_gated_sum_ / static_cast<float>(vght_walked_) : 0.0f;
+    }
+    static float vght_conductance(float e_u, float e_v) {
+        return 1.0f / (1.0f + std::exp(-12.0f * (e_u * e_v - 0.05f)));
+    }
+
     // v3.8.0 (TASK 1) adaptive depth: k_settle is an existing CONFIG knob
     // ("max settle passes"), not a physics equation — adapting it per
     // decision scales THINKING DEPTH with problem difficulty while the
     // settle equations stay byte-identical. The Engine computes the
     // difficulty and sets the depth before each settle.
     void set_k_settle(int k) { cfg_.k_settle = std::max(1, k); }
+
+    // v3.9.0 (P-CMA CEM shell): the source cap is an existing CONFIG knob —
+    // planning samples it per variant (deterministically from the state hash,
+    // miller_window discipline) and re-settles the SAME injected field.
+    void set_source_cap(float c) { cfg_.source_cap = std::max(1.0f, c); }
+
+    // v3.9.0 (HTR §2.2 discrete surrogate): participation ratio of the whole
+    // energized field, R = (ΣE)² / (N·ΣE²) over nodes with E > 1e-7 — the
+    // no-phase coherence proxy the ΔR gate compares the candidate set against.
+    float field_participation_ratio() const {
+        double s = 0.0, s2 = 0.0;
+        std::size_t n = 0;
+        for (const auto& nd : nodes_) {
+            if (nd.energy <= 1e-7f) continue;
+            s += nd.energy; s2 += static_cast<double>(nd.energy) * nd.energy;
+            ++n;
+        }
+        if (n == 0 || s <= 0.0) return 0.0f;
+        return static_cast<float>((s * s) / (static_cast<double>(n) * s2));
+    }
 
     // -- v3.8.0 (TASK 2) SPECTRAL CHANNEL GATE --------------------------------
     // Multi-vector state: the SAME fabric settled under K different
@@ -536,6 +621,16 @@ public:
                     motion += std::fabs(next[i] - nodes_[i].energy);
                 last_trace_.motion_sum = motion;
             }
+            // v3.9.0 MCPE/CPME: track each node's PEAK diffusion gain across
+            // passes (next[i] - energy[i] pre-commit; decay makes pure-echo
+            // nodes non-positive, diffusion receivers positive).
+            if (momentum_on_) {
+                if (max_gain_.size() != n) max_gain_.assign(n, 0.0f);
+                for (std::size_t i = 0; i < n; ++i) {
+                    const float gain = next[i] - nodes_[i].energy;
+                    if (gain > max_gain_[i]) max_gain_[i] = gain;
+                }
+            }
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) if (nthreads > 1)
 #endif
@@ -605,14 +700,35 @@ public:
                     std::vector<char> visited(nodes_.size(), 0);
                     visited[it->second] = 1;
                     std::vector<NodeId> frontier{it->second};
+                    // v3.9.0 VGHT coincidence gate: when on, each traversed
+                    // lane's weight and flow are scaled by C = σ(12(E_u·E_v −
+                    // 0.05)); per-pair bookkeeping feeds vght_gated_frac().
+                    const bool vght = vght_on_;
+                    if (vght) reset_vght_stats();
                     for (int hop = 1; hop <= hop_depth_ && !frontier.empty(); ++hop) {
                         std::map<NodeId, float> next_w;
-                        for (NodeId u : frontier) {
-                            const auto uit = out_.find(u);
-                            if (uit == out_.end()) continue;
-                            for (const auto& lane : uit->second)
-                                if (!visited[lane.first])
-                                    next_w[lane.first] += lane.second;
+                        if (vght) {
+                            for (NodeId u : frontier) {
+                                const auto uit = out_.find(u);
+                                if (uit == out_.end()) continue;
+                                const float eu = nodes_[u].energy;
+                                for (const auto& lane : uit->second) {
+                                    if (visited[lane.first]) continue;
+                                    const float ev = nodes_[lane.first].energy;
+                                    const float c = vght_conductance(eu, ev);
+                                    next_w[lane.first] += lane.second * c;
+                                    ++vght_walked_;
+                                    if (c >= 0.5f) vght_gated_sum_ += 1.0f;
+                                }
+                            }
+                        } else {
+                            for (NodeId u : frontier) {
+                                const auto uit = out_.find(u);
+                                if (uit == out_.end()) continue;
+                                for (const auto& lane : uit->second)
+                                    if (!visited[lane.first])
+                                        next_w[lane.first] += lane.second;
+                            }
                         }
                         if (next_w.empty()) break;
                         std::vector<NodeId> level;
@@ -699,6 +815,9 @@ public:
         for (auto& n : nodes_) { n.energy = 0.0f; n.salience = 0.0f; }
         present_.clear();
         state_hash_ = 0;
+        // v3.9.0: the momentum state is per-decision — a fresh field must not
+        // inherit the previous decision's trajectory.
+        max_gain_.clear();
     }
 
     // -- ANTI-HEBBIAN WEAKENING --------------------------------------------------
@@ -740,10 +859,36 @@ public:
                 // per-class, and a class label seen often is not a stopword.
                 // idf_factor is 1.0 whenever the df table is absent (pre-v3.6
                 // fabrics), so existing lanes are reproduced exactly.
-                bind(a, b, cfg_.learn_eta * eta_scale * (wa + wb) * idf_factor(a));
+                // v3.9.0 (CPME-II §1, discrete surrogate): phase-consistent
+                // consolidation — the order-evidence factor Phi in (−0.2, 1]
+                // multiplies the same bind (empty table / flag off => 1.0,
+                // replay-identical). Chirality-consistent co-activity
+                // consolidates at full strength; reversed co-activity cancels.
+                const float ord = order_factor(a, b);
+                if (ord <= 0.0f) continue;   // anti-phase: mild depression (no bind)
+                bind(a, b, cfg_.learn_eta * eta_scale * (wa + wb) * idf_factor(a) * ord);
             }
         enforce_lane_decay();
     }
+
+    // -- v3.9.0 ORDER EVIDENCE (CPME-II port) ---------------------------------
+    void set_order_consolidation(bool on) { order_on_ = on; }
+    bool order_on() const { return order_on_; }
+    void note_order(NodeId a, NodeId b, bool consistent) {
+        auto& s = order_stats_[lane_key(a, b)];
+        if (consistent) ++s.first;
+        ++s.second;
+    }
+    float order_factor(NodeId a, NodeId b) const {
+        if (!order_on_) return 1.0f;
+        const auto it = order_stats_.find(lane_key(a, b));
+        if (it == order_stats_.end() || it->second.second == 0) return 1.0f;
+        const float frac = static_cast<float>(it->second.first)
+                         / static_cast<float>(it->second.second);
+        const float phi = 0.4f + 0.6f * (2.0f * frac - 1.0f);   // alpha_Phi = 0.6
+        return std::max(0.0f, phi);
+    }
+    std::size_t order_table_size() const { return order_stats_.size(); }
 
     // -- LANE EVIDENCE LEDGER (v3 Milestone 3; bookkeeping, not physics) ------
     // record_support / record_counter: called by the ENGINE around its teach
@@ -1087,6 +1232,30 @@ public:
             f.write(reinterpret_cast<const char*>(distvecs_.data()),
                     static_cast<std::streamsize>(distvecs_.size() * sizeof(float)));
         }
+        // v3.9.0 ORD1 TAIL — per-lane order evidence (CPME-II consolidation).
+        // Magic-guarded after DSTV: pre-v3.9 files end here and load() leaves
+        // order_stats_ empty, so every order_factor is 1.0 — replay contract.
+        const std::uint32_t ord_magic = 0x4F524431u;             // 'ORD1'
+        f.write(reinterpret_cast<const char*>(&ord_magic), 4);
+        std::vector<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> sorted_ord;
+        sorted_ord.reserve(order_stats_.size());
+        for (const auto& kv : order_stats_)
+            sorted_ord.emplace_back(static_cast<std::uint32_t>(kv.first >> 32),
+                                    static_cast<std::uint32_t>(kv.first & 0xffffffffull),
+                                    0);
+        std::sort(sorted_ord.begin(), sorted_ord.end());
+        const std::uint32_t orc = static_cast<std::uint32_t>(sorted_ord.size());
+        f.write(reinterpret_cast<const char*>(&orc), 4);
+        for (const auto& t : sorted_ord) {
+            const auto it = order_stats_.find(
+                lane_key(static_cast<NodeId>(std::get<0>(t)),
+                         static_cast<NodeId>(std::get<1>(t))));
+            const std::uint32_t cons = it->second.first, tot = it->second.second;
+            f.write(reinterpret_cast<const char*>(&std::get<0>(t)), 4);
+            f.write(reinterpret_cast<const char*>(&std::get<1>(t)), 4);
+            f.write(reinterpret_cast<const char*>(&cons), 4);
+            f.write(reinterpret_cast<const char*>(&tot), 4);
+        }
     }
 
     // v3.2.1: reports failure. A missing substrate used to load SILENTLY as an
@@ -1238,6 +1407,26 @@ public:
                 } else {
                     dist_dims_ = static_cast<int>(ddims);
                 }
+            }
+        }
+        // v3.9.0 ORD1 tail (optional, magic-guarded 'ORD1'): pre-v3.9 files end
+        // after DSTV; the failed magic read leaves order_stats_ empty and every
+        // order_factor at 1.0 — the replay contract.
+        std::uint32_t ord_magic = 0;
+        if (f.read(reinterpret_cast<char*>(&ord_magic), 4) && ord_magic == 0x4F524431u) {
+            std::uint32_t orc = 0;
+            if (f.read(reinterpret_cast<char*>(&orc), 4)) {
+                bool ok = true;
+                for (std::uint32_t k = 0; k < orc && ok; ++k) {
+                    std::uint32_t a = 0, b = 0, cons = 0, tot = 0;
+                    ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&a), 4));
+                    if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&b), 4));
+                    if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&cons), 4));
+                    if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&tot), 4));
+                    if (ok) order_stats_[lane_key(static_cast<NodeId>(a), static_cast<NodeId>(b))] =
+                                {cons, tot};
+                }
+                if (!ok) order_stats_.clear();   // torn tail: stay inert
             }
         }
         return true;
@@ -1440,6 +1629,22 @@ private:
     // v3.8.0 TASK 2: spectral channel gate (empty = inactive)
     std::vector<float> channel_coords_;
     float channel_sigma_ = 0.0f;
+    // v3.9.0: MCPE/CPME peak-diffusion-gain + VGHT readout-gate bookkeeping
+    bool momentum_on_ = false;
+    std::vector<float> max_gain_;    // per-node peak pass-over-pass gain
+    bool vght_on_ = false;
+    mutable float vght_gated_sum_ = 0.0f;   // lanes with C >= 0.5 (const readout)
+    mutable std::size_t vght_walked_ = 0;   // lanes traversed by gated walks
+    // v3.9.0 (CPME-II discrete surrogate) per-lane order evidence:
+    // key = lane_key(a,b); value = {consistent_exposures, total_exposures}.
+    // The engine notes, per (state token, anchor) lane, whether the token
+    // PRECEDED the anchor in the lesson text. hebbian_lesson scales the
+    // state-side bind by Phi = (1-alpha) + alpha*(2c/t - 1) with alpha=0.6:
+    // order-consistent lanes bind at full strength (Phi=1), reversed lanes
+    // at 0.4-0.6 = -0.2 -> floored at 0, mixed lanes in between. Persisted
+    // in the 'ORD1' tail. Empty map = factor 1.0 everywhere (replay no-op).
+    std::unordered_map<std::uint64_t, std::pair<std::uint32_t, std::uint32_t>> order_stats_;
+    bool order_on_ = false;
 
     // -- M5: CSR MIRROR of the out-lane fabric (settle hot path) -------------
     // Flattened contiguous buffers (offsets + targets + weights) built lazily

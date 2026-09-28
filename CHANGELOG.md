@@ -1,3 +1,76 @@
+## v3.9.0 — the constructive substrate: SI's Layer-2 reasoning stack + the remaining paper mechanisms
+
+Answers the v3.9 audit ("SyFox is not a port of SI — it shares two
+constants"; "many papers unimplemented"). Both charges verified, both
+addressed; the false port claim is retracted in the substrate header itself.
+
+- core/reason.hpp (NEW, ~1,530 lines): the faithful port of SI's Layer-2 —
+  typed graph with full provenance (rule/parent_a/parent_b/step), O(1)
+  edge existence, O(deg) adjacency, bounded retraction (RADE); the NINE
+  reasoning primitives (transitive, modus ponens, inheritance, contrapositive,
+  case analysis, induction with min-witnesses, analogy, abduction via
+  backward chaining, recursion via the fixpoint loop); forward chaining to
+  fixpoint under a tension budget; adaptive backward chaining with an active
+  goal stack; proof traces + the §5.3.4 verifier; the meta-learner
+  (sub-chain counting -> macro-rule promotion at the 2-bit MDL threshold);
+  the thinker index C/R; the SIX discovery queries; the .axioms triple
+  format (SI's own data files load unchanged). Determinism hardening over
+  SI: primitive candidate sets sorted before commit (SI iterated hash maps).
+- ENGINE BRIDGE: `syfox axioms --load FILE` loads triples into BOTH stores
+  (typed graph + fabric lanes, idempotent); load_model auto-loads
+  <model>/axioms.txt + v39.json (tension + OOD signatures) when present;
+  absent = every pre-3.9 model replays bit-identically. New commands: ask
+  (forward/backward with proof JSON), reason (fixpoint report), discover
+  (six queries + classifier), thinker (C/R + macro count over a query file),
+  audit (CMA/CCH DERIVED-vs-INDUCED path-additivity report).
+- DECISION-LAYER PAPER GATES (opt-in, default OFF, read-only over the
+  settled field): --proof / --require-proof (RADE proof pass, no_proof_path
+  defer); --wavefront-gate (CMD §4 reached-candidates, unreached_candidates
+  defer); --momentum-readout (MCPE/CPME echo suppression, echo_only defer;
+  ported as peak-diffusion-gain after BOTH the raw final-pass delta and a
+  beta=0.9 envelope measured every candidate echo-suppressed on the bench
+  fabrics); --coherence-gate (HTR ΔR participation-ratio rise,
+  no_structural_rise defer); --vght-gate (VGHT coincidence C=σ(12(E·E−0.05))
+  on the hop walk, gated_lane_frac disclosure); --cem-plan (P-CMA shell,
+  gradient-free CEM over deterministic source-cap variants, plan restores
+  the winning field; first cut snapshotted post-settle and double-decayed
+  every variant — caught by think30 bisection at 0.600 -> 0.267 and fixed);
+  --ood-knn (fixes.md signature-density defer, ood_density); --tension-gate
+  (RIFA SIL with the sign defect fixed: contradictions ACCUMULATE tension,
+  conflicted_state defer at >= 2 unresolved conflicts on the state hash).
+- LEARN-SIDE PAPERS (opt-in, replay-safe): --fingerprints (CME graded
+  half-dose re-teach, capped 1024-entry table, deterministic eviction);
+  --sentinels on (CMD §2.5 ^w0~w1 / wn~wn$ boundary pairs); --pro-con on
+  (RB surrogate: negated lessons bind through "!token" con-namespaces);
+  --order-consolidation on (CPME-II discrete surrogate: per-lane order
+  evidence, Phi = 0.4 + 0.6*(2c/t - 1) blend, ORD1 magic tail, replay
+  no-op on pre-v3.9 fabrics).
+- HONEST LINEAGE: si_substrate.hpp header retracted the "faithful
+  standalone port" claim; now states shared vs different (scalar energy vs
+  oscillators, lanes vs tunnels, passes vs dt=0.02, native 0.82/0.45) and
+  records the CSAT boundary theorem (global decay/diffusion modulation is
+  rank-preserving, arg-max invariant — readout-affecting mechanisms must
+  couple per-node; settle physics stays frozen).
+- BUGS CAUGHT BY THE NEW TESTS: add_primitive double-padded prim_meta
+  (every primitive kind shifted off by one; contrapositive and induction
+  never fired); Engine never installed the default rule set (forward
+  chaining was a no-op); momentum envelope out-of-bounds read on pass 0
+  (segfault); CME fingerprint test used an unstemmed token (unordered_map::at).
+- TESTS: test_reason (18 checks: primitives, proofs, verifier, retraction,
+  discovery, thinker index, contradiction guard, the engine bridge,
+  idempotent reload) + test_v39_gates (26 checks: replay contract,
+  per-gate defer reasons, determinism, ORD1 roundtrip, fingerprint
+  half-dose, sentinel/pro-con interning). Full suite + readout-silence +
+  jas-test + make ci green; bench bit-identical to the v3.8 record.
+- MEASURED: think30 baseline 0.467 -> thinking 0.600 -> multivector 0.633
+  -> v3.9 stack 0.700 (21/30; thinking flags + --wavefront-gate --cem-plan
+  on a --distvec --multi-vector fabric). Honest negatives measured and
+  documented: momentum alone 0.533, coherence/vght alone 0.567, learn-side
+  flags combined 0.433 at demo scale (corpus-scale features), cem alone
+  neutral 0.600. JEV axes unchanged (95.5% answered n=44, <=591 us,
+  ECE 0.131, OOD defer 1.0) + new axes JEV lacks: proof traces, discovery,
+  thinker index, .axioms knowledge format.
+
 ## v3.8.0 — physics-native thinking (no token prediction, no ML, physics frozen)
 
 Four opt-in mechanisms + the v3.7.1 scaling fix. Spec: deepen the field's

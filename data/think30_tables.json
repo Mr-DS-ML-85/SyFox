@@ -308,7 +308,7 @@
     "reason": null
    }
   ],
-  "fabric_dir": "/tmp/think30-baseline-l2oel_3n"
+  "fabric_dir": "/tmp/think30-baseline-nrwxzrq9"
  },
  "thinking": {
   "config": "thinking",
@@ -619,7 +619,7 @@
     "reason": "perturbation_tie"
    }
   ],
-  "fabric_dir": "/tmp/think30-thinking-u_hv8gpz"
+  "fabric_dir": "/tmp/think30-thinking-mzdi5dc6"
  },
  "multivector": {
   "config": "multivector",
@@ -930,7 +930,318 @@
     "reason": null
    }
   ],
-  "fabric_dir": "/tmp/think30-multivector-fq27hkx5"
+  "fabric_dir": "/tmp/think30-multivector-op6dded9"
+ },
+ "v39gates": {
+  "config": "v39gates",
+  "accuracy": 0.7,
+  "correct": 21,
+  "total": 30,
+  "per_category": {
+   "A": {
+    "n": 5,
+    "correct": 5,
+    "deferred": 0
+   },
+   "B": {
+    "n": 5,
+    "correct": 3,
+    "deferred": 0
+   },
+   "C": {
+    "n": 5,
+    "correct": 4,
+    "deferred": 1
+   },
+   "D": {
+    "n": 5,
+    "correct": 5,
+    "deferred": 0
+   },
+   "E": {
+    "n": 5,
+    "correct": 0,
+    "deferred": 5
+   },
+   "F": {
+    "n": 5,
+    "correct": 4,
+    "deferred": 4
+   }
+  },
+  "rows": [
+   {
+    "cat": "A",
+    "id": null,
+    "gold": "billing",
+    "correct": true,
+    "deferred": false,
+    "choice": "billing",
+    "reason": null
+   },
+   {
+    "cat": "A",
+    "id": null,
+    "gold": "technical",
+    "correct": true,
+    "deferred": false,
+    "choice": "technical",
+    "reason": null
+   },
+   {
+    "cat": "A",
+    "id": null,
+    "gold": "sales",
+    "correct": true,
+    "deferred": false,
+    "choice": "sales",
+    "reason": null
+   },
+   {
+    "cat": "A",
+    "id": null,
+    "gold": "billing",
+    "correct": true,
+    "deferred": false,
+    "choice": "billing",
+    "reason": null
+   },
+   {
+    "cat": "A",
+    "id": null,
+    "gold": "technical",
+    "correct": true,
+    "deferred": false,
+    "choice": "technical",
+    "reason": null
+   },
+   {
+    "cat": "B",
+    "id": "W1",
+    "gold": "refund",
+    "correct": true,
+    "deferred": false,
+    "choice": "refund",
+    "reason": null
+   },
+   {
+    "cat": "B",
+    "id": "W2",
+    "gold": "harvest",
+    "correct": false,
+    "deferred": false,
+    "choice": "refund",
+    "reason": null
+   },
+   {
+    "cat": "B",
+    "id": "W3",
+    "gold": "arrest",
+    "correct": false,
+    "deferred": false,
+    "choice": "refund",
+    "reason": null
+   },
+   {
+    "cat": "B",
+    "id": "W4",
+    "gold": "refund",
+    "correct": true,
+    "deferred": false,
+    "choice": "refund",
+    "reason": null
+   },
+   {
+    "cat": "B",
+    "id": "W5",
+    "gold": "harvest",
+    "correct": true,
+    "deferred": false,
+    "choice": "harvest",
+    "reason": null
+   },
+   {
+    "cat": "C",
+    "id": "H1",
+    "gold": "passed",
+    "correct": true,
+    "deferred": false,
+    "choice": "passed",
+    "reason": null
+   },
+   {
+    "cat": "C",
+    "id": "H2",
+    "gold": "baked",
+    "correct": false,
+    "deferred": true,
+    "choice": "baked",
+    "reason": "perturbation_tie"
+   },
+   {
+    "cat": "C",
+    "id": "H3",
+    "gold": "rescued",
+    "correct": true,
+    "deferred": false,
+    "choice": "rescued",
+    "reason": null
+   },
+   {
+    "cat": "C",
+    "id": "H4",
+    "gold": "passed",
+    "correct": true,
+    "deferred": false,
+    "choice": "passed",
+    "reason": null
+   },
+   {
+    "cat": "C",
+    "id": "H5",
+    "gold": "rescued",
+    "correct": true,
+    "deferred": false,
+    "choice": "rescued",
+    "reason": null
+   },
+   {
+    "cat": "D",
+    "id": null,
+    "gold": "money_back",
+    "correct": true,
+    "deferred": false,
+    "choice": "money_back",
+    "reason": null
+   },
+   {
+    "cat": "D",
+    "id": null,
+    "gold": "engine_fixed",
+    "correct": true,
+    "deferred": false,
+    "choice": "engine_fixed",
+    "reason": null
+   },
+   {
+    "cat": "D",
+    "id": null,
+    "gold": "crop_saved",
+    "correct": true,
+    "deferred": false,
+    "choice": "crop_saved",
+    "reason": null
+   },
+   {
+    "cat": "D",
+    "id": null,
+    "gold": "money_back",
+    "correct": true,
+    "deferred": false,
+    "choice": "money_back",
+    "reason": null
+   },
+   {
+    "cat": "D",
+    "id": null,
+    "gold": "engine_fixed",
+    "correct": true,
+    "deferred": false,
+    "choice": "engine_fixed",
+    "reason": null
+   },
+   {
+    "cat": "E",
+    "id": null,
+    "gold": "lights",
+    "correct": false,
+    "deferred": true,
+    "choice": "lights",
+    "reason": "ambiguous_tie"
+   },
+   {
+    "cat": "E",
+    "id": null,
+    "gold": "door",
+    "correct": false,
+    "deferred": true,
+    "choice": "lights",
+    "reason": "ambiguous_tie"
+   },
+   {
+    "cat": "E",
+    "id": null,
+    "gold": "guard",
+    "correct": false,
+    "deferred": true,
+    "choice": "lights",
+    "reason": "ambiguous_tie"
+   },
+   {
+    "cat": "E",
+    "id": null,
+    "gold": "siren",
+    "correct": false,
+    "deferred": true,
+    "choice": "siren",
+    "reason": "ambiguous_tie"
+   },
+   {
+    "cat": "E",
+    "id": null,
+    "gold": "sip",
+    "correct": false,
+    "deferred": true,
+    "choice": "sip",
+    "reason": "ambiguous_tie"
+   },
+   {
+    "cat": "F",
+    "id": null,
+    "gold": "DEFER",
+    "correct": true,
+    "deferred": true,
+    "choice": "billing",
+    "reason": "perturbation_tie"
+   },
+   {
+    "cat": "F",
+    "id": null,
+    "gold": "DEFER",
+    "correct": true,
+    "deferred": true,
+    "choice": "billing",
+    "reason": "perturbation_tie"
+   },
+   {
+    "cat": "F",
+    "id": null,
+    "gold": "DEFER",
+    "correct": true,
+    "deferred": true,
+    "choice": "technical",
+    "reason": "perturbation_tie"
+   },
+   {
+    "cat": "F",
+    "id": null,
+    "gold": "DEFER",
+    "correct": true,
+    "deferred": true,
+    "choice": "billing",
+    "reason": "perturbation_tie"
+   },
+   {
+    "cat": "F",
+    "id": null,
+    "gold": "DEFER",
+    "correct": false,
+    "deferred": false,
+    "choice": "sales",
+    "reason": null
+   }
+  ],
+  "fabric_dir": "/tmp/think30-v39gates-kgu_l9sg"
  },
  "comment": "every number from an actual syfox run in this tree; A choice / B why / C how / D xdomain / E chains / F honesty(DEFER gold)"
 }

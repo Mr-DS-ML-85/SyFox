@@ -18,6 +18,7 @@
 #pragma once
 #include "json.hpp"
 #include "si_substrate.hpp"
+#include "reason.hpp"
 #include "normalize.hpp"
 #include "ngram.hpp"
 #include "recall.hpp"
@@ -26,19 +27,22 @@
 #include "calc.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace syfox {
 
-inline const char* VERSION = "3.8.0";
+inline const char* VERSION = "3.9.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -107,6 +111,12 @@ struct LearnPolicy {
     bool  dedup = false;
     bool  novelty = false;
     float novelty_floor = 0.25f;
+    // v3.9.0 (CME): graded fingerprint engagement — a re-taught example is
+    // not skipped outright (that is --dedup) but consolidated at HALF dose
+    // with its hit_count bumped, so duplicates stop over-strengthening lanes
+    // without pretending they were never seen. Capped table (1024),
+    // deterministic eviction (lowest hit_count, then oldest first_seq).
+    bool  fingerprints = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +191,38 @@ struct Usage {
     int   multi_vector_channels = 0;
     // v3.8.0 TASK 3 — causal pair nodes the state energized:
     std::size_t causal_tokens = 0;
+    // v3.9.0 — the constructive substrate + decision-layer paper gates.
+    // proof: RADE proof-pass over the typed axiom graph between the state's
+    //        strongest concept and the winning anchor (premise-cited hops).
+    bool  proof_checked = false;
+    std::vector<std::string> proof_path;      // "subject relation object" hops
+    // momentum (MCPE/CPME): fraction of candidates still GAINING energy at
+    // the final settle pass (the echo-suppressed remainder peaked already).
+    bool  momentum_gate = false;
+    float momentum_eligible_frac = 0.0f;
+    // wavefront (CMD §4): fraction of candidates the query actually reached.
+    bool  wavefront_gate = false;
+    float wavefront_frac = 0.0f;
+    // coherence (HTR ΔR): participation-ratio of candidate energies vs the
+    // whole energized field — structural rise above baseline drift.
+    bool  coherence_gate = false;
+    float coherence_r = 0.0f;
+    float coherence_field_r = 0.0f;
+    // vght (VGHT §2): fraction of walked lanes that passed the coincidence gate.
+    bool  vght_gate = false;
+    float vght_gated_frac = 0.0f;
+    // cem (P-CMA shell): planning rounds over hash-derived injection variants.
+    bool  cem_active = false;
+    int   cem_rounds = 0;
+    float cem_gain = 0.0f;                    // best variant margin - baseline
+    // maa (MAA): unknown tokens bridged by fragment abduction this decision.
+    std::vector<std::string> hyp_tokens;
+    // ood-knn (fixes.md): signature distance to the stored answered states.
+    bool  ood_knn = false;
+    float ood_knn_dist = 0.0f;
+    // rifa (SIL): accumulated contradiction tension disclosed per decision.
+    bool  tension_gate = false;
+    float tension = 0.0f;
 };
 
 struct Calibration {
@@ -213,7 +255,17 @@ struct Calibration {
 // ---------------------------------------------------------------------------
 class Engine {
 public:
-    explicit Engine(si::SubstrateConfig cfg = {}) : si_(cfg), adaptive_base_k_(cfg.k_settle) {}
+    explicit Engine(si::SubstrateConfig cfg = {})
+        : si_(cfg), adaptive_base_k_(cfg.k_settle) {
+        // v3.9.0: the constructive substrate ships with SI's default rule set
+        // (taxonomy flow, modus ponens, implies/causes chains, class-property
+        // inheritance, contrapositive, disjunction elimination, schematic
+        // generalization) — the nine primitives are ready before any axioms
+        // load; the graph starts empty (reason_loaded_ stays false until a
+        // model carries axioms.txt, so pre-3.9 models replay bit-identically).
+        reason_.add_default_rules();
+        reason_meta_.engine = &reason_;
+    }
 
     si::Substrate& substrate() { return si_; }
     const si::Substrate& substrate() const { return si_; }
@@ -387,6 +439,126 @@ public:
     void set_tools_check(bool on) { tools_check_on_ = on; }
     bool tools_check_on() const { return tools_check_on_; }
 
+    // -- v3.9.0 THE CONSTRUCTIVE SUBSTRATE (SI Layer 2) -----------------------
+    // The engine now carries the typed axiom graph alongside the energy
+    // fabric. Loading axioms interns their concepts as fabric nodes and lays
+    // axiom lanes (idempotently), so the two stores share one vocabulary.
+    sxr::ReasonCore reason_;
+    sxr::MetaLearner reason_meta_;
+    sxr::ThinkerIndex thinker_;
+    bool reason_loaded_ = false;
+
+    bool reason_loaded() const { return reason_loaded_; }
+    std::size_t reason_nodes() const { return reason_.graph.nodes.size(); }
+    std::size_t reason_edges() const { return reason_.graph.edges.size(); }
+
+    // load_axioms: SI's .axioms triple format into BOTH stores. Returns the
+    // number of accepted (new) triples. Graph side: teach_axiom (dedup +
+    // contradiction guard). Fabric side: intern subject/object, bind an
+    // axiom lane at kAxiomLaneWeight only when the lane is absent — reloading
+    // the same file changes nothing (idempotent), so replays stay stable.
+    static constexpr float kAxiomLaneWeight = 1.0f;
+    int load_axioms(const std::string& path, FILE* log = stderr) {
+        std::ifstream in(path);
+        if (!in) {
+            if (log) std::fprintf(log, "[axioms] cannot open %s\n", path.c_str());
+            return 0;
+        }
+        int accepted = 0;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto hash = line.find('#');
+            if (hash != std::string::npos) line.erase(hash);
+            std::istringstream iss(line);
+            std::string subj, rel_tok, obj;
+            if (!(iss >> subj >> rel_tok >> obj)) continue;
+            const int rel = sxr::rel_from_token(rel_tok);
+            if (rel < 0) {
+                if (log) std::fprintf(log, "[axioms] unknown relation '%s' skipped\n",
+                                      rel_tok.c_str());
+                continue;
+            }
+            const auto rep = sxr::teach_axiom(reason_, subj, rel, obj, path);
+            if (!rep.accepted || rep.duplicate) continue;
+            ++accepted;
+            // fabric bridge: shared vocabulary + undirected axiom lane
+            const si::NodeId a = si_.intern(subj);
+            const si::NodeId b = si_.intern(obj);
+            if (si_.lane_weight(a, b) < kAxiomLaneWeight)
+                si_.bind(a, b, kAxiomLaneWeight - si_.lane_weight(a, b));
+        }
+        if (accepted > 0) reason_loaded_ = true;
+        if (log) std::fprintf(log, "[axioms] %s: +%d new triples\n",
+                              path.c_str(), accepted);
+        return accepted;
+    }
+
+    // RADE proof pass (readout-side): typed path between a state concept and
+    // an anchor over the axiom graph, premise-cited. Empty = no typed path.
+    std::vector<std::string> proof_path_between(
+        const std::vector<std::string>& state_words,
+        const std::string& anchor_label) const {
+        std::vector<std::string> hops;
+        if (!reason_loaded_) return hops;
+        const auto lt = si::norm::normalize(anchor_label);
+        int goal = -1;
+        for (const auto& t : lt)
+            if (reason_.graph.by_label.count(t)) { goal = reason_.graph.by_label.at(t); break; }
+        if (goal < 0) return hops;
+        // strongest state concept present in the axiom graph (word order =
+        // arrival order; first hit wins, mirroring the injection order).
+        int start = -1; std::string start_word;
+        for (const auto& w : state_words) {
+            if (reason_.graph.by_label.count(w)) { start = reason_.graph.by_label.at(w); start_word = w; break; }
+        }
+        if (start < 0 || start == goal) return hops;
+        const auto path = reason_.find_path(
+            reason_.graph.nodes[static_cast<std::size_t>(start)].label,
+            reason_.graph.nodes[static_cast<std::size_t>(goal)].label,
+            -1, 4);
+        hops.reserve(path.size());
+        for (int ei : path) {
+            const auto& e = reason_.graph.edges[static_cast<std::size_t>(ei)];
+            hops.push_back(reason_.graph.nodes[static_cast<std::size_t>(e.from)].label
+                         + " " + sxr::rel_name(e.rel) + " "
+                         + reason_.graph.nodes[static_cast<std::size_t>(e.to)].label);
+        }
+        (void)start_word;
+        return hops;
+    }
+
+    // -- v3.9.0 decision-layer paper gates (all default OFF; replay-safe) ----
+    void set_proof(bool disclose, bool require) { proof_on_ = disclose; require_proof_ = require; }
+    bool proof_on() const { return proof_on_; }
+    void set_momentum_gate(bool on) { momentum_gate_ = on; si_.set_momentum(on); }
+    bool momentum_gate_on() const { return momentum_gate_; }
+    void set_wavefront_gate(bool on) { wavefront_gate_ = on; }
+    bool wavefront_gate_on() const { return wavefront_gate_; }
+    void set_coherence_gate(bool on, float floor) {
+        coherence_gate_ = on;
+        coherence_floor_ = floor > 0.0f ? floor : 0.05f;
+    }
+    bool coherence_gate_on() const { return coherence_gate_; }
+    void set_vght_gate(bool on) { vght_gate_ = on; si_.set_vght_gate(on); }
+    bool vght_gate_on() const { return vght_gate_; }
+    void set_cem(bool on, int rounds, int variants) {
+        cem_on_ = on;
+        cem_rounds_ = std::max(1, std::min(4, rounds));
+        cem_variants_ = std::max(2, std::min(16, variants));
+    }
+    bool cem_on() const { return cem_on_; }
+    void set_fragments(bool on) { fragments_on_ = on; }
+    bool fragments_on() const { return fragments_on_; }
+    void set_ood_knn(bool on, float tau) { ood_knn_on_ = on; ood_knn_tau_ = tau >= 0.0f ? tau : 1.0f; }
+    bool ood_knn_on() const { return ood_knn_on_; }
+    void set_tension_gate(bool on) { tension_on_ = on; }
+    bool tension_on() const { return tension_on_; }
+    void set_pro_con(bool on) { pro_con_ = on; }
+    bool pro_con_on() const { return pro_con_; }
+    void set_sentinels(bool on) { sentinels_ = on; }
+    bool sentinels_on() const { return sentinels_; }
+    float tension_acc() const { return tension_acc_; }
+
     // v3.2.1: returns false when the substrate file is missing (honest load
     // failure — callers surface a clear error instead of deciding on an
     // empty fabric or, worse, reporting a misleading downstream message).
@@ -450,7 +622,55 @@ public:
                 if (!mems.empty()) set_memories(std::move(mems));
             }
         }
+        // v3.9.0 CONSTRUCTIVE SUBSTRATE (opt-in per model): an axioms.txt in
+        // the model dir loads the typed graph AND lays the axiom lanes.
+        // Absent file = no graph, no lanes: every pre-3.9 model replays
+        // bit-identically. v39.json carries the RIFA tension accumulator and
+        // the OOD signature store (also absent by default).
+        load_axioms(dir + "/axioms.txt", nullptr);
+        {
+            std::ifstream f(dir + "/v39.json");
+            if (f) {
+                std::string buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                try {
+                    sfx::JV r = sfx::JV::parse(buf);
+                    tension_acc_ = static_cast<float>(r.at("tension_acc").as_num(0.0));
+                    ood_sigs_.clear();
+                    if (r.has("ood_signatures") && r.at("ood_signatures").is_arr()) {
+                        for (const auto& s : r.at("ood_signatures").arr) {
+                            if (!s.is_arr() || s.arr.size() < 4) continue;
+                            ood_sigs_.push_back({static_cast<float>(s.arr[0].as_num(0)),
+                                                 static_cast<float>(s.arr[1].as_num(0)),
+                                                 static_cast<float>(s.arr[2].as_num(0)),
+                                                 static_cast<float>(s.arr[3].as_num(0))});
+                        }
+                    }
+                } catch (const std::exception&) { /* absent/torn: stay default */ }
+            }
+        }
         return true;
+    }
+
+    // v3.9.0: persist the v3.9 sidecar (tension + OOD signatures). Called by
+    // the CLI after calibrate (which collects signatures). Never called by
+    // learn/save_model, so v3.8 model dirs are byte-identical until a v3.9
+    // command writes this file.
+    void save_v39_state(const std::string& dir) const {
+        sfx::JVArr sigs;
+        for (const auto& s : ood_sigs_)
+            sigs.push_back(sfx::JV(sfx::JVArr{s[0], s[1], s[2], s[3]}));
+        sfx::JV out(sfx::JVObj{
+            {"tension_acc", tension_acc_},
+            {"ood_signatures", sfx::JV(std::move(sigs))}});
+        std::ofstream f(dir + "/v39.json");
+        if (f) f << out.dump() << "\n";
+    }
+
+    // v3.9.0 (fixes.md): record a decision signature for the OOD kNN gate.
+    void record_ood_signature(float settled_energy, float top_energy,
+                              float margin, float unk_frac) {
+        if (ood_sigs_.size() >= 65536) ood_sigs_.erase(ood_sigs_.begin());
+        ood_sigs_.push_back({settled_energy, top_energy, margin, unk_frac});
     }
 
     // -- v3.2 retrieval-by-default (associative priming) ------------------------
@@ -522,6 +742,50 @@ public:
     // near-duplicates re-weighted the field by 1/sqrt(mass) damping and
     // REGRESSED held-out accuracy). With the guard, a variant lesson only
     // lays/strengthens LANES (coverage), it never re-deposits mass.
+    // -- v3.9.0 shared learn-path widening (mirrored in learn_example AND
+    // learn_noul — the fit==decide parity lesson) ---------------------------
+    // (a) CMD §2.5 sentinels: word-initial and word-final ordered pairs get
+    //     boundary-marked node names so position is observable.
+    // (b) RB surrogate pro/con namespaces: negated lessons bind through
+    //     negation-mangled node names ("!"+token) — con-evidence structurally
+    //     cannot cancel pro-evidence on shared lanes.
+    void apply_v39_widening(const std::vector<std::string>& words,
+                            const std::vector<std::string>& state,
+                            bool augment,
+                            std::vector<std::string>& state_full) {
+        if (sentinels_ && si::norm::bigrams_enabled() && words.size() >= 2) {
+            const std::string head = "^" + words[0] + "~" + words[1];
+            const std::string tail = words[words.size() - 2] + "~"
+                                   + words[words.size() - 1] + "$";
+            if (!(augment && si_.has(head))) si_.intern(head);
+            if (!(augment && si_.has(tail))) si_.intern(tail);
+            state_full.push_back(head);
+            state_full.push_back(tail);
+        }
+        if (pro_con_ && si::roles::verb_negated(words)) {
+            for (const auto& t : state) {
+                const std::string neg = "!" + t;
+                if (!(augment && si_.has(neg))) si_.intern(neg);
+                state_full.push_back(neg);
+            }
+        }
+    }
+
+    // v3.9.0 (CPME-II discrete surrogate): order evidence notes. A token in
+    // the first half of the state stream is consistent (subject side); the
+    // anchor always follows. Notes land AFTER the bind so the factor uses
+    // accumulated history on the NEXT lesson — no same-lesson double-count.
+    void note_v39_order(const std::vector<std::string>& state,
+                        const std::vector<std::string>& anchors) {
+        if (!si_.order_on()) return;
+        for (std::size_t i = 0; i < state.size(); ++i)
+            if (si_.has(state[i]))
+                for (const auto& o : anchors)
+                    if (si_.has(o))
+                        si_.note_order(si_.find(state[i]), si_.find(o),
+                                       2 * i < state.size());
+    }
+
     void learn_example(const std::string& state_text, const std::string& instructions,
                        const std::string& outcome_text, bool augment = false,
                        const LearnPolicy& lp = LearnPolicy{}, bool* learned = nullptr) {
@@ -553,6 +817,43 @@ public:
                 return;
             }
         }
+        // v3.9.0 (CME §3) GRADED FINGERPRINT ENGAGEMENT: same example again
+        // consolidates at half dose (hit_count tracked, table capped). Runs
+        // BEFORE the contradiction check: a re-taught identical lesson is not
+        // a contradiction, it is a repetition.
+        if (lp.fingerprints) {
+            std::uint64_t h = 1469598103934665603ull;
+            {
+                std::vector<std::uint64_t> toks;
+                toks.reserve(words.size() + outcome.size());
+                for (const auto& w : words) toks.push_back(static_cast<std::uint64_t>(si::fnv1a_hash(w)));
+                for (const auto& w : outcome) toks.push_back(static_cast<std::uint64_t>(si::fnv1a_hash(w)));
+                std::sort(toks.begin(), toks.end());              // multiset fingerprint
+                for (std::uint64_t t : toks) h = (h ^ t) * 0x100000001b3ull;
+                h ^= h >> 30; h *= 0xbf58476d1ce4e5b9ull;         // splitmix finalizer
+                h ^= h >> 27; h *= 0x94d049bb133111ebull;
+                h ^= h >> 31;
+            }
+            auto it = fp_table_.find(h);
+            if (it != fp_table_.end()) {
+                ++it->second[2];                                  // hit_count
+                it->second[1] = ++teach_seq_;
+                eta *= 0.5f;                                      // graded half dose
+                if (learned) *learned = true;
+                // fall through with the reduced eta (still consolidates)
+            } else {
+                if (fp_table_.size() >= 1024) {
+                    auto victim = fp_table_.begin();
+                    for (auto jt = fp_table_.begin(); jt != fp_table_.end(); ++jt)
+                        if (jt->second[2] < victim->second[2]
+                            || (jt->second[2] == victim->second[2]
+                                && jt->second[0] < victim->second[0]))
+                            victim = jt;
+                    fp_table_.erase(victim);
+                }
+                fp_table_[h] = {teach_seq_ + 1, 0, 0};            // first_seq, last_seq, hits
+            }
+        }
         // Milestone 3: contradiction check. Same (state + question) taught
         // with a DIFFERENT outcome is a contradiction — it must surface in
         // the audit trail, never silently override (or be silently ignored).
@@ -571,6 +872,12 @@ public:
                 {"context", sfx::JV(context_)}});
             conflicts_by_state_[stream_hash(si::norm::normalize(state_text))].push_back(conflicts_.size());
             conflicts_.push_back(c);
+            // v3.9.0 (RIFA SIL, sign fixed): contradictions metabolize as
+            // tension. The accumulator only grows (the failed-pool paper's
+            // own code DECREMENTED tension on contradiction — log(coherence)
+            // <= 0 — contradicting its prose; we ship the prose). Disclosed
+            // per decide; the GATE is opt-in (--tension-gate).
+            tension_acc_ += 1.0f;
             // the new lesson is COUNTER-EVIDENCE for the old binding's lanes:
             // mark every old lane reachable from this state's words.
             mark_counter_lanes(words, prev->second.outcome, seq);
@@ -603,6 +910,10 @@ public:
                 if (!(augment && si_.has(bg))) si_.intern(bg);
                 state_full.push_back(bg);
             }
+        // v3.9.0 (CMD §2.5) SENTINEL BIGRAMS + (RB surrogate) PRO/CON
+        // NAMESPACES + (CPME-II) ORDER EVIDENCE — shared widening helper,
+        // mirrored exactly in learn_noul (the fit==decide lesson).
+        apply_v39_widening(words, state, augment, state_full);
         // v3.7.0 (Move 3): widen with TYPED ORDERED PAIR nodes — (word, role)
         // relations from the scene grammar in roles.hpp. Interned like the
         // bigrams (mangled names never collide with normalized tokens), df
@@ -638,6 +949,14 @@ public:
                     if (df_seen.insert(cp).second && si_.has(cp)) si_.note_df(si_.find(cp));
         }
         si_.hebbian_lesson(state_full, outcome, eta);
+        // v3.9.0 (CPME-II §1, discrete surrogate) ORDER EVIDENCE: a state
+        // token in the FIRST half of the stream is order-consistent (the
+        // subject side); later tokens carry reversed evidence. Lanes that
+        // keep their side across lessons consolidate at full strength
+        // (Phi=1); churned lanes cancel toward the 0.4 floor. Notes land
+        // AFTER the bind so the factor uses ACCUMULATED history plus this
+        // lesson's evidence on the NEXT pass — no same-lesson double-count.
+        note_v39_order(state, outcome);
         // v3.2 Stage 2: context-signature accumulation on the state->outcome
         // lanes. The row's own tokens (state + criteria words) are the lane's
         // context evidence; counts that survive pruning (>= 2 lessons) become
@@ -805,6 +1124,13 @@ public:
                 {"context", sfx::JV(context_)}});
             conflicts_by_state_[stream_hash(si::norm::normalize(state_text))].push_back(conflicts_.size());
             conflicts_.push_back(c);
+            // v3.9.0 (RIFA SIL, sign fixed): contradictions metabolize as
+            // tension. The accumulator only grows — the failed-pool paper's
+            // own code DECREMENTED tension on contradiction (log(coherence)
+            // <= 0 made its integrator decay on the very event its prose says
+            // must charge it); we ship the prose. Disclosed per decide; the
+            // GATE is opt-in (--tension-gate).
+            tension_acc_ += 1.0f;
             mark_counter_lanes(words, prev->second.outcome, seq);
         }
         taught_outcomes_[shash] = Taught{seq, outcome_text};
@@ -826,6 +1152,8 @@ public:
                 if (!(augment && si_.has(bg))) si_.intern(bg);
                 state_full.push_back(bg);
             }
+        // v3.9.0 shared widening: sentinels + pro/con namespaces (mirrored).
+        apply_v39_widening(words, state, augment, state_full);
         // v3.7.0 (Move 3): typed pair widening, mirrored from learn_example —
         // noul lessons carry the same fabric construction.
         if (si::roles::typed_lanes_enabled())
@@ -866,6 +1194,8 @@ public:
                     for (const auto& b : instr)
                         if (si_.has(b)) si_.record_counter(si_.find(a), si_.find(b), seq, context_);
         }
+        // v3.9.0 order evidence, mirrored from learn_example (noul anchors).
+        note_v39_order(state, instr);
         if (learned) *learned = true;
     }
 
@@ -1002,6 +1332,118 @@ public:
     // physics composition than the one decide() runs — measured consequence:
     // 96.6% accuracy at mean confidence 0.0016 on a strong fabric. The fit and
     // the decision must see the same field composition, bit for bit.
+    // v3.9.0 (MAA §2): fracture unknown tokens, match fragments against
+    // interned names (node-id ascending — deterministic), inject the matched
+    // anchors at half the state dose. Returns the unknown tokens bridged.
+    std::vector<std::string> fragment_abduce(const std::vector<std::string>& words,
+                                             float dose) {
+        std::vector<std::string> bridged;
+        std::vector<std::string> anchors;
+        for (const auto& w : words) {
+            if (si_.has(w)) continue;                        // known: not an orphan
+            if (w.size() < 3) continue;
+            std::vector<std::string> frags;
+            frags.push_back(w.substr(0, 3));                 // 3-char prefix
+            if (w.size() >= 6) frags.push_back(w.substr(w.size() - 3, 3));  // suffix
+            for (std::size_t i = 1; i + 3 <= w.size() && frags.size() < 8; ++i)
+                frags.push_back(w.substr(i, 3));             // middle 3-grams
+            bool hit = false;
+            for (const auto& f : frags) {
+                for (std::size_t id = 0; id < si_.node_count(); ++id) {
+                    const std::string& lbl = si_.label_of(static_cast<si::NodeId>(id));
+                    if (lbl.size() < 3) continue;
+                    if (lbl.find(f) == std::string::npos) continue;
+                    anchors.push_back(lbl);
+                    hit = true;
+                    break;                                   // first match per fragment
+                }
+                if (anchors.size() >= 8) break;              // bounded hypothesized set
+            }
+            if (hit) bridged.push_back(w);
+        }
+        if (!anchors.empty()) si_.inject(anchors, dose * 0.5f);   // hypothesized dose
+        return bridged;
+    }
+
+    // v3.9.0 (P-CMA CEM shell, gradient-free): sample deterministic source-cap
+    // perturbations of the SAME injected field, re-settle, score by the first
+    // choice question's top-2 margin, keep the top-10% elites per round, refit
+    // the cap draw around the elite mean, and finally RESTORE the best
+    // variant's field (or the baseline when planning cannot beat it). No
+    // gradients, no ML — rollout IS the settle physics, unchanged per variant.
+    // Returns the best margin found; the winning field is left in the fabric.
+    float cem_plan(const std::vector<std::string>& words,
+                   const std::vector<std::pair<std::string, std::string>>& probes,
+                   Usage& usage) {
+        if (cem_presettle_.empty() || probes.empty()) return -1.0f;
+        auto margin_of = [&](const std::vector<std::pair<std::string, float>>& es)
+            -> float {
+            if (es.size() < 2) return 0.0f;
+            float p1 = -1e30f, p2 = -1e30f;
+            for (const auto& e : es) {
+                if (e.second > p1) { p2 = p1; p1 = e.second; }
+                else if (e.second > p2) p2 = e.second;
+            }
+            return p1 - p2;
+        };
+        const float saved_cap = si_.last_source_cap();
+        const float hi = std::max(1.0f, saved_cap);
+        const float lo = hi >= 5.0f ? hi - 4.0f : 1.0f;
+        const std::uint64_t base_hash = si_.state_hash();
+        const float base_margin = margin_of(read_probes(probes));
+        float best_margin = base_margin;
+        float best_cap = saved_cap;
+        std::vector<float> best_field;
+        float mu = hi;                                 // elite-mean refit seed
+        for (int round = 0; round < cem_rounds_; ++round) {
+            std::vector<std::pair<float, float>> scored;   // (margin, cap)
+            for (int v = 0; v < cem_variants_; ++v) {
+                const std::uint64_t h = base_hash
+                    ^ (0x9E3779B97F4A7C15ull * static_cast<std::uint64_t>(v + 1))
+                    ^ (0xBF58476D1CE4E5B9ull * static_cast<std::uint64_t>(round + 1));
+                const float cap = lo + static_cast<float>(h % 5);   // [lo, hi] — miller span
+                si_.restore_field(cem_presettle_);
+                si_.set_source_cap(cap);
+                si_.settle();
+                const float m = margin_of(read_probes(probes));
+                scored.emplace_back(m, cap);
+                if (m > best_margin) { best_margin = m; best_cap = cap;
+                                       best_field = si_.snapshot_field(); }
+            }
+            // elites: top 10% (>= 1); refit the draw mean for the next round
+            std::sort(scored.begin(), scored.end(),
+                      [](const auto& x, const auto& y){ return x.first > y.first; });
+            const std::size_t n_elite = std::max<std::size_t>(
+                1, scored.size() / 10);
+            float acc = 0.0f;
+            for (std::size_t i = 0; i < n_elite; ++i) acc += scored[i].second;
+            mu = acc / static_cast<float>(n_elite);
+            (void)mu;   // span is the miller window; the refit caps the draw seed
+        }
+        // restore: best variant's field if it beats the baseline, else baseline
+        si_.set_source_cap(saved_cap);
+        if (!best_field.empty()) {
+            si_.restore_field(best_field);
+        } else {
+            si_.restore_field(cem_presettle_);
+            si_.set_source_cap(saved_cap);
+            si_.settle();                              // re-run the baseline settle
+        }
+        usage.cem_active = true;
+        usage.cem_rounds = cem_rounds_;
+        usage.cem_gain = best_margin - base_margin;
+        return best_margin;
+    }
+
+    // read the (label, description) probe pairs exactly as decide_choice does
+    std::vector<std::pair<std::string, float>>
+    read_probes(const std::vector<std::pair<std::string, std::string>>& probes) const {
+        std::vector<std::pair<std::string, float>> es;
+        for (const auto& p : probes)
+            es.emplace_back(p.first, probe_energy(p.first, p.second));
+        return es;
+    }
+
     void prime_field(const std::vector<std::string>& words, Usage* usage) {
         si_.reset_field();
         if (retrieval_on_ && !memories_.empty() && retrieval_topk_ > 0) {
@@ -1152,6 +1594,26 @@ public:
             if (!cps.empty()) si_.inject(cps, state_dose(words) * kCausalDose);
         }
         usage.causal_tokens = causal_hits;
+        // v3.9.0 (RB surrogate) decide-side pro/con injection: when the state
+        // carries a negation cue and the fabric carries the mangled con-nodes,
+        // inject them at the typed dose. Fabrics learned without --pro-con
+        // contain no "!token" nodes -> has() filters everything -> no-op.
+        if (pro_con_ && si::roles::verb_negated(words)) {
+            std::vector<std::string> negs;
+            for (const auto& w : words) {
+                const std::string neg = "!" + w;
+                if (si_.has(neg)) negs.push_back(neg);
+            }
+            if (!negs.empty()) si_.inject(negs, state_dose(words) * kTypedDose);
+        }
+        // v3.9.0 (MAA §2) FRAGMENT ABDUCTION (opt-in): unknown state tokens
+        // are orphan nodes — degree 0, zero lanes, honest deferral. MAA
+        // fractures them into sub-lexical fragments, matches the fragments
+        // against interned names, and energizes the matched anchors at a
+        // reduced hypothesized dose. Volatile by design: NO lane writes at
+        // decide time, disclosed as hyp_tokens in the usage.
+        if (fragments_on_)
+            usage.hyp_tokens = fragment_abduce(words, state_dose(words));
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
             for (const auto& w : words)
@@ -1161,6 +1623,14 @@ public:
             si_.inject(bridges, kBridgeEnergy);
             usage.state_tokens += bridges.size();
         }
+        // v3.9.0 (P-CMA CEM shell): keep the PRE-settle field when planning is
+        // on — each planning variant restores it, draws a deterministic source
+        // cap, and re-settles. (A first cut snapshotted AFTER the main settle:
+        // every variant then settled an ALREADY-SETTLED field, double-decayed
+        // the energies, and deferred everything — caught by the think30
+        // bisection, where --cem-plan alone dropped accuracy 0.600 -> 0.267.)
+        // The plan can only REPLACE the field, never mutate the physics.
+        if (cem_on_) cem_presettle_ = si_.snapshot_field();
         si_.settle();
         // v3.8.0 (TASK 4): capture the MAIN settle's self-verification trace
         // before any second settle (perturb check) can overwrite it.
@@ -1259,6 +1729,33 @@ public:
         // v3.3.1 readout-silence visibility (opt-in): SYFOX_DEBUG_READOUT=1
         // prints the decide-level field so honest_silence vs readout-level
         // unknown_candidates deferral is measurable, not guessed.
+        // v3.9.0 (P-CMA CEM shell, opt-in): plan over deterministic source-cap
+        // variants of the SAME injected field before any readout. Probes come
+        // from the first choice question (same first-choice convention as the
+        // perturb check). The plan RESTORES the winning field — readouts below
+        // measure the planned field; when no variant beats the baseline margin
+        // the baseline settle is re-run, so cem_off == cem_on-with-no-gain.
+        if (cem_on_ && !silent) {
+            const sfx::JV* first_choice = nullptr;
+            for (const auto& qkv : questions.obj)
+                if (qkv.second.has("type") && qkv.second.at("type").as_str() == "choice"
+                    && qkv.second.has("criteria")) { first_choice = &qkv.second; break; }
+            if (first_choice) {
+                std::vector<std::pair<std::string, std::string>> probes;
+                const sfx::JV& crit = first_choice->at("criteria");
+                if (crit.is_obj())
+                    for (const auto& kv : crit.obj)
+                        probes.emplace_back(kv.first, kv.second.as_str());
+                else if (crit.is_arr())
+                    for (const auto& v : crit.arr)
+                        probes.emplace_back(v.as_str(), "");
+                if (probes.size() >= 2) cem_plan(words, probes, usage);
+            }
+        }
+        if (vght_gate_) {
+            usage.vght_gate = true;
+            usage.vght_gated_frac = si_.vght_gated_frac();
+        }
         if (std::getenv("SYFOX_DEBUG_READOUT") != nullptr)
             std::fprintf(stderr, "DEBUG: settled_energy=%.4f silence_floor=%.3f\n",
                          usage.settled_energy, si_.config().silence_floor);
@@ -1275,7 +1772,7 @@ public:
                 answers.push_back(a);
                 continue;
             }
-            if (a.type == "choice")   decide_choice(q, words, a);
+            if (a.type == "choice")   decide_choice(q, words, a, &usage);
             else if (a.type == "score") decide_score(q, a);
             else if (a.type == "noul")  decide_noul(q, a);
             // v3.6.0: the perturbation-contrast verdict overrides a carried
@@ -1292,6 +1789,45 @@ public:
                 && usage.field_motion_rate > self_verify_floor_) {
                 a.deferred = true;
                 a.reason = "unconverged_field";
+            }
+            // v3.9.0 (RIFA SIL): a state with >= 2 unresolved contradictions in
+            // its history is a known conflict zone — abstain earlier instead of
+            // answering a contested readout. Opt-in; tension disclosed always.
+            if (tension_on_) {
+                usage.tension_gate = true;
+                usage.tension = tension_acc_;
+                const auto cit = conflicts_by_state_.find(
+                    stream_hash(si::norm::normalize(state)));
+                if (a.type == "choice" && !a.deferred
+                    && cit != conflicts_by_state_.end() && cit->second.size() >= 2) {
+                    a.deferred = true;
+                    a.reason = "conflicted_state";
+                }
+            }
+            // v3.9.0 (fixes.md) OOD DENSITY GATE: the decision signature
+            // [settled, top, margin, unk] compared against every signature
+            // recorded from ANSWERED states at calibrate time; far from all of
+            // them => this field shape has never answered above-floor => defer.
+            if (a.type == "choice" && !a.deferred && ood_knn_on_ && !ood_sigs_.empty()) {
+                const std::array<float, 4> sig{usage.settled_energy,
+                                               ood_last_top_, ood_last_margin_,
+                                               ood_last_unk_};
+                float best = -1.0f;
+                for (const auto& s : ood_sigs_) {
+                    float d = 0.0f;
+                    for (int k = 0; k < 4; ++k) {
+                        const float diff = sig[static_cast<std::size_t>(k)] - s[static_cast<std::size_t>(k)];
+                        d += diff * diff;
+                    }
+                    d = std::sqrt(d);
+                    if (best < 0.0f || d < best) best = d;
+                }
+                usage.ood_knn = true;
+                usage.ood_knn_dist = best;
+                if (best > ood_knn_tau_) {
+                    a.deferred = true;
+                    a.reason = "ood_density";
+                }
             }
             answers.push_back(a);
         }
@@ -1340,6 +1876,15 @@ public:
                     if (si_.has(cp)) hcps.push_back(cp);
                 if (!hcps.empty()) si_.inject(hcps, state_dose(hw0) * kCausalDose);
             }
+            // v3.9.0 (RB surrogate): pro/con decide-side injection, mirrored.
+            if (pro_con_ && si::roles::verb_negated(hw0)) {
+                std::vector<std::string> negs;
+                for (const auto& w : hw0) {
+                    const std::string neg = "!" + w;
+                    if (si_.has(neg)) negs.push_back(neg);
+                }
+                if (!negs.empty()) si_.inject(negs, state_dose(hw0) * kTypedDose);
+            }
             if (si::norm::grams_enabled()) {
                 const std::vector<std::string> words2 = si::norm::normalize(state);
                 std::vector<std::string> bridges;
@@ -1383,6 +1928,21 @@ public:
                     }
                     CalibRow r; r.type = type; r.label = gold; r.energies = energies;
                     rows.push_back(r);
+                    // v3.9.0 (fixes.md): record the ANSWERED decision signature
+                    // [settled, top, margin, unk] — the in-distribution store
+                    // the OOD kNN gate compares against at decide time.
+                    {
+                        float top = 0.0f, second = 0.0f;
+                        for (const auto& e : energies) {
+                            if (e.second > top) { second = top; top = e.second; }
+                            else if (e.second > second) second = e.second;
+                        }
+                        std::size_t unk = 0;
+                        for (const auto& w : hw0) if (!si_.has(w)) ++unk;
+                        const float unk_frac = hw0.empty() ? 0.0f
+                            : static_cast<float>(unk) / static_cast<float>(hw0.size());
+                        record_ood_signature(si_.total_energy(), top, top - second, unk_frac);
+                    }
                 } else if (type == "noul") {
                     float support = noul_support(q.at("instructions").as_str());
                     CalibRow r; r.type = "noul";
@@ -1684,7 +2244,7 @@ private:
     }
 
     void decide_choice(const sfx::JV& q, const std::vector<std::string>& state_words,
-                       Answer& a) {
+                       Answer& a, Usage* usage = nullptr) {
         const sfx::JV& crit = q.at("criteria");
         std::vector<std::string> labels; std::vector<float> energies;
         if (crit.is_obj())
@@ -1728,6 +2288,90 @@ private:
             a.deferred = true;
             a.reason = "unknown_candidates";
             return;
+        }
+        // v3.9.0 decision-layer paper gates — each measures the settled field
+        // READ-ONLY and zeroes/scales energies; none rewrites the field.
+        // (a) MOMENTUM (MCPE §1 / CPME §2): a candidate whose normalized
+        //     tokens all LOST energy across the final settle pass already
+        //     peaked — it is the injected prompt echoing, not an emergent
+        //     answer. Zero it. All candidates echo-only => honest defer.
+        if (momentum_gate_ && usage) {
+            std::size_t eligible = 0;
+            for (std::size_t i = 0; i < labels.size(); ++i) {
+                bool gain = false;
+                for (const auto& t : si::norm::normalize(labels[i]))
+                    if (si_.has(t) && si_.node_momentum(si_.find(t)) > 0.0f) {
+                        gain = true; break;
+                    }
+                if (!gain) energies[i] = 0.0f;
+                else ++eligible;
+            }
+            usage->momentum_gate = true;
+            usage->momentum_eligible_frac =
+                static_cast<float>(eligible) / static_cast<float>(labels.size());
+            float new_max = 0.0f;
+            for (float e : energies) new_max = std::max(new_max, e);
+            if (new_max < kUnknownCandidateFloor) {
+                a.deferred = true;
+                a.reason = "echo_only";
+                return;
+            }
+        }
+        // (b) WAVEFRONT (CMD §4): restrict readout to candidates the query
+        //     actually reached — a candidate node resting at zero energy was
+        //     never touched by this state's propagation; its score is lane
+        //     dust, not measurement. Scale by the reached-energy share.
+        if (wavefront_gate_ && usage) {
+            std::vector<float> reach(labels.size(), 0.0f);
+            float peak = 0.0f;
+            for (std::size_t i = 0; i < labels.size(); ++i) {
+                float e = 0.0f;
+                for (const auto& t : si::norm::normalize(labels[i]))
+                    if (si_.has(t)) e = std::max(e, si_.node_energy(si_.find(t)));
+                reach[i] = e;
+                peak = std::max(peak, e);
+            }
+            std::size_t reached = 0;
+            for (std::size_t i = 0; i < labels.size(); ++i) {
+                if (reach[i] <= 0.0f) energies[i] = 0.0f;
+                else { energies[i] *= reach[i] / peak; ++reached; }
+            }
+            usage->wavefront_gate = true;
+            usage->wavefront_frac =
+                static_cast<float>(reached) / static_cast<float>(labels.size());
+            float new_max = 0.0f;
+            for (float e : energies) new_max = std::max(new_max, e);
+            if (new_max < kUnknownCandidateFloor) {
+                a.deferred = true;
+                a.reason = "unreached_candidates";
+                return;
+            }
+        }
+        // (c) COHERENCE (HTR §2.2, no-phase surrogate): the candidate set's
+        //     participation ratio must RISE above the whole field's — an
+        //     answer no more concentrated than baseline drift is silence.
+        if (coherence_gate_ && usage) {
+            double s = 0.0, s2 = 0.0;
+            std::size_t n_lit = 0;
+            for (std::size_t i = 0; i < labels.size(); ++i) {
+                for (const auto& t : si::norm::normalize(labels[i])) {
+                    if (!si_.has(t)) continue;
+                    const float e = si_.node_energy(si_.find(t));
+                    if (e <= 1e-7f) continue;
+                    s += e; s2 += static_cast<double>(e) * e; ++n_lit;
+                }
+            }
+            const float r_cand = (n_lit && s > 0.0)
+                ? static_cast<float>((s * s) / (static_cast<double>(n_lit) * s2)) : 0.0f;
+            const float r_field = si_.field_participation_ratio();
+            usage->coherence_gate = true;
+            usage->coherence_r = r_cand;
+            usage->coherence_field_r = r_field;
+            if (r_cand - r_field < coherence_floor_) {
+                a.deferred = true;
+                a.reason = "no_structural_rise";
+                return;
+            }
         }
         // v3.2 Stage 3 — semantic hierarchy gating (readout-side): when the
         // model ships a hierarchy and the candidates carry categories, stage-1
@@ -1822,6 +2466,34 @@ private:
         for (std::size_t i = 0; i < labels.size(); ++i)
             a.probabilities.emplace_back(labels[i], p[i]);
         a.confidence = entropy_confidence(p);
+        // v3.9.0 (RADE) PROOF PASS: typed path between the state's strongest
+        // axiom-graph concept and the winning anchor, premise-cited. Opt-in
+        // disclosure; --require-proof defers a choice with no typed path
+        // (coverage-cliff honesty: the field answered, the knowledge layer
+        // cannot justify it).
+        if (usage && (proof_on_ || require_proof_)) {
+            usage->proof_checked = true;
+            usage->proof_path = proof_path_between(state_words, labels[best]);
+            if (require_proof_ && usage->proof_path.empty()) {
+                a.deferred = true;
+                a.reason = "no_proof_path";
+            }
+        }
+        // v3.9.0 (fixes.md): remember the signature pieces for the OOD gate.
+        if (usage) {
+            float p1o = 0.0f, p2o = 0.0f;
+            for (float v : p) {
+                if (v > p1o) { p2o = p1o; p1o = v; }
+                else if (v > p2o) p2o = v;
+            }
+            usage->ood_knn_dist = -1.0f;   // marker: decide() fills the distance
+            ood_last_top_ = p1o;
+            ood_last_margin_ = p1o - p2o;
+            std::size_t unk = 0;
+            for (const auto& w : state_words) if (!si_.has(w)) ++unk;
+            ood_last_unk_ = state_words.empty() ? 0.0f
+                : static_cast<float>(unk) / static_cast<float>(state_words.size());
+        }
         // v3.3 exact-tie disclosure: when the top two probabilities are
         // EQUAL the readout carried no signal between them — the pick is
         // deterministic criteria order (std::map key order), and every reply
@@ -1995,6 +2667,35 @@ private:
     bool  multi_vector_on_ = false;   // v3.8.0 TASK 2 (default OFF)
     int   multi_vector_k_ = 8;        // channel count
     bool tools_check_on_ = false;     // v3.7.0 Move 4: decide-time tool disclosure (default OFF)
+    // v3.9.0 decision-layer paper gates (all default OFF; replay-safe)
+    bool proof_on_ = false;
+    bool require_proof_ = false;
+    bool momentum_gate_ = false;
+    bool wavefront_gate_ = false;
+    bool coherence_gate_ = false;
+    float coherence_floor_ = 0.05f;
+    bool vght_gate_ = false;
+    bool cem_on_ = false;
+    int   cem_rounds_ = 2;
+    int   cem_variants_ = 8;
+    bool fragments_on_ = false;
+    bool ood_knn_on_ = false;
+    float ood_knn_tau_ = 1.0f;
+    bool tension_on_ = false;
+    float tension_acc_ = 0.0f;        // RIFA SIL: grows on contradiction, never decays
+    bool pro_con_ = false;
+    bool sentinels_ = false;
+    // fixes.md OOD signatures: [settled_energy, top_energy, margin, unk_frac]
+    // collected from answered decisions at calibrate time; kNN gate at decide.
+    std::vector<std::array<float, 4>> ood_sigs_;
+    // CME fingerprint table: fp -> {first_seq, last_seq, hit_count}, capped.
+    std::unordered_map<std::uint64_t, std::array<std::uint64_t, 3>> fp_table_;
+    // v3.9.0 decide-path scratch: the pre-settle field for CEM planning and
+    // the last choice question's readout signature pieces (OOD kNN gate).
+    std::vector<float> cem_presettle_;
+    float ood_last_top_ = 0.0f;
+    float ood_last_margin_ = 0.0f;
+    float ood_last_unk_ = 0.0f;
     // Milestone-3 audit state
     std::string context_ = "default";
     std::uint64_t teach_seq_ = 0;

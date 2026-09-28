@@ -120,6 +120,28 @@ struct Args {
     bool multi_vector = false;       // --multi-vector: K=8 spectral energy channels
     long multi_vector_k = 8;         // --multi-vector-k K (channel count, default 8)
     int causal_lanes_mode = 0;       // --causal-lanes on|off: 1/-1 explicit; 0 = default OFF
+    // v3.9.0 THE CONSTRUCTIVE SUBSTRATE + decision-layer paper gates.
+    std::string axioms;              // axioms --load FILE / ask --query over the typed graph
+    std::string query;               // ask --query "subject relation object" (or discovery line)
+    bool query_backward = false;     // ask --backward: goal-directed adaptive chaining
+    bool proof = false;              // --proof: RADE proof-pass disclosure at decide
+    bool require_proof = false;      // --require-proof: defer choice without a typed path
+    bool momentum_gate = false;      // --momentum-readout (MCPE/CPME): echo suppression
+    bool wavefront_gate = false;     // --wavefront-gate (CMD §4): reached-candidates only
+    bool coherence_gate = false;     // --coherence-gate (HTR ΔR): structural-rise floor
+    float coherence_floor = 0;       // --coherence-floor F (0 = engine default 0.05)
+    bool vght_gate = false;          // --vght-gate (VGHT): coincidence-gated hop walk
+    bool cem_plan = false;           // --cem-plan (P-CMA shell): source-cap planning
+    long cem_rounds = 2;             // --cem-rounds N (default 2)
+    long cem_variants = 8;           // --cem-variants K (default 8)
+    bool fragments = false;          // --fragment-abduction (MAA): bridge unknown tokens
+    bool ood_knn = false;            // --ood-knn (fixes.md): signature-density defer
+    float ood_knn_tau = 0;           // --ood-knn-tau F (0 = engine default 1.0)
+    bool tension_gate = false;       // --tension-gate (RIFA SIL): conflict-zone defer
+    int pro_con_mode = 0;            // --pro-con on|off (RB surrogate): 1/-1 explicit
+    int sentinels_mode = 0;          // --sentinels on|off (CMD §2.5): 1/-1 explicit
+    int order_mode = 0;              // --order-consolidation on|off (CPME-II): 1/-1 explicit
+    bool fingerprints = false;       // --fingerprints (CME): graded half-dose re-teach
 };
 
 // v3.2.1 — BUG #1 disclosure: a kill switch on a model that lacks the
@@ -244,6 +266,19 @@ void apply_modes(syfox::Engine& eng, const Args& a) {
         si::roles::typed_lanes_enabled() = (a.typed_lanes_mode == 1);
     // v3.7.0 Move 4: decide-time tool disclosure (opt-in; usage-only)
     if (a.tools_check) eng.set_tools_check(true);
+    // v3.9.0 decision-layer paper gates (all opt-in; default OFF bit-identical)
+    if (a.proof || a.require_proof) eng.set_proof(a.proof, a.require_proof);
+    if (a.momentum_gate) eng.set_momentum_gate(true);
+    if (a.wavefront_gate) eng.set_wavefront_gate(true);
+    if (a.coherence_gate) eng.set_coherence_gate(true, a.coherence_floor);
+    if (a.vght_gate) eng.set_vght_gate(true);
+    if (a.cem_plan) eng.set_cem(true, static_cast<int>(a.cem_rounds), static_cast<int>(a.cem_variants));
+    if (a.fragments) eng.set_fragments(true);
+    if (a.ood_knn) eng.set_ood_knn(true, a.ood_knn_tau);
+    if (a.tension_gate) eng.set_tension_gate(true);
+    if (a.pro_con_mode != 0) eng.set_pro_con(a.pro_con_mode == 1);
+    if (a.sentinels_mode != 0) eng.set_sentinels(a.sentinels_mode == 1);
+    if (a.order_mode != 0) eng.substrate().set_order_consolidation(a.order_mode == 1);
     // v3 Milestone 5: --threads N controls deterministic parallel settle on
     // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
     // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
@@ -353,8 +388,15 @@ void cmd_learn(const Args& a) {
         std::exit(2);
     }
     auto rows = load_jsonl(a.examples);
-    const syfox::LearnPolicy lp{a.dedup, a.novelty, a.novelty_floor};
+    const syfox::LearnPolicy lp{a.dedup, a.novelty, a.novelty_floor, a.fingerprints};
     long lessons = 0, skipped = 0;
+    // v3.9.0 learn-side paper flags (engine-level; replay-safe when off)
+    auto apply_learn_flags = [&](syfox::Engine& eng) {
+        if (a.pro_con_mode != 0) eng.set_pro_con(a.pro_con_mode == 1);
+        if (a.sentinels_mode != 0) eng.set_sentinels(a.sentinels_mode == 1);
+        if (a.order_mode != 0) eng.substrate().set_order_consolidation(a.order_mode == 1);
+        if (!a.axioms.empty()) eng.load_axioms(a.axioms);
+    };
     // v3: consolidation passes. The substrate's own forgetting law decays
     // every lane 0.995x per lesson, so a 25k-lesson SINGLE pass is
     // recency-truncated (early lanes are decayed away before training ends).
@@ -398,6 +440,7 @@ void cmd_learn(const Args& a) {
             // v3.7.0 Move 1: opt-in dense distributional field at save
             if (a.distvec) eng.set_distvec(true);
             if (a.distvec_dims > 0) eng.set_distvec_dims(a.distvec_dims);
+            apply_learn_flags(eng);                           // v3.9.0 learn-side papers
             // v3.1.3 BUGFIX: this loop MUST teach g.second (this script
             // family's rows), not epoch_rows (the whole file). The v2.2 code
             // iterated epoch_rows here, so every per-script substrate was
@@ -450,6 +493,7 @@ void cmd_learn(const Args& a) {
     // v3.7.0 Move 1: opt-in dense distributional field at save
     if (a.distvec) eng.set_distvec(true);
     if (a.distvec_dims > 0) eng.set_distvec_dims(a.distvec_dims);
+    apply_learn_flags(eng);                                     // v3.9.0 learn-side papers
     for (const auto* exp : epoch_rows) {
         std::string state = exp->at("state").as_str();
         const sfx::JV& qs = exp->at("questions");
@@ -470,6 +514,19 @@ void cmd_learn(const Args& a) {
         }
     }
     eng.save_model(a.model);
+    // v3.9.0: persist the constructive substrate (axioms.txt in the model dir
+    // — load_model re-loads it on the next boot) and the v39 sidecar.
+    if (eng.reason_loaded() || !a.axioms.empty()) {
+        std::ofstream af(resolve_model_dir(a.model) + "/axioms.txt");
+        if (af) {
+            for (const auto& e : eng.reason_.graph.edges)
+                if (e.derived_by_rule < 0)                    // asserted premises only
+                    af << eng.reason_.graph.nodes[static_cast<std::size_t>(e.from)].label
+                       << ' ' << sxr::rel_name(e.rel) << ' '
+                       << eng.reason_.graph.nodes[static_cast<std::size_t>(e.to)].label << '\n';
+        }
+        eng.save_v39_state(resolve_model_dir(a.model));
+    }
     std::cout << sfx::JV(sfx::JVObj{
         {"command", sfx::JV("learn")}, {"examples", sfx::JV(a.examples)},
         {"model", sfx::JV(a.model)}, {"augment", sfx::JV(a.augment)},
@@ -480,6 +537,8 @@ void cmd_learn(const Args& a) {
         {"nodes", static_cast<double>(eng.substrate().node_count())},
         {"lanes", static_cast<double>(eng.substrate().lane_count())},
         {"contradictions", static_cast<double>(eng.conflicts().size())},
+        {"axiom_triples", static_cast<double>(eng.reason_edges())},
+        {"tension_acc", static_cast<double>(eng.tension_acc())},
         {"note", sfx::JV(a.dedup
             ? "exact duplicate lessons skipped (Milestone-2 distinct-experience policy)"
             : "every lesson taught (legacy behavior)")}}).dump() << "\n";
@@ -632,6 +691,51 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
     // v3.8.0 TASK 3: causal lanes energized
     if (u.causal_tokens > 0)
         usage["causal_tokens"] = static_cast<double>(u.causal_tokens);
+    // v3.9.0 constructive-substrate + paper-gate disclosures
+    if (u.proof_checked) {
+        usage["proof_checked"] = sfx::JV(true);
+        sfx::JVArr pp;
+        for (const auto& h : u.proof_path) pp.push_back(sfx::JV(h));
+        usage["proof_path"] = sfx::JV(pp);
+        usage["proof_hops"] = static_cast<double>(u.proof_path.size());
+    }
+    if (u.momentum_gate) {
+        usage["momentum_gate"] = sfx::JV(true);
+        usage["momentum_eligible_frac"] =
+            std::round(u.momentum_eligible_frac * 1000.0f) / 1000.0f;
+    }
+    if (u.wavefront_gate) {
+        usage["wavefront_gate"] = sfx::JV(true);
+        usage["wavefront_frac"] = std::round(u.wavefront_frac * 1000.0f) / 1000.0f;
+    }
+    if (u.coherence_gate) {
+        usage["coherence_gate"] = sfx::JV(true);
+        usage["coherence_r"] = std::round(u.coherence_r * 10000.0f) / 10000.0f;
+        usage["coherence_field_r"] = std::round(u.coherence_field_r * 10000.0f) / 10000.0f;
+    }
+    if (u.vght_gate) {
+        usage["vght_gate"] = sfx::JV(true);
+        usage["vght_gated_frac"] = std::round(u.vght_gated_frac * 1000.0f) / 1000.0f;
+    }
+    if (u.cem_active) {
+        usage["cem_plan"] = sfx::JV(true);
+        usage["cem_rounds"] = static_cast<double>(u.cem_rounds);
+        usage["cem_gain"] = std::round(u.cem_gain * 10000.0f) / 10000.0f;
+    }
+    if (!u.hyp_tokens.empty()) {
+        sfx::JVArr ht;
+        for (const auto& t : u.hyp_tokens) ht.push_back(sfx::JV(t));
+        usage["hyp_tokens"] = sfx::JV(ht);
+        usage["fragment_abduction"] = sfx::JV(true);
+    }
+    if (u.ood_knn) {
+        usage["ood_knn"] = sfx::JV(true);
+        usage["ood_knn_dist"] = std::round(u.ood_knn_dist * 10000.0f) / 10000.0f;
+    }
+    if (u.tension_gate) {
+        usage["tension_gate"] = sfx::JV(true);
+        usage["tension"] = std::round(u.tension * 1000.0f) / 1000.0f;
+    }
     return sfx::JV(sfx::JVObj{{"answers", sfx::JV(out)}, {"usage", sfx::JV(usage)}});
 }
 
@@ -1823,6 +1927,264 @@ void cmd_register(const Args& a) {
     std::cout << reg.dump() << "\n";
 }
 
+// ---------------------------------------------------------------------------
+// v3.9.0 — THE CONSTRUCTIVE SUBSTRATE COMMANDS. The typed axiom graph is a
+// first-class store next to the fabric: load SI-format .axioms (SI's own data
+// files load unchanged), chain forward/backward with proof traces, run the
+// six discovery queries, measure the thinker index, and audit lanes for
+// DERIVED-vs-INDUCED trust (CMA/CCH path additivity).
+// ---------------------------------------------------------------------------
+
+void cmd_axioms(const Args& a) {
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "axioms");
+    if (a.axioms.empty()) usage_exit();
+    const int added = eng.load_axioms(a.axioms);
+    // persist as the model's axiom file (load_model re-loads it next boot)
+    {
+        std::ofstream af(resolve_model_dir(a.model) + "/axioms.txt", std::ios::app);
+        std::ifstream src(a.axioms);
+        std::string line;
+        while (src && std::getline(src, line)) {
+            const auto hash = line.find('#');
+            if (hash != std::string::npos) line.erase(hash);
+            std::istringstream iss(line);
+            std::string s, r, o;
+            if (iss >> s >> r >> o && sxr::rel_from_token(r) >= 0) af << s << ' ' << r << ' ' << o << "\n";
+        }
+    }
+    eng.save_v39_state(resolve_model_dir(a.model));
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("axioms")}, {"model", sfx::JV(a.model)},
+        {"loaded", sfx::JV(a.axioms)}, {"new_triples", static_cast<double>(added)},
+        {"graph_nodes", static_cast<double>(eng.reason_nodes())},
+        {"graph_edges", static_cast<double>(eng.reason_edges())},
+        {"fabric_nodes", static_cast<double>(eng.substrate().node_count())}}).dump() << "\n";
+}
+
+void cmd_ask(const Args& a) {
+    if (a.query.empty()) usage_exit();
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "ask");
+    if (!eng.reason_loaded()) {
+        std::cerr << "syfox: model " << a.model << " has no axiom graph "
+                  << "(load one: syfox axioms --model " << a.model
+                  << " --load FILE.axioms)\n";
+        std::exit(2);
+    }
+    std::istringstream iss(a.query);
+    std::string subj, rel_tok, obj;
+    if (!(iss >> subj >> rel_tok >> obj)) {
+        std::cerr << "syfox: --query needs \"subject relation object\"\n";
+        std::exit(2);
+    }
+    const int rel = sxr::rel_from_token(rel_tok);
+    if (rel < 0) { std::cerr << "syfox: unknown relation '" << rel_tok << "'\n"; std::exit(2); }
+    sxr::ReasonCore::QueryResult qr;
+    if (a.query_backward) qr = eng.reason_.ask_backward_adaptive(subj, rel, obj);
+    else                  qr = eng.reason_.ask(subj, rel, obj);
+    eng.reason_meta_.observe_trace(qr.proof);
+    eng.thinker_.record(qr);
+    sfx::JVArr proof;
+    for (int ei : qr.proof) {
+        const auto& e = eng.reason_.graph.edges[static_cast<std::size_t>(ei)];
+        const char* how = (e.derived_by_rule < 0) ? "premise"
+            : eng.reason_.rules[static_cast<std::size_t>(e.derived_by_rule)].name.c_str();
+        proof.push_back(sfx::JV(sfx::JVObj{
+            {"step", sfx::JV(how)},
+            {"fact", sfx::JV(std::string(eng.reason_.graph.nodes[static_cast<std::size_t>(e.from)].label)
+                           + " " + sxr::rel_name(e.rel) + " "
+                           + eng.reason_.graph.nodes[static_cast<std::size_t>(e.to)].label)}}));
+    }
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("ask")}, {"mode", sfx::JV(a.query_backward ? "backward" : "forward")},
+        {"query", sfx::JV(a.query)}, {"holds", sfx::JV(qr.holds)},
+        {"ood", sfx::JV(qr.ood)}, {"coherence", std::round(qr.coherence * 1000.0) / 1000.0},
+        {"verified", sfx::JV(qr.holds ? sxr::verify_edge(eng.reason_, qr.proof_edge) : false)},
+        {"translation", sfx::JV(qr.translation)},
+        {"proof_steps", static_cast<double>(qr.proof.size())},
+        {"proof", sfx::JV(proof)},
+        {"thinker_C", std::round(eng.thinker_.composition_rate() * 1000.0) / 1000.0},
+        {"thinker_R", std::round(eng.thinker_.retrieval_rate() * 1000.0) / 1000.0}}).dump() << "\n";
+}
+
+void cmd_reason(const Args& a) {
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "reason");
+    if (!eng.reason_loaded()) {
+        std::cerr << "syfox: model " << a.model << " has no axiom graph\n";
+        std::exit(2);
+    }
+    const std::size_t before = eng.reason_.graph.edges.size();
+    const auto rep = eng.reason_.reason_ext();
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("reason")}, {"model", sfx::JV(a.model)},
+        {"edges_before", static_cast<double>(before)},
+        {"edges_derived", static_cast<double>(rep.edges_added)},
+        {"steps", static_cast<double>(rep.steps_used)},
+        {"budget_left", std::round(rep.budget_left * 100.0) / 100.0},
+        {"rules", static_cast<double>(eng.reason_.rules.size())},
+        {"graph_nodes", static_cast<double>(eng.reason_nodes())},
+        {"graph_edges", static_cast<double>(eng.reason_edges())}}).dump() << "\n";
+}
+
+void cmd_discover(const Args& a) {
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "discover");
+    if (!eng.reason_loaded()) {
+        std::cerr << "syfox: model " << a.model << " has no axiom graph\n";
+        std::exit(2);
+    }
+    eng.reason_.reason_ext();   // reason to fixpoint first (query the reasoned graph)
+    sfx::JVObj out{{"command", sfx::JV("discover")}, {"model", sfx::JV(a.model)}};
+    if (!a.query.empty()) {
+        const auto g = sxr::classify_gap_query(a.query);
+        out["classified"] = sfx::JV(sfx::JVObj{
+            {"is_query", sfx::JV(g.is_query)},
+            {"kind", static_cast<double>(g.kind)}});
+        if (!g.is_query) {
+            out["note"] = sfx::JV("not a discovery question (no shape keyword or "
+                                  "no interrogative mood)");
+            std::cout << sfx::JV(std::move(out)).dump() << "\n";
+            return;
+        }
+    }
+    auto labels_of = [&eng](int id) -> std::string {
+        return eng.reason_.graph.nodes[static_cast<std::size_t>(id)].label;
+    };
+    {   // 1. isolated subgraphs
+        sfx::JVArr arr;
+        for (const auto& c : sxr::find_isolated_subgraphs(eng.reason_)) {
+            sfx::JVArr ns;
+            for (int n : c.nodes) ns.push_back(sfx::JV(labels_of(n)));
+            arr.push_back(sfx::JV(sfx::JVObj{
+                {"size", static_cast<double>(c.nodes.size())},
+                {"nodes", sfx::JV(std::move(ns))}}));
+        }
+        out["isolated_subgraphs"] = sfx::JV(std::move(arr));
+    }
+    {   // 2. dangling edges
+        sfx::JVArr arr;
+        for (const auto& d : sxr::find_dangling_edges(eng.reason_))
+            arr.push_back(sfx::JV(sfx::JVObj{
+                {"node", sfx::JV(labels_of(d.node_id))},
+                {"degree", static_cast<double>(d.total_degree)}}));
+        out["dangling_nodes"] = sfx::JV(std::move(arr));
+    }
+    {   // 4. symmetry gaps
+        sfx::JVArr arr;
+        for (const auto& g : sxr::find_symmetry_gaps(eng.reason_))
+            arr.push_back(sfx::JV(sfx::JVObj{
+                {"missing", sfx::JV(labels_of(g.x_mirror) + " " + sxr::rel_name(g.r)
+                                  + " " + labels_of(g.y_mirror))},
+                {"mirror_of", sfx::JV(labels_of(g.x) + " " + sxr::rel_name(g.r)
+                                    + " " + labels_of(g.y))}}));
+        out["symmetry_gaps"] = sfx::JV(std::move(arr));
+    }
+    {   // 5. anomalies
+        sfx::JVArr arr;
+        for (const auto& an : sxr::find_anomalies(eng.reason_))
+            arr.push_back(sfx::JV(sfx::JVObj{
+                {"node", sfx::JV(labels_of(an.node_id))},
+                {"degree", static_cast<double>(an.total_degree)},
+                {"hops_to_fundamental", static_cast<double>(an.hops_to_fundamental)},
+                {"anomaly_score", std::round(an.anomaly_score * 1000.0) / 1000.0}}));
+        out["anomalies"] = sfx::JV(std::move(arr));
+    }
+    // 3. logic gap runs only when the query names two concepts
+    if (!a.query.empty()) {
+        const auto g = sxr::classify_gap_query(a.query);
+        if (g.is_query && g.kind == 0 && g.terms.size() >= 2) {
+            const auto lg = sxr::find_logic_gap(eng.reason_, g.terms[0], g.terms[1]);
+            out["logic_gap"] = sfx::JV(sfx::JVObj{
+                {"full_path_exists", sfx::JV(lg.full_path_exists)},
+                {"from_side", lg.from_side_node >= 0 ? sfx::JV(labels_of(lg.from_side_node)) : sfx::JV(std::string())},
+                {"to_side", lg.to_side_node >= 0 ? sfx::JV(labels_of(lg.to_side_node)) : sfx::JV(std::string())},
+                {"hops_from_a", static_cast<double>(lg.hops_from_a)},
+                {"hops_from_b_reverse", static_cast<double>(lg.hops_from_b_reverse)}});
+        }
+    }
+    std::cout << sfx::JV(std::move(out)).dump() << "\n";
+}
+
+void cmd_thinker(const Args& a) {
+    if (a.query.empty()) usage_exit();
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "thinker");
+    if (!eng.reason_loaded()) {
+        std::cerr << "syfox: model " << a.model << " has no axiom graph\n";
+        std::exit(2);
+    }
+    eng.reason_.reason_ext();
+    // queries file: one "subject relation object" triple per line
+    std::ifstream in(a.query);
+    if (!in) { std::cerr << "syfox: cannot open " << a.query << "\n"; std::exit(2); }
+    std::string line;
+    long asked = 0, held = 0;
+    while (std::getline(in, line)) {
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        std::istringstream iss(line);
+        std::string subj, rel_tok, obj;
+        if (!(iss >> subj >> rel_tok >> obj)) continue;
+        const int rel = sxr::rel_from_token(rel_tok);
+        if (rel < 0) continue;
+        const auto qr = eng.reason_.ask(subj, rel, obj);
+        eng.reason_meta_.observe_trace(qr.proof);
+        eng.thinker_.record(qr);
+        ++asked;
+        if (qr.holds) ++held;
+    }
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("thinker")}, {"model", sfx::JV(a.model)},
+        {"queries", static_cast<double>(asked)}, {"holds", static_cast<double>(held)},
+        {"C_composition", std::round(eng.thinker_.composition_rate() * 1000.0) / 1000.0},
+        {"R_retrieval", std::round(eng.thinker_.retrieval_rate() * 1000.0) / 1000.0},
+        {"thinker_index", std::round(eng.thinker_.thinker_index() * 1000.0) / 1000.0},
+        {"subchains_tracked", static_cast<double>(eng.reason_meta_.chain_stats.size())},
+        {"macro_rules", static_cast<double>(eng.reason_meta_.macros.size())}}).dump() << "\n";
+}
+
+void cmd_audit(const Args& a) {
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "audit");
+    if (!eng.reason_loaded()) {
+        std::cerr << "syfox: model " << a.model << " has no axiom graph\n";
+        std::exit(2);
+    }
+    auto label_of = [&eng](int id) -> std::string {
+        return eng.reason_.graph.nodes[static_cast<std::size_t>(id)].label;
+    };
+    // CMA/CCH path-additivity trust audit (relation-agnostic, unit resistance):
+    // a direct lane u->v that ALSO has a 2-hop support path u->w->v is DERIVED
+    // (its truth is entailed by the structure, the additive-path predicate);
+    // a direct lane with no support path is INDUCED (Hebbian co-occurrence).
+    long derived = 0, induced = 0;
+    sfx::JVArr samples;
+    for (std::size_t i = 0; i < eng.reason_.graph.edges.size(); ++i) {
+        const auto& e = eng.reason_.graph.edges[i];
+        const int u = e.from, v = e.to;
+        bool support_path = false;
+        for (const auto& e1 : eng.reason_.graph.edges) {
+            if (e1.from != u || e1.to == v || e1.to == u) continue;
+            if (eng.reason_.graph.has_edge(e1.to, v, e1.rel)) { support_path = true; break; }
+        }
+        ++(support_path ? derived : induced);
+        if (samples.size() < 8)
+            samples.push_back(sfx::JV(sfx::JVObj{
+                {"fact", sfx::JV(label_of(u) + " " + sxr::rel_name(e.rel) + " " + label_of(v))},
+                {"trust", sfx::JV(support_path ? "derived" : "induced")}}));
+    }
+    std::cout << sfx::JV(sfx::JVObj{
+        {"command", sfx::JV("audit")}, {"model", sfx::JV(a.model)},
+        {"edges_total", static_cast<double>(eng.reason_.graph.edges.size())},
+        {"derived", static_cast<double>(derived)},
+        {"induced", static_cast<double>(induced)},
+        {"note", sfx::JV("derived = direct lane with an additive 2-hop support path "
+                         "(CCH Theorem 2.2 predicate); induced = asserted-only co-occurrence")},
+        {"samples", sfx::JV(std::move(samples))}}).dump() << "\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1939,6 +2301,46 @@ int main(int argc, char** argv) {
         else if (k == "--distvec") a.distvec = true;
         else if (k == "--distvec-dims") { if (i + 1 >= argc) usage_exit(); a.distvec_dims = std::strtol(argv[++i], nullptr, 10); if (a.distvec_dims < 2 || a.distvec_dims > 4096) usage_exit(); }
         else if (k == "--tools") a.tools_check = true;
+        // v3.9.0 constructive substrate + decision-layer paper gates
+        else if (k == "--load") need(a.axioms);            // axioms --load FILE
+        else if (k == "--query") need(a.query);            // ask/discover --query
+        else if (k == "--backward") a.query_backward = true;
+        else if (k == "--proof") a.proof = true;
+        else if (k == "--require-proof") a.require_proof = true;
+        else if (k == "--momentum-readout") a.momentum_gate = true;
+        else if (k == "--wavefront-gate") a.wavefront_gate = true;
+        else if (k == "--coherence-gate") a.coherence_gate = true;
+        else if (k == "--coherence-floor") { if (i + 1 >= argc) usage_exit(); a.coherence_floor = std::strtof(argv[++i], nullptr); if (a.coherence_floor < 0 || a.coherence_floor > 1) usage_exit(); }
+        else if (k == "--vght-gate") a.vght_gate = true;
+        else if (k == "--cem-plan") a.cem_plan = true;
+        else if (k == "--cem-rounds") { if (i + 1 >= argc) usage_exit(); a.cem_rounds = std::strtol(argv[++i], nullptr, 10); if (a.cem_rounds < 1 || a.cem_rounds > 4) usage_exit(); }
+        else if (k == "--cem-variants") { if (i + 1 >= argc) usage_exit(); a.cem_variants = std::strtol(argv[++i], nullptr, 10); if (a.cem_variants < 2 || a.cem_variants > 16) usage_exit(); }
+        else if (k == "--fragment-abduction") a.fragments = true;
+        else if (k == "--ood-knn") a.ood_knn = true;
+        else if (k == "--ood-knn-tau") { if (i + 1 >= argc) usage_exit(); a.ood_knn_tau = std::strtof(argv[++i], nullptr); if (a.ood_knn_tau < 0) usage_exit(); }
+        else if (k == "--tension-gate") a.tension_gate = true;
+        else if (k == "--pro-con") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.pro_con_mode = 1;
+            else if (v == "off") a.pro_con_mode = -1;
+            else usage_exit();
+        }
+        else if (k == "--sentinels") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.sentinels_mode = 1;
+            else if (v == "off") a.sentinels_mode = -1;
+            else usage_exit();
+        }
+        else if (k == "--order-consolidation") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.order_mode = 1;
+            else if (v == "off") a.order_mode = -1;
+            else usage_exit();
+        }
+        else if (k == "--fingerprints") a.fingerprints = true;
         else usage_exit();
     }
     // v2.1 (P4): one synonym table for the whole process. --synonyms wins;
@@ -1969,5 +2371,12 @@ int main(int argc, char** argv) {
     if (cmd == "register") { cmd_register(a); return 0; }
     if (cmd == "pretrain") { cmd_pretrain(a); return 0; }
     if (cmd == "tools") { cmd_tools(a); return 0; }
+    // v3.9.0 constructive substrate
+    if (cmd == "axioms") { if (a.model.empty()) usage_exit(); cmd_axioms(a); return 0; }
+    if (cmd == "ask") { if (a.model.empty()) usage_exit(); cmd_ask(a); return 0; }
+    if (cmd == "reason") { if (a.model.empty()) usage_exit(); cmd_reason(a); return 0; }
+    if (cmd == "discover") { if (a.model.empty()) usage_exit(); cmd_discover(a); return 0; }
+    if (cmd == "thinker") { if (a.model.empty()) usage_exit(); cmd_thinker(a); return 0; }
+    if (cmd == "audit") { if (a.model.empty()) usage_exit(); cmd_audit(a); return 0; }
     usage_exit();
 }

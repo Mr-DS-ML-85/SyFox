@@ -158,8 +158,22 @@ def main():
     print(f"DELTA thinking - baseline: "
           f"{round(thinking['accuracy'] - baseline['accuracy'], 3)}")
 
+    v39 = run_suite("v39gates",
+                    learn_extra=["--causal-lanes", "on", "--typed-lanes", "on",
+                                 "--distvec"],
+                    decide_extra=["--causal-lanes", "on", "--typed-lanes", "on",
+                                  "--adaptive-depth", "--self-verify", "--perturb-check",
+                                  "--multi-vector",
+                                  "--wavefront-gate", "--cem-plan"])
+    print(f"v39gates (multivector fabric + CMD wavefront gate + P-CMA CEM plan): "
+          f"accuracy {v39['accuracy']} ({v39['correct']}/{v39['total']})")
+    for c, v in v39["per_category"].items():
+        print(f"  {c}: {v['correct']}/{v['n']} (defer {v['deferred']})")
+    print(f"DELTA v39gates - baseline: "
+          f"{round(v39['accuracy'] - baseline['accuracy'], 3)}")
+
     if json_out:
-        doc = {"baseline": baseline, "thinking": thinking, "multivector": mv,
+        doc = {"baseline": baseline, "thinking": thinking, "multivector": mv, "v39gates": v39,
                "comment": "every number from an actual syfox run in this tree; "
                           "A choice / B why / C how / D xdomain / E chains / F honesty(DEFER gold)",
                }

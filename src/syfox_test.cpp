@@ -2208,6 +2208,312 @@ static sfx::JV q_choice() {
         R"("dig_in":"hide build shelter"}}})");
 }
 
+// ---------------------------------------------------------------------------
+// v3.9.0 — THE CONSTRUCTIVE SUBSTRATE (SI Layer 2) + decision-layer paper
+// gates. Every check pins a mechanism the audit demanded: the typed graph,
+// the nine primitives, proof traces, retraction, discovery, the thinker
+// index, the axioms->fabric bridge, and each opt-in gate's contract.
+// ---------------------------------------------------------------------------
+static void test_reason() {
+    std::cerr << "  AT-test_reason\n";
+    std::cout << "[reason: typed graph / primitives / proofs / discovery]\n";
+    using namespace sxr;
+
+    // -- the nine primitives close the syllogism + inheritance + contrapositive
+    ReasonCore rc;
+    rc.add_default_rules();
+    rc.assert_fact("socrates", REL_IS_A, "man");
+    rc.assert_fact("man", REL_IS_A, "mortal");
+    const auto rep = rc.reason_ext();
+    CHECK(rep.edges_added >= 1, "transitive derives socrates is_a mortal");
+    auto q = rc.query("socrates", REL_IS_A, "mortal");
+    CHECK(q.holds && q.proof.size() == 3, "proof trace has premise-premise-derived");
+    CHECK(q.proof[0] < q.proof[2], "premises precede the conclusion in the trace");
+    CHECK(verify_edge(rc, q.proof_edge), "verifier accepts a fresh derivation");
+
+    // modus ponens + inheritance (class property flows to a member)
+    ReasonCore rc2;
+    rc2.add_default_rules();
+    rc2.assert_fact("raining", REL_IMPLIES, "wet");
+    rc2.assert_fact("whale", REL_IS_A, "mammal");
+    rc2.assert_fact("mammal", REL_HAS, "fur");
+    rc2.reason_ext();
+    CHECK(rc2.query("raining", REL_IMPLIES, "wet").holds, "modus ponens chain present");
+    CHECK(rc2.query("whale", REL_HAS, "fur").holds, "inheritance flows class property to member");
+
+    // contrapositive: (P implies Q) + (X not Q) => (X not P)
+    ReasonCore rc3;
+    rc3.add_default_rules();
+    rc3.assert_fact("raining", REL_IMPLIES, "wet");
+    rc3.assert_fact("desert", REL_NOT, "wet");
+    rc3.reason_ext();
+    CHECK(rc3.query("desert", REL_NOT, "raining").holds, "contrapositive derives X not P");
+
+    // induction: >= 3 witnesses sharing a property generalize to the class
+    ReasonCore rc4;
+    rc4.add_default_rules();
+    for (const char* w : {"fido", "rex", "spot"})
+        { rc4.assert_fact(w, REL_IS_A, "dog"); rc4.assert_fact(w, REL_HAS, "legs"); }
+    rc4.assert_fact("tabby", REL_IS_A, "cat");
+    rc4.assert_fact("tabby", REL_HAS, "legs");
+    rc4.reason_ext();
+    CHECK(rc4.query("dog", REL_HAS, "legs").holds, "induction generalizes from 3 witnesses");
+    CHECK(!rc4.query("cat", REL_HAS, "legs").holds, "induction needs min_witnesses");
+
+    // backward chaining proves a goal forward rules could also derive
+    ReasonCore rc5;
+    rc5.add_default_rules();
+    rc5.assert_fact("a", REL_IS_A, "b");
+    rc5.assert_fact("b", REL_IS_A, "c");
+    rc5.assert_fact("c", REL_IS_A, "d");
+    const auto bq = rc5.ask_backward_adaptive("a", REL_IS_A, "d");
+    CHECK(bq.holds && bq.proof.size() >= 3, "backward chaining proves a 3-hop goal");
+
+    // contradiction guard refuses NOT against an existing is_a (symmetric check)
+    ReasonCore rc6;
+    rc6.add_default_rules();
+    rc6.assert_fact("whale", REL_IS_A, "mammal");
+    const auto refused = teach_axiom(rc6, "whale", REL_NOT, "mammal", "test");
+    CHECK(refused.contradiction, "NOT claim against an is_a is refused");
+    CHECK(teach_axiom(rc6, "whale", REL_IS_A, "mammal", "test").duplicate,
+          "duplicate assertion reported");
+
+    // bounded retraction: removing a premise kills its derived descendants
+    ReasonCore rc7;
+    rc7.add_default_rules();
+    rc7.assert_fact("socrates", REL_IS_A, "man");
+    rc7.assert_fact("man", REL_IS_A, "mortal");
+    rc7.reason_ext();
+    const int mid = rc7.graph.find_edge(rc7.graph.by_label.at("man"),
+                                        rc7.graph.by_label.at("mortal"), REL_IS_A);
+    const auto killed = rc7.graph.retract(mid);
+    CHECK(killed >= 2, "retraction removes the premise AND its derived edge");
+    CHECK(!rc7.query("socrates", REL_IS_A, "mortal").holds, "derived edge unsupported after retraction");
+
+    // discovery: ungrounded islands found, grounded taxonomy not flagged
+    ReasonCore rc8;
+    rc8.add_default_rules();
+    rc8.assert_fact("x1", REL_IS_A, "axiom");
+    rc8.assert_fact("orphan1", REL_HAS, "orphan2");
+    const auto islands = find_isolated_subgraphs(rc8);
+    CHECK(islands.size() == 1 && islands[0].nodes.size() == 2,
+          "discovery finds the ungrounded island only");
+
+    // -- ENGINE BRIDGE: axioms load into BOTH stores ------------------------
+    {
+        syfox::Engine e;
+        CHECK(!e.reason_loaded(), "engine without axioms has no graph (replay contract)");
+        {
+            FILE* f = std::fopen("build/test_reason.axioms", "w");
+            std::fprintf(f, "socrates is_a man\nman is_a mortal\nwhale is_a mammal\n"
+                            "mammal has fur\nwhale not stone\n");
+            std::fclose(f);
+        }
+        const int n = e.load_axioms("build/test_reason.axioms", nullptr);
+        CHECK(n == 5, "all valid triples accepted");
+        CHECK(e.reason_loaded() && e.reason_edges() == 5, "graph carries the triples");
+        CHECK(e.substrate().has("socrates") && e.substrate().has("mortal"),
+              "fabric shares the axiom vocabulary");
+        CHECK(e.substrate().lane_weight(e.substrate().find("socrates"),
+                                        e.substrate().find("man")) > 0.0f,
+              "axiom lanes laid in the fabric (asserted triples only)");
+        // reload is idempotent (replay stability)
+        CHECK(e.load_axioms("build/test_reason.axioms", nullptr) == 0,
+              "axiom reload adds nothing");
+        // the reasoned answer + fabric lane both exist
+        auto qr = e.reason_.ask("socrates", REL_IS_A, "mortal");
+        CHECK(qr.holds && qr.proof.size() == 3, "ask derives through the engine");
+        // proof pass between a state word and an anchor
+        const auto hops = e.proof_path_between({"socrates"}, "mortal");
+        CHECK(hops.size() == 1 && hops[0] == "socrates is_a mortal",
+              "RADE proof pass cites the typed path");
+    }
+}
+
+static void test_v39_gates() {
+    std::cerr << "  AT-test_v39_gates\n";
+    std::cout << "[v39 gates: momentum / wavefront / coherence / vght / cem / "
+                 "ood-knn / tension / learn papers]\n";
+    const sfx::JV q = q_choice();
+    const char* state = "zombies appear at night, health is low";
+    const char* teach = "the bot sees zombies at night with low health";
+
+    // -- replay contract: default engine discloses none of the gates --------
+    {
+        syfox::Engine e;
+        e.learn_example(teach, "next move", "flee run away escape avoid");
+        syfox::Usage u;
+        e.decide(state, q, u);
+        CHECK(!u.momentum_gate && !u.wavefront_gate && !u.coherence_gate
+              && !u.vght_gate && !u.cem_active && !u.ood_knn && !u.tension_gate
+              && !u.proof_checked,
+              "default engine discloses no v3.9 gates (replay contract)");
+    }
+
+    std::cerr << "  AT-B1\n";
+    // -- momentum: echo suppression -----------------------------------------
+    {
+        syfox::Engine e;
+        e.set_momentum_gate(true);
+        e.set_defer_margin(0);
+        e.learn_example(teach, "next move", "flee run away escape avoid");
+        syfox::Usage u;
+        e.decide(state, q, u);
+        CHECK(u.momentum_gate && u.momentum_eligible_frac > 0.0f,
+              "in-distribution candidates receive diffusion (eligible)");
+        syfox::Usage u2;
+        e.decide(state, q, u2);
+        CHECK(u2.momentum_eligible_frac == u.momentum_eligible_frac,
+              "momentum deterministic per state");
+    }
+
+    std::cerr << "  AT-B2\n";
+    // -- wavefront + coherence: reach and structural rise --------------------
+    {
+        syfox::Engine e;
+        e.set_wavefront_gate(true);
+        e.set_coherence_gate(true, 0.0f);       // floor 0: never defers
+        e.set_defer_margin(0);
+        e.learn_example(teach, "next move", "flee run away escape avoid");
+        syfox::Usage u;
+        e.decide(state, q, u);
+        CHECK(u.wavefront_gate && u.wavefront_frac > 0.0f,
+              "reached-candidate fraction disclosed");
+        CHECK(u.coherence_gate && u.coherence_r >= u.coherence_field_r - 1e-6f,
+              "candidate concentration measured against the field");
+        // floor 1.0: any candidate set sits below an impossible rise -> defer
+        syfox::Engine e2;
+        e2.set_coherence_gate(true, 1.0f);
+        e2.set_defer_margin(0);
+        e2.learn_example(teach, "next move", "flee run away escape avoid");
+        syfox::Usage u2;
+        auto a2 = e2.decide(state, q, u2);
+        CHECK(a2[0].deferred && a2[0].reason == "no_structural_rise",
+              "impossible coherence floor defers honestly");
+    }
+
+    std::cerr << "  AT-B3\n";
+    // -- vght + cem: gated walk + planning (disclosure + determinism) --------
+    {
+        syfox::Engine e;
+        e.set_vght_gate(true);
+        e.set_cem(true, 1, 4);
+        e.set_defer_margin(0);
+        e.learn_example(teach, "next move", "flee run away escape avoid");
+        syfox::Usage u;
+        e.decide(state, q, u);
+        CHECK(u.vght_gate, "vght gate disclosed");
+        CHECK(u.cem_active && u.cem_rounds == 1, "cem plan ran and disclosed");
+        syfox::Usage u2;
+        e.decide(state, q, u2);
+        CHECK(u2.vght_gated_frac == u.vght_gated_frac && u2.cem_gain == u.cem_gain,
+              "vght + cem deterministic per state");
+    }
+
+    std::cerr << "  AT-B4\n";
+    // -- ood-knn: signature store + density gate -----------------------------
+    {
+        syfox::Engine e;
+        e.set_ood_knn(true, 0.0f);              // tau 0: any distance defers
+        e.set_defer_margin(0);
+        e.learn_example(teach, "next move", "flee run away escape avoid");
+        e.record_ood_signature(1.0f, 0.5f, 0.1f, 0.0f);   // an unrelated shape
+        syfox::Usage u;
+        auto a = e.decide(state, q, u);
+        CHECK(u.ood_knn && a[0].deferred && a[0].reason == "ood_density",
+              "far signature defers ood_density at tau 0");
+        syfox::Engine e2;
+        e2.set_ood_knn(true, 100.0f);           // huge tau: never defers
+        e2.set_defer_margin(0);
+        e2.learn_example(teach, "next move", "flee run away escape avoid");
+        e2.record_ood_signature(0.0f, 0.0f, 0.0f, 0.0f);
+        syfox::Usage u2;
+        auto a2 = e2.decide(state, q, u2);
+        CHECK(!a2[0].deferred || a2[0].reason != "ood_density",
+              "near signature answers at a huge tau");
+        // empty store: gate is inert (nothing to compare against)
+        syfox::Engine e3;
+        e3.set_ood_knn(true, 0.0f);
+        e3.set_defer_margin(0);
+        e3.learn_example(teach, "next move", "flee run away escape avoid");
+        syfox::Usage u3;
+        e3.decide(state, q, u3);
+        CHECK(!u3.ood_knn, "empty signature store keeps the gate inert");
+    }
+
+    // -- tension (RIFA SIL): contradiction accumulation + conflict defer ------
+    {
+        syfox::Engine e;
+        e.set_tension_gate(true);
+        e.set_defer_margin(0);
+        // the DECIDE state must match the taught state: the conflict ledger is
+        // keyed by the state stream hash, so the same contested state that was
+        // taught twice with different outcomes is the one that abstains.
+        const char* contested = "the bot sees zombies at night with low health";
+        e.learn_example(contested, "next move", "flee run away escape avoid");
+        e.learn_example(contested, "next move", "fight attack sword combat");   // contradiction 1
+        e.learn_example(contested, "next move", "dig_in hide build shelter");   // contradiction 2
+        CHECK(e.tension_acc() == 2.0f, "two contradictions accumulate tension 2.0");
+        syfox::Usage u;
+        auto a = e.decide(contested, q, u);
+        CHECK(u.tension_gate && u.tension == 2.0f, "tension disclosed per decide");
+        CHECK(a[0].deferred && a[0].reason == "conflicted_state",
+              "a twice-contradicted state abstains earlier");
+    }
+
+    // -- fingerprints (CME): graded half-dose re-teach ------------------------
+    {
+        syfox::Engine e_fp, e_plain;
+        for (int i = 0; i < 3; ++i) {
+            bool l1 = false, l2 = false;
+            e_plain.learn_example(teach, "next move", "flee run away escape avoid",
+                                  false, syfox::LearnPolicy{}, &l1);
+            syfox::LearnPolicy fp{};
+            fp.fingerprints = true;
+            e_fp.learn_example(teach, "next move", "flee run away escape avoid",
+                               false, fp, &l2);
+            CHECK(l1 && l2, "re-teach still consolidates under fingerprints");
+        }
+        const auto w_plain = e_plain.substrate().lane_weight(
+            e_plain.substrate().find("zombi"), e_plain.substrate().find("flee"));
+        const auto w_fp = e_fp.substrate().lane_weight(
+            e_fp.substrate().find("zombi"), e_fp.substrate().find("flee"));
+        CHECK(w_fp < w_plain, "re-taught duplicates consolidate at HALF dose");
+    }
+
+    // -- sentinels + pro/con + order consolidation (fabric construction) ------
+    {
+        syfox::Engine e;
+        e.set_sentinels(true);
+        e.set_pro_con(true);
+        e.substrate().set_order_consolidation(true);
+        e.learn_example("the bot does not see zombies at night", "next move",
+                        "dig_in hide build shelter");
+        CHECK(e.substrate().has("^the~bot"), "sentinel word-initial pair interned");
+        CHECK(e.substrate().has("next~move$"), "sentinel word-final pair interned");
+        CHECK(e.substrate().has("!zombi"), "negated lesson binds through the con-namespace");
+        CHECK(e.substrate().order_table_size() > 0, "order evidence recorded");
+        // ORD1 roundtrip: order stats survive save/load
+        e.save_model("build/test_v39_fabric");
+        syfox::Engine e2;
+        CHECK(e2.substrate().load("build/test_v39_fabric/substrate.bin"),
+              "fabric loads");
+        CHECK(e2.substrate().order_table_size() == e.substrate().order_table_size(),
+              "ORD1 tail roundtrips the order table");
+        // pre-v3.9 fabric: no ORD1 tail -> empty table (replay contract)
+        syfox::Engine e3;
+        e3.learn_example("alpha beta gamma", "", "x outcome");
+        e3.save_model("build/test_v39_fabric2");
+        syfox::Engine e4;
+        e4.substrate().load("build/test_v39_fabric2/substrate.bin");
+        CHECK(e4.substrate().order_table_size() == 0,
+              "fabric saved without order flag loads with an empty table");
+        // v3.8 fabric (built before ORD1 existed) replays bit-identically:
+        // order_factor is 1.0 with the flag off regardless of table state.
+        CHECK(!e4.substrate().order_on(), "order consolidation off by default");
+    }
+}
+
 static void test_thinking() {
     std::cout << "[thinking: adaptive depth / self-verify / multi-vector / causal]\n";
     sfx::JV q = sfx::JV::parse(
@@ -2422,6 +2728,8 @@ int main() {
     test_typed_lanes();
     test_tools_registry();
     test_thinking();
+    test_reason();
+    test_v39_gates();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

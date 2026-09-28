@@ -43,6 +43,40 @@ namespace norm {
 // boundary configuration, set once before any command runs.
 inline bool& grams_enabled() { static bool on = false; return on; }
 
+// v3.6.0 — ORDERED BIGRAM LANES (MRS §4b.1-4b.2, measured 7/7; CMD §2.5;
+// CPSB ordered pairs; HTR arrival-order tagging). DEFAULT ON for every NEW
+// fabric: adjacent normalized token pairs join into bigram nodes ("w1~w2")
+// that hebbian_lesson binds to the outcome anchors, and decide() injects the
+// state's bigram nodes that exist in the fabric. This is the escape from the
+// multiset-invariance theorem that pinned paws at 0.500 and xnli at 0.333
+// (chance): a token bag cannot distinguish "a beats b" from "b beats a",
+// but the pair multisets {"a~beat","beat~b"} and {"b~beat","beat~a"} differ.
+// Old fabrics never contain "w1~w2" nodes, so the decide-side injection
+// finds nothing (inject() skips unknown concepts) and stays bit-identical —
+// the replay contract holds with no version bump. The '~' separator is not
+// alphanumeric, so a bigram can never collide with a normalized word token.
+// As with grams: one process-wide boundary configuration, set once before
+// any command runs (`--bigrams on|off`).
+inline bool& bigrams_enabled() { static bool on = true; return on; }
+
+inline std::string join_bigram(const std::string& a, const std::string& b) {
+    std::string g;
+    g.reserve(a.size() + 1 + b.size());
+    g.append(a); g.push_back('~'); g.append(b);
+    return g;
+}
+
+// Adjacent ordered pairs of an already-normalized token stream, in stream
+// order (deterministic; empty for streams shorter than two tokens).
+inline std::vector<std::string> bigrams_of(const std::vector<std::string>& words) {
+    std::vector<std::string> out;
+    if (words.size() < 2) return out;
+    out.reserve(words.size() - 1);
+    for (std::size_t i = 1; i < words.size(); ++i)
+        out.push_back(join_bigram(words[i - 1], words[i]));
+    return out;
+}
+
 inline std::vector<std::string> expand_ngrams(const std::vector<std::string>& tokens) {
     std::vector<std::string> out;
     for (const auto& tok : tokens) {

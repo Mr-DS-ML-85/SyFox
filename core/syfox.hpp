@@ -35,7 +35,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.5.0";
+inline const char* VERSION = "3.6.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -53,6 +53,10 @@ inline constexpr float kBridgeEnergy = 1.0f;
 // energy-norm) and well above float dust from diffusion carryover. Documented
 // in README (honest-silence section); debug visibility via SYFOX_DEBUG_READOUT=1.
 inline constexpr float kUnknownCandidateFloor = 0.01f;
+// v3.6.0: decide-side bigram injection dose as a fraction of the state dose
+// (MRS §4b grounds bigram lanes like any other lane; the 0.5 fraction keeps
+// order evidence subordinate to lexical evidence).
+inline constexpr float kBigramDose = 0.5f;
 
 // Sub-word traction gate: an UNKNOWN word earns trigram bridges only when a
 // meaningful fraction of its trigrams already exist in the fabric — the
@@ -124,6 +128,13 @@ struct Usage {
     // composed the field with the settled question field at ctx_alpha.
     bool ctx_gate = false;
     float ctx_alpha = 0.0f;
+    // v3.6.0 disclosures: bigram nodes the state actually energized; and the
+    // BED §8 perturbation-contrast check (opt-in) with its two margins —
+    // real structure vs adjacent-transposed bag of the same tokens.
+    std::size_t bigram_tokens = 0;
+    bool perturb_check = false;
+    float perturb_margin_real = 0.0f;
+    float perturb_margin_broken = 0.0f;
 };
 
 struct Calibration {
@@ -202,7 +213,12 @@ public:
             {"semantics", si_.has_semantics()},
             {"sem_edges", static_cast<double>(si_.resonance_edge_count())},
             {"lane_contexts", static_cast<double>(si_.lane_context_count())},
-            {"retrieval_memories", static_cast<double>(memories_.size())}}).dump();
+            {"retrieval_memories", static_cast<double>(memories_.size())},
+            // v3.6.0 fabric-construction disclosures: the df table behind the
+            // CMD/MIMS rarity weighting, and the lesson count it was counted
+            // over. Absent (0) on fabrics built before bigram lanes landed.
+            {"df_nodes", static_cast<double>(si_.df_table_size())},
+            {"df_lessons", static_cast<double>(si_.df_lesson_count())}}).dump();
         // v3 Milestone 3: the audit trail. conflicts.jsonl = every detected
         // contradiction; lessons_index.jsonl = state-hash -> outcome index
         // (so a LATER learn invocation still detects contradictions against
@@ -255,6 +271,14 @@ public:
     bool ctx_gate_on() const { return ctx_gate_on_; }
     void set_ctx_alpha(float a) { ctx_alpha_ = std::min(1.0f, std::max(0.0f, a)); }
     float ctx_alpha() const { return ctx_alpha_; }
+
+    // v3.6.0 — BED §8 perturbation-contrast check (opt-in; default OFF so
+    // every shipped workflow is bit-identical until an operator asks for the
+    // honesty check). When on, each decide() settles a structure-broken copy
+    // of the state (same token multiset, adjacent pairs transposed) and
+    // defers choice answers whose real margin was not earned by structure.
+    void set_perturb_check(bool on) { perturb_on_ = on; }
+    bool perturb_check_on() const { return perturb_on_; }
 
     // v3.2.1: returns false when the substrate file is missing (honest load
     // failure — callers surface a clear error instead of deciding on an
@@ -456,7 +480,31 @@ public:
                 for (const auto& g : si::norm::expand_ngrams({w}))
                     if (si_.has(g))
                         si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f * eta);
-        si_.hebbian_lesson(state, outcome, eta);
+        // v3.6.0 (MRS §4b / CMD §2.2 / MIMS §6): document-frequency notes for
+        // this lesson, then widen the state token set with ORDERED BIGRAM
+        // nodes before the Hebbian lesson. Bigram nodes bind to the outcome
+        // anchors exactly like word tokens, so the fabric carries order —
+        // the escape from the multiset-invariance theorem (paws 0.500,
+        // xnli 0.333). With --bigrams off (or bigrams disabled globally)
+        // state_full == state and the lesson reproduces the v3.5 lane set
+        // EXCEPT for the IDF factor, which activates only when df notes
+        // exist — see hebbian_lesson.
+        si_.begin_df_lesson();
+        std::vector<std::string> state_full = state;
+        if (si::norm::bigrams_enabled())
+            for (const auto& bg : si::norm::bigrams_of(words)) {
+                if (!(augment && si_.has(bg))) si_.intern(bg);
+                state_full.push_back(bg);
+            }
+        {
+            std::unordered_set<std::string> df_seen;
+            for (const auto& w : words)
+                if (df_seen.insert(w).second && si_.has(w)) si_.note_df(si_.find(w));
+            if (si::norm::bigrams_enabled())
+                for (const auto& bg : si::norm::bigrams_of(words))
+                    if (df_seen.insert(bg).second && si_.has(bg)) si_.note_df(si_.find(bg));
+        }
+        si_.hebbian_lesson(state_full, outcome, eta);
         // v3.2 Stage 2: context-signature accumulation on the state->outcome
         // lanes. The row's own tokens (state + criteria words) are the lane's
         // context evidence; counts that survive pruning (>= 2 lessons) become
@@ -636,14 +684,31 @@ public:
                 for (const auto& g : si::norm::expand_ngrams({w}))
                     if (si_.has(g))
                         si_.bind(si_.find(w), si_.find(g), si_.config().learn_eta * 0.5f * eta);
+        // v3.6.0: df notes + ordered bigram widening, mirrored from
+        // learn_example (noul lessons carry the same fabric construction).
+        si_.begin_df_lesson();
+        std::vector<std::string> state_full = state;
+        if (si::norm::bigrams_enabled())
+            for (const auto& bg : si::norm::bigrams_of(words)) {
+                if (!(augment && si_.has(bg))) si_.intern(bg);
+                state_full.push_back(bg);
+            }
+        {
+            std::unordered_set<std::string> df_seen;
+            for (const auto& w : words)
+                if (df_seen.insert(w).second && si_.has(w)) si_.note_df(si_.find(w));
+            if (si::norm::bigrams_enabled())
+                for (const auto& bg : si::norm::bigrams_of(words))
+                    if (df_seen.insert(bg).second && si_.has(bg)) si_.note_df(si_.find(bg));
+        }
         if (y) {
-            si_.hebbian_lesson(state, instr, 2.0f * eta);   // supporting evidence binds hard
+            si_.hebbian_lesson(state_full, instr, 2.0f * eta);   // supporting evidence binds hard
             for (const auto& a : state)
                 if (si_.has(a))
                     for (const auto& b : instr)
                         if (si_.has(b)) si_.record_support(si_.find(a), si_.find(b), seq, context_);
         } else {
-            si_.weaken(state, instr, eta);                  // disconfirming evidence dissolves
+            si_.weaken(state_full, instr, eta);                  // disconfirming evidence dissolves
             for (const auto& a : state)
                 if (si_.has(a))
                     for (const auto& b : instr)
@@ -758,6 +823,20 @@ public:
         // (or --no-retrieval) => this block primes nothing.
         prime_field(words, &usage);
         si_.inject(words, state_dose(words));          // words at the (gained) substrate level
+        // v3.6.0 (MRS §4b): inject the state's ORDERED BIGRAM nodes that the
+        // fabric actually carries. Old fabrics contain no "w1~w2" nodes, so
+        // `has()` filters everything and this is a no-op — bit-identical
+        // replay. New fabrics get order-sensitive energy: "a~beat" reaches
+        // the anchor that "beat~a" does not, which is the multiset escape.
+        std::size_t bigram_hits = 0;
+        if (si::norm::bigrams_enabled() && words.size() >= 2) {
+            std::vector<std::string> bgs;
+            for (const auto& bg : si::norm::bigrams_of(words))
+                if (si_.has(bg)) bgs.push_back(bg);
+            bigram_hits = bgs.size();
+            if (!bgs.empty()) si_.inject(bgs, state_dose(words) * kBigramDose);
+        }
+        usage.bigram_tokens = bigram_hits;
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
             for (const auto& w : words)
@@ -779,6 +858,62 @@ public:
             usage.ctx_alpha = ctx_alpha_;
         }
         usage.settled_energy = si_.total_energy();
+        // Honest silence: nothing settled => refuse to guess.
+        bool silent = usage.settled_energy < si_.config().silence_floor;
+        // v3.6.0 — BED §8 PERTURBATION-CONTRAST CHECK (opt-in,
+        // set_perturb_check). The fabric is settled a SECOND time on a
+        // structure-broken copy of the state: the same token multiset with
+        // adjacent pairs swapped (deterministic). If the broken state's
+        // winning margin matches the real state's, the readout was carried by
+        // the token BAG, not by structure — BED's "the potential was trained
+        // as a classifier" diagnosis, run per decision. Choice questions then
+        // defer with reason "perturbation_tie" instead of shipping a
+        // bag-of-words coin flip. The real field is snapshotted and restored,
+        // so the readout below measures exactly what an unchecked decide()
+        // measures. noul/score keep their answers (their support readouts are
+        // bag statistics by design); the disclosure lands in usage.
+        bool perturb_defer = false;
+        if (perturb_on_ && !silent && words.size() >= 2) {
+            const sfx::JV* first_choice = nullptr;
+            for (const auto& qkv : questions.obj)
+                if (qkv.second.has("type") && qkv.second.at("type").as_str() == "choice"
+                    && qkv.second.has("criteria")) { first_choice = &qkv.second; break; }
+            if (first_choice) {
+                auto margins = [this](const sfx::JV& q) -> std::pair<float, float> {
+                    std::vector<float> es;
+                    const sfx::JV& crit = q.at("criteria");
+                    if (crit.is_obj())
+                        for (const auto& kv : crit.obj)
+                            es.push_back(probe_energy(kv.first, kv.second.as_str()));
+                    else if (crit.is_arr())
+                        for (const auto& v : crit.arr)
+                            es.push_back(probe_energy(v.as_str(), ""));
+                    if (es.size() < 2) return {0.0f, 0.0f};
+                    std::partial_sort(es.begin(), es.begin() + 2, es.end(), std::greater<float>());
+                    return {es[0], es[1]};
+                };
+                const auto real_m = margins(*first_choice);
+                const std::vector<float> saved = si_.snapshot_field();
+                std::vector<std::string> pw = words;             // deterministic structure break:
+                for (std::size_t i = 0; i + 1 < pw.size(); i += 2)
+                    std::swap(pw[i], pw[i + 1]);                 // adjacent transposition pairs
+                si_.reset_field();
+                si_.inject(pw, state_dose(pw));
+                if (si::norm::bigrams_enabled()) {
+                    std::vector<std::string> pbgs;
+                    for (const auto& bg : si::norm::bigrams_of(pw))
+                        if (si_.has(bg)) pbgs.push_back(bg);
+                    if (!pbgs.empty()) si_.inject(pbgs, state_dose(pw) * kBigramDose);
+                }
+                si_.settle();
+                const auto pert_m = margins(*first_choice);
+                si_.restore_field(saved);                        // measure what decide() measured
+                usage.perturb_check = true;
+                usage.perturb_margin_real = real_m.first - real_m.second;
+                usage.perturb_margin_broken = pert_m.first - pert_m.second;
+                perturb_defer = pert_m.first - pert_m.second >= real_m.first - real_m.second;
+            }
+        }
         // v3.3.1 readout-silence visibility (opt-in): SYFOX_DEBUG_READOUT=1
         // prints the decide-level field so honest_silence vs readout-level
         // unknown_candidates deferral is measurable, not guessed.
@@ -786,8 +921,6 @@ public:
             std::fprintf(stderr, "DEBUG: settled_energy=%.4f silence_floor=%.3f\n",
                          usage.settled_energy, si_.config().silence_floor);
 
-        // Honest silence: nothing settled => refuse to guess.
-        bool silent = usage.settled_energy < si_.config().silence_floor;
         for (const auto& qkv : questions.obj) {
             const sfx::JV& q = qkv.second;
             Answer a;
@@ -803,6 +936,13 @@ public:
             if (a.type == "choice")   decide_choice(q, words, a);
             else if (a.type == "score") decide_score(q, a);
             else if (a.type == "noul")  decide_noul(q, a);
+            // v3.6.0: the perturbation-contrast verdict overrides a carried
+            // choice answer only when the broken state matched or beat the
+            // real margin — the readout had no order signal to stand on.
+            if (a.type == "choice" && !a.deferred && perturb_defer) {
+                a.deferred = true;
+                a.reason = "perturbation_tie";
+            }
             answers.push_back(a);
         }
         return answers;
@@ -822,6 +962,15 @@ public:
             prime_field(hw0, nullptr);
             {
                 si_.inject(hw0, state_dose(hw0));         // gained dose (Milestone-1)
+            }
+            // v3.6.0: bigram injection mirrored from decide() — the v3.2.1
+            // lesson (the fit and the decision must see the same field
+            // composition, bit for bit).
+            if (si::norm::bigrams_enabled() && hw0.size() >= 2) {
+                std::vector<std::string> hbgs;
+                for (const auto& bg : si::norm::bigrams_of(hw0))
+                    if (si_.has(bg)) hbgs.push_back(bg);
+                if (!hbgs.empty()) si_.inject(hbgs, state_dose(hw0) * kBigramDose);
             }
             if (si::norm::grams_enabled()) {
                 const std::vector<std::string> words2 = si::norm::normalize(state);
@@ -1341,6 +1490,7 @@ private:
     float question_gate_floor_ = 0.25f;
     float defer_margin_ = 0.05f;      // v3.4 near-tie defer margin (0 = off)
     bool ctx_gate_on_ = false;        // v3.4 question-context two-stage settle (default OFF)
+    bool perturb_on_ = false;         // v3.6.0 BED §8 perturbation-contrast check (default OFF)
     float ctx_alpha_ = 0.5f;          // v3.4 context-field weight in the composed field
     // Milestone-3 audit state
     std::string context_ = "default";

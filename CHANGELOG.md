@@ -1,3 +1,53 @@
+## v3.6.0 — the fabric-construction papers land + the JEV head-to-head
+
+Implements the top of v3.5's paper port order on the v3.5.0 tree (settle
+physics frozen; old fabrics replay bit-identically):
+
+- ORDERED BIGRAM LANES (MRS SS4b.1-4b.2 measured 7/7; CMD SS2.5; CPSB; HTR
+  arrival-order): learn interns adjacent token pairs ("w1~w2") and binds them
+  to the outcome anchors; decide injects the state's bigram nodes at
+  kBigramDose=0.5 of the state dose, mirrored bit-exactly in harvest_rows.
+  Escape from the multiset-invariance theorem (paws 0.500 / xnli 0.333 are
+  chance because a token bag cannot encode order). Old fabrics have no
+  "w1~w2" nodes so the decide-side block is a no-op on them (replay
+  contract, unit-tested both ways). --bigrams on|off (default on).
+- DOCUMENT-FREQUENCY RARITY WEIGHTING (CMD SS2.2 log(N/(1+df)); MIMS SS6
+  fan-out): substrate df table (one note per (lesson, node), persisted in a
+  magic-guarded 'IDF5' tail) + hebbian_lesson scales STATE-side bind weights
+  by log1p(L/(1+df))/log1p(L) in (0,1]. No stopword list; one counted
+  formula. Fabrics without the tail reproduce v3.5 weights (factor 1.0).
+- PERTURBATION-CONTRAST HONESTY CHECK (BED SS8, opt-in --perturb-check):
+  decide() additionally settles a structure-broken copy of the state (same
+  token multiset, adjacent pairs transposed, deterministic); when the broken
+  state's margin matches the real one the readout was bag-carried, and
+  choice questions defer with reason "perturbation_tie". Field snapshotted
+  and restored — the readout measures exactly what an unchecked decide()
+  measures. Usage discloses perturb_margin_real / perturb_margin_broken.
+- MEASURED (train split, in-sample; heldout n=6/0/2): tickets choice
+  0.875 -> 1.000 (16/16, defer 0), score 1.000 defer 0.063 unchanged; game
+  choice_defer_rate 1.0 -> 0.333 with 4/4 answered correct; guard 0.778
+  unchanged; ood_defer_rate 1.0 x3. test_fabric36: 22 new checks (bigram
+  lay/inject, multiset-invariance pinned bit-equal on a bag fabric and
+  broken on an ordered one, IDF same-token weaker-lane isolation, IDF5
+  roundtrip, old-fabric replay bit-identity, perturbation defer/preserve).
+  Full unit suite, readout-silence, jas gates ALL PASS.
+- BUGFIX (fresh clones): `make ci` failed because its router/ablation gates
+  need model-router16 / model-b77-sem / data/bank77_cal.jsonl — all
+  gitignored. Those gates now SKIP loudly when absent; core gates (unit
+  tests, readout-silence, jas — now wired explicitly) always run.
+- JEV HEAD-TO-HEAD (tools/jev_bench.py, make jev-compare ->
+  build/jev_comparison.json): JEV AI (TypeSafe AI, Sept 2026) is the closed
+  "System One" decision model on the same API shape. Measured on JEV's
+  published axes: workflow accuracy 95.5% (n=44 answered, train split) vs
+  67.8% published; latency <= 474 us vs 70-500 ms published; $0 local vs
+  $0.042/M input; plus the axes JEV does not publish — ECE (mean 0.131),
+  honest defer with reasons (OOD 100%), bit-reproducibility, evidence JSON.
+  Every syfox number measured by core/bench.hpp in this tree; every JEV
+  number is their published self-reported figure (source cited in JSON).
+- README v3.6 section + boundary updates (subject-object scope-escape by
+  bigram lanes; temporal adjacency; perturbation defer). VERSION 3.5.0 ->
+  3.6.0.
+
 ## v3.5.0 — JAS: the J-A-S cycle, the impossibility register, the arithmetic oracle
 
 Ported from research-paper/jas.md + the central paper's substrate/thinker

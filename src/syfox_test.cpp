@@ -1727,6 +1727,235 @@ static void test_ctx_gate() {
     (void)std::system(("rm -rf " + dir).c_str());
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 — the fabric-construction papers, measured:
+//   1. MRS §4b ordered bigram lanes (learn lays them, decide injects them)
+//   2. the multiset-invariance escape: bag-only fabrics cannot tell
+//      "alice beat bob" from "bob beat alice" (pinned bit-equal), bigram
+//      fabrics answer both correctly
+//   3. CMD §2.2 / MIMS §6 rarity weighting: stopword lanes weaken, rare
+//      lanes stay strong, no-df fabrics reproduce the raw weights, df
+//      persists through save/load
+//   4. old-fabric replay compatibility: a pre-v3.6 fabric (no bigram nodes,
+//      no IDF tail) decides bit-identically with bigrams ON at decide time
+//   5. BED §8 perturbation contrast: a bag-only fabric's margin survives the
+//      adjacent-transposed state (defer perturbation_tie), a bigram fabric's
+//      margin collapses under it (the answer stands)
+// ---------------------------------------------------------------------------
+static void test_fabric36() {
+    std::cout << "[v3.6.0 fabric papers: bigram lanes, IDF rarity, perturbation contrast]\n";
+
+    // 1) bigram nodes and their outcome lanes exist after a plain lesson.
+    {
+        syfox::Engine eng;
+        eng.learn_example("dog bites man", "", "crime");
+        CHECK(eng.substrate().has("dog~bite") && eng.substrate().has("bite~man"),
+              "learn interns ordered bigram nodes (porter-stemmed)");
+        const bool lane_ok =
+            eng.substrate().lane_weight(eng.substrate().find("dog~bite"),
+                                        eng.substrate().find("crime")) > 0.0f;
+        CHECK(lane_ok, "bigram lane binds to the outcome anchor");
+    }
+
+    // 2) the multiset-invariance escape, both sides pinned.
+    {
+        const std::string dir_bag = "build/test_v36_bag";
+        const std::string dir_ord = "build/test_v36_ord";
+        (void)std::system(("rm -rf " + dir_bag).c_str());
+        (void)std::system(("rm -rf " + dir_ord).c_str());
+        sfx::JV qa = sfx::JV::parse(
+            R"({"q":{"type":"choice","instructions":"",
+                    "criteria":{"red":"red side scored first","blue":"blue side scored first"}}})");
+        {
+            si::norm::bigrams_enabled() = false;         // the pre-v3.6 bag fabric
+            syfox::Engine eng;
+            eng.set_defer_margin(0);                     // measure raw arg-max, no defer
+            eng.learn_example("alice beat bob", "", "red");
+            eng.learn_example("bob beat alice", "", "blue");
+            eng.save_model(dir_bag);
+            si::norm::bigrams_enabled() = true;          // the v3.6 ordered fabric
+            syfox::Engine eng2;
+            eng2.set_defer_margin(0);
+            eng2.learn_example("alice beat bob", "", "red");
+            eng2.learn_example("bob beat alice", "", "blue");
+            eng2.save_model(dir_ord);
+        }
+        // 2a) bag-only: the two states are the SAME token multiset, so the
+        //     theorem says the readouts are identical — pinned bit-equal.
+        {
+            syfox::Engine eng;
+            CHECK(eng.load_model(dir_bag), "bag fabric loads");
+            eng.set_defer_margin(0);
+            si::norm::bigrams_enabled() = false;
+            syfox::Usage u1, u2;
+            auto a1 = eng.decide("alice beat bob", qa, u1);
+            auto a2 = eng.decide("bob beat alice", qa, u2);
+            si::norm::bigrams_enabled() = true;
+            CHECK(!a1[0].deferred && !a2[0].deferred &&
+                  a1[0].choice == a2[0].choice &&
+                  std::fabs(a1[0].confidence - a2[0].confidence) < 1e-9f,
+                  "bag-only fabric: reordered states decide identically (multiset invariance)");
+        }
+        // 2b) ordered: both states answer correctly.
+        {
+            syfox::Engine eng;
+            CHECK(eng.load_model(dir_ord), "ordered fabric loads");
+            eng.set_defer_margin(0);
+            syfox::Usage u1, u2;
+            auto a1 = eng.decide("alice beat bob", qa, u1);
+            auto a2 = eng.decide("bob beat alice", qa, u2);
+            CHECK(!a1[0].deferred && a1[0].choice == "red",
+                  "ordered fabric: 'alice beat bob' -> red");
+            CHECK(!a2[0].deferred && a2[0].choice == "blue",
+                  "ordered fabric: 'bob beat alice' -> blue");
+            CHECK(u1.bigram_tokens == 2 && u2.bigram_tokens == 2,
+                  "decide discloses the bigram nodes it energized");
+        }
+        (void)std::system(("rm -rf " + dir_bag).c_str());
+        (void)std::system(("rm -rf " + dir_ord).c_str());
+    }
+
+    // 3) IDF rarity weighting on the substrate, with persistence. Isolation:
+    //    the SAME token ("spread", interned identically in both substrates so
+    //    mass and bind counts match) lays its lane to "x" in lesson 1 — the
+    //    raw twin binds it at factor 1.0, the df-noting substrate at
+    //    log1p(1/2)/log1p(1) < 1. Only the document-frequency factor differs.
+    {
+        si::Substrate idf_s, raw_s;
+        const char* lessons[3][3] = {
+            {"spread", "filler1", nullptr},
+            {"spread", "filler2", nullptr},
+            {"filler3", nullptr, nullptr}};
+        for (int l = 0; l < 3; ++l) {
+            idf_s.begin_df_lesson();
+            std::vector<std::string> st, out;
+            std::unordered_set<std::string> noted;
+            for (int i = 0; lessons[l][i]; ++i) {
+                st.push_back(lessons[l][i]);
+                idf_s.intern(lessons[l][i]);
+                if (noted.insert(lessons[l][i]).second)
+                    idf_s.note_df(idf_s.find(lessons[l][i]));
+            }
+            out.push_back(l == 0 ? "x" : (l == 1 ? "y" : "z"));
+            idf_s.hebbian_lesson(st, out, 1.0f);
+        }
+        // raw twin: same lessons, no df notes -> IDF inert -> v3.5 weights.
+        for (int l = 0; l < 3; ++l) {
+            std::vector<std::string> st, out;
+            for (int i = 0; lessons[l][i]; ++i) { st.push_back(lessons[l][i]); raw_s.intern(lessons[l][i]); }
+            out.push_back(l == 0 ? "x" : (l == 1 ? "y" : "z"));
+            raw_s.hebbian_lesson(st, out, 1.0f);
+        }
+        CHECK(idf_s.lane_weight(idf_s.find("spread"), idf_s.find("x")) <
+              raw_s.lane_weight(raw_s.find("spread"), raw_s.find("x")),
+              "IDF: same token, same mass, weaker lane when df notes exist");
+        CHECK(idf_s.df_of(idf_s.find("spread")) == 2 &&
+              idf_s.df_of(idf_s.find("filler1")) == 1 && idf_s.df_lesson_count() == 3,
+              "df counts lessons, not occurrences");
+        // persistence: the 'IDF5' tail roundtrips.
+        const std::string dir = "build/test_v36_idf";
+        (void)std::system(("rm -rf " + dir).c_str());
+        syfox::Engine eng; eng.substrate() = std::move(idf_s);
+        eng.save_model(dir);
+        syfox::Engine eng2;
+        CHECK(eng2.load_model(dir), "IDF fabric reloads");
+        CHECK(eng2.substrate().df_of(eng2.substrate().find("spread")) == 2 &&
+              eng2.substrate().idf_active(),
+              "IDF5 tail persists the df table and lesson count");
+        (void)std::system(("rm -rf " + dir).c_str());
+    }
+
+    // 4) old-fabric replay compatibility: a pre-v3.6 fabric (no bigram nodes,
+    //    no IDF tail) decides bit-identically with bigrams ON at decide time.
+    {
+        const std::string dir = "build/test_v36_replay";
+        (void)std::system(("rm -rf " + dir).c_str());
+        sfx::JV q = sfx::JV::parse(
+            R"({"q":{"type":"choice","instructions":"",
+                    "criteria":{"billing":"refund and payments","tech":"bugs and crashes"}}})");
+        {
+            si::norm::bigrams_enabled() = false;
+            syfox::Engine eng;
+            eng.learn_example("i want my refund the payment was wrong", "", "billing");
+            eng.learn_example("the app crash every time i open it", "", "tech");
+            eng.save_model(dir);
+            si::norm::bigrams_enabled() = true;
+        }
+        syfox::Engine eng_off, eng_on;
+        CHECK(eng_off.load_model(dir) && eng_on.load_model(dir), "replay fabric loads twice");
+        si::norm::bigrams_enabled() = false;
+        syfox::Usage u_off; auto a_off = eng_off.decide("please refund my payment", q, u_off);
+        si::norm::bigrams_enabled() = true;
+        syfox::Usage u_on;  auto a_on  = eng_on.decide("please refund my payment", q, u_on);
+        CHECK(u_on.bigram_tokens == 0,
+              "old fabric energizes no bigram nodes (they do not exist)");
+        CHECK(a_on[0].deferred == a_off[0].deferred &&
+              a_on[0].choice == a_off[0].choice &&
+              std::fabs(a_on[0].confidence - a_off[0].confidence) < 1e-9f,
+              "old fabric decides bit-identically with bigrams ON (replay contract)");
+        (void)std::system(("rm -rf " + dir).c_str());
+    }
+
+    // 5) BED §8 perturbation contrast.
+    {
+        const std::string dir_bag = "build/test_v36_pert_bag";
+        const std::string dir_ord = "build/test_v36_pert_ord";
+        (void)std::system(("rm -rf " + dir_bag).c_str());
+        (void)std::system(("rm -rf " + dir_ord).c_str());
+        sfx::JV q = sfx::JV::parse(
+            R"({"q":{"type":"choice","instructions":"",
+                    "criteria":{"win":"alpha side scored","lose":"epsilon side scored"}}})");
+        {
+            si::norm::bigrams_enabled() = false;
+            syfox::Engine eng;
+            eng.learn_example("alpha beta gamma delta", "", "win");
+            eng.learn_example("epsilon zeta eta theta", "", "lose");
+            eng.save_model(dir_bag);
+            si::norm::bigrams_enabled() = true;
+            syfox::Engine eng2;
+            eng2.learn_example("alpha beta gamma delta", "", "win");
+            eng2.learn_example("epsilon zeta eta theta", "", "lose");
+            eng2.save_model(dir_ord);
+        }
+        // 5a) bag-only fabric: the transposed state has the SAME token bag, so
+        //     its margin matches the real margin — the check defers.
+        {
+            syfox::Engine eng;
+            CHECK(eng.load_model(dir_bag), "perturb bag fabric loads");
+            si::norm::bigrams_enabled() = false;
+            syfox::Usage u0; auto a0 = eng.decide("alpha beta gamma delta", q, u0);
+            CHECK(!a0[0].deferred && a0[0].choice == "win",
+                  "perturb OFF: bag fabric answers on the token bag");
+            si::norm::bigrams_enabled() = true;
+            syfox::Engine eng1;
+            eng1.load_model(dir_bag);
+            eng1.set_perturb_check(true);
+            si::norm::bigrams_enabled() = false;         // decide-time injection too
+            syfox::Usage u1; auto a1 = eng1.decide("alpha beta gamma delta", q, u1);
+            si::norm::bigrams_enabled() = true;
+            CHECK(u1.perturb_check &&
+                  u1.perturb_margin_broken >= u1.perturb_margin_real - 1e-6f,
+                  "perturb ON: bag fabric's margin survives the structure break");
+            CHECK(a1[0].deferred && a1[0].reason == "perturbation_tie",
+                  "perturb ON: bag-only decision defers with perturbation_tie");
+        }
+        // 5b) ordered fabric: the transposed state loses the bigrams, its
+        //     margin collapses, and the structure-carried answer stands.
+        {
+            syfox::Engine eng;
+            CHECK(eng.load_model(dir_ord), "perturb ordered fabric loads");
+            eng.set_perturb_check(true);
+            syfox::Usage u; auto a = eng.decide("alpha beta gamma delta", q, u);
+            CHECK(u.perturb_check && u.perturb_margin_broken < u.perturb_margin_real,
+                  "ordered fabric's margin collapses under the structure break");
+            CHECK(!a[0].deferred && a[0].choice == "win",
+                  "structure-carried answer survives the perturbation check");
+        }
+        (void)std::system(("rm -rf " + dir_bag).c_str());
+        (void)std::system(("rm -rf " + dir_ord).c_str());
+    }
+}
+
 int main() {
     std::cout << "SyFox test suite (core: si-substrate)\n";
     test_json();
@@ -1762,6 +1991,7 @@ int main() {
     test_defer_ties();
     test_multi_hop();
     test_ctx_gate();
+    test_fabric36();
     test_jas();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";

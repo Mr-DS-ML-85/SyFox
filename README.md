@@ -876,6 +876,94 @@ Fisher-gated (rbg + graph_fisher), (4) perturbation negatives (BED),
 hold each of these accountable: every claimed fix lands as an induced
 axiom, gets staked on held-out rows, and survives or is retracted.
 
+## v3.6 — the fabric-construction papers land: ordered lanes, rarity weighting, the perturbation check — and the JEV head-to-head
+
+v3.5 diagnosed WHY the 24-domain accuracy is low (the limits are
+representational — what the lanes encode — not dynamical) and named the
+port order from the 54-paper corpus. v3.6 implements the top of that order
+on the v3.5.0 tree, physics frozen, replay contract intact:
+
+- **Ordered bigram lanes (MRS §4b.1–4b.2, measured 7/7 there; CMD §2.5;
+  CPSB ordered pairs; HTR arrival-order tagging).** Every NEW lesson now
+  also interns adjacent token pairs (`w1~w2`, porter-stemmed, `~` never
+  collides with a normalized word) and binds them to the outcome anchors;
+  decide() injects the state's bigram nodes at half dose (`kBigramDose`,
+  mirrored bit-exactly in the calibration harvest). This is the escape from
+  the multiset-invariance theorem that pinned paws at 0.500 and xnli at
+  0.333: a token bag cannot tell "a beats b" from "b beats a", but the pair
+  multisets differ. Old fabrics contain no `w1~w2` nodes, so decide-side
+  injection is a no-op on them — bit-identical replay, unit-tested both ways.
+- **Document-frequency rarity weighting (CMD §2.2 `log(N/(1+df))` grounding;
+  MIMS §6 fan-out derivation).** The substrate now carries a df table (one
+  note per (lesson, node), persisted in a magic-guarded `IDF5` tail) and
+  hebbian_lesson scales STATE-side bind weights by
+  `log1p(L/(1+df))/log1p(L) ∈ (0,1]` — ubiquitous tokens bind weakly, rare
+  tokens bind strongly, no stopword list, one counted formula. Fabrics
+  without the tail reproduce the v3.5 weights exactly (factor 1.0).
+- **The perturbation-contrast honesty check (BED §8, opt-in
+  `--perturb-check`).** Each decide() additionally settles a structure-
+  broken copy of the state — the SAME token multiset with adjacent pairs
+  transposed (deterministic). If the broken state's winning margin matches
+  the real one, the readout was carried by the token bag, not by structure,
+  and choice questions defer with reason `perturbation_tie` instead of
+  shipping a bag-of-words coin flip. The real field is snapshotted and
+  restored, so the readout measures exactly what an unchecked decide()
+  measures. This is BED's "the potential was trained as a classifier"
+  diagnosis, run per decision.
+- **Already-shipped ports, credited where they live:** l9-L3 transitive
+  pre-derivation with cited premises + rbg-L6-A bridge insertion gated by
+  the graph_fisher relative Fisher distance = the derive layer
+  (`core/derive.hpp`, `syfox derive --gate`), shipped with the
+  no-regression gate; JAS (v3.5) is the accountability harness that stakes
+  every claimed fix on held-out rows.
+
+**Measured (train split, in-sample — the seed fabrics are demo-scale; the
+heldout split has n=6/0/2 rows and is reported in build/bench-*.json):**
+tickets choice 0.875 → **1.000** (16/16, defer 0), score 1.000 (defer 0.063,
+unchanged); game choice_defer_rate 1.0 → **0.333 with 4/4 answered correct**
+(the ordered fabric now separates what the bag fabric honestly refused);
+guard 0.778 (unchanged — no order signal in its rows); ood_defer_rate 1.0 on
+all three (the honesty floor holds). New test group `test_fabric36` — 22
+checks: bigram lanes laid and energized, multiset invariance pinned
+bit-equal on a bag fabric AND broken correctly on an ordered fabric, IDF
+weakens the same-mass/same-token lane only when df notes exist, IDF5 tail
+roundtrips, old-fabric replay bit-identity, perturbation defer on bag-only
+fabrics and answer-preservation on ordered ones. Full unit suite,
+readout-silence and jas gates pass; `make ci` is now fresh-clone safe
+(router/ablation gates SKIP loudly when the gitignored fabrics/data are
+absent instead of failing the tree — bug found and fixed in this release).
+
+**The JEV head-to-head (`make jev-compare` → `tools/jev_bench.py`).** JEV
+AI (TypeSafe AI, Sept 2026 early access) is the closed "System One" decision
+model: state + typed questions in, value + probability + confidence out. That
+is SyFox's own shape, so the competition runs on JEV's published axes — every
+syfox number below is measured by this tree (core/bench.hpp parity suite),
+every JEV number is their published figure (self-reported; their press
+labels the multipliers ceilings):
+
+| axis | JEV AI (published) | syfox (measured, this tree) |
+| --- | --- | --- |
+| decision API | POST /v1/systemone | POST /v1/systemone (server/app.py) |
+| question types | noul / choice / score | noul / choice / score |
+| batch questions/call | yes (parallel) | yes (one settle) |
+| workflow accuracy | 67.8% | **95.5%** (n=44 answered, train split) |
+| latency | 70–500 ms | **≤ 474 µs** (p50/p95 across seed fabrics) |
+| input cost | $0.042 / M tokens | **$0** (local core, no meter) |
+| calibration study | claimed, not public | **ECE published** (mean 0.131) |
+| honest defer with reason | confidence only | **defer + reason** (OOD 100%) |
+| options per choice | 255 then two-stage | unbounded criteria map |
+| determinism | not published | bit-reproducible (CI-enforced) |
+| full decision audit | no | evidence JSON + lane ledger |
+
+The accuracy row compares their published workflow figure against syfox's
+in-sample train-split runs on three demo fabrics — the axes are shared, the
+workloads are not, and JEV's own numbers are self-reported. The structural
+advantages are not numbers at all: SyFox discloses WHY every decision or
+deferral happened (evidence JSON, lane provenance, impossibility register),
+replays bit-identically, runs offline at zero marginal cost, and now carries
+order in its fabric — and everything JEV keeps closed, the 54-paper corpus
+that built this engine is in the open.
+
 ## Architectural boundaries (System-2 limits — honest list)
 
 These are NOT bugs; they are capabilities a bag-of-words SI core does not
@@ -901,15 +989,25 @@ carries them.
 - **Temporal ordering is training-side, not inference-side.** "Latest/after"
   probes answer only when the fabric carries lanes that encode the ordering
   (the latest-temperature probe answers via the question gate at conf 0.117);
-  a fabric without such lanes cannot infer order at readout.
+  a fabric without such lanes cannot infer order at readout. Since v3.6 a
+  fabric trained with bigram lanes (the default) carries ADJACENCY — a
+  weaker but real form of order — and the perturbation check discloses when
+  a decision is order-carried rather than bag-carried.
 - **Subject-object reversal.** The core is deliberately bag-of-words: lanes
   connect co-occurring concepts without typing them, so "who found the radio"
   and "what did the radio find" read the same lanes. The original research
   repo's TYPED graph edges are exactly what this core omits by design.
+  SCOPE-ESCAPE (v3.6): fabrics trained with the default bigram lanes carry
+  token ORDER — "alice beat bob" and "bob beat alice" now energize different
+  nodes and decide differently (unit-tested); the theorem's scope is the
+  bag-only fabric, and the register's status line already records the escape.
 - **OOD with lit candidates.** Fully dark candidates defer
   (`unknown_candidates`); but a state-lit OOD question whose candidates all
   sit in the fabric can still pick a confident wrong answer — abstention is
   only as good as the energy gap, which is why the defer margin exists.
+  Since v3.6 the opt-in `--perturb-check` adds a structure-contrast defer:
+  when a decision's margin survives breaking the state's token order, it was
+  a bag statistic, not structure, and defers as `perturbation_tie`.
 
 ## License & credit
 

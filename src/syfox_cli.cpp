@@ -84,6 +84,8 @@ struct Args {
     long hops = -1;                  // --hops N: v3.4 multi-hop readout walk depth (engine default 1 = legacy)
     bool ctx_gate = false;           // --ctx-gate: v3.4 two-stage question-context settle
     float ctx_alpha = 0;             // --ctx-alpha F (0 = engine default 0.5)
+    int bigrams_mode = 0;            // --bigrams on|off: 1/-1 explicit; 0 = default ON
+    bool perturb_check = false;      // --perturb-check: v3.6.0 BED §8 structure-contrast defer
     long retrieval_topk = -1;        // --retrieval-topk N (-1 = engine default 5)
     float retrieval_dose = 0;        // --retrieval-dose F (0 = engine default 0.30)
     std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
@@ -198,6 +200,12 @@ void apply_modes(syfox::Engine& eng, const Args& a) {
     // v3.4 question-context two-stage settle (opt-in; alpha default 0.5)
     if (a.ctx_gate) eng.set_ctx_gate(true);
     if (a.ctx_alpha > 0) eng.set_ctx_alpha(a.ctx_alpha);
+    // v3.6.0 BED §8 perturbation-contrast check (opt-in; default OFF)
+    if (a.perturb_check) eng.set_perturb_check(true);
+    // v3.6.0 ordered bigram lanes (--bigrams on|off; default ON — decide-side
+    // injection is a no-op on fabrics without bigram nodes)
+    if (a.bigrams_mode != 0)
+        si::norm::bigrams_enabled() = (a.bigrams_mode == 1);
     // v3 Milestone 5: --threads N controls deterministic parallel settle on
     // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
     // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
@@ -287,6 +295,9 @@ std::string route_model(const Args& a, const std::string& state_text,
 }
 
 void cmd_learn(const Args& a) {
+    // v3.6.0 ordered bigram lanes: explicit --bigrams wins; default ON.
+    if (a.bigrams_mode != 0)
+        si::norm::bigrams_enabled() = (a.bigrams_mode == 1);
     // Milestone-1 firewall: hidden/calibration splits never teach the fabric.
     if (!syfox::firewall::learn_may_read(a.examples)) {
         std::cerr << "syfox: firewall: " << a.examples << " is a "
@@ -329,6 +340,9 @@ void cmd_learn(const Args& a) {
             // trigram policy per script group (explicit --ngrams wins)
             si::norm::grams_enabled() = (a.ngrams_mode != 0)
                 ? (a.ngrams_mode == 1) : (g.first != "latin");
+            // v3.6.0 bigram policy: explicit flag wins; default ON everywhere
+            if (a.bigrams_mode != 0)
+                si::norm::bigrams_enabled() = (a.bigrams_mode == 1);
             syfox::Engine eng;
             // first learn in a script family has no substrate yet: a failed
             // load here is a FRESH fabric (intended), not an error. Every
@@ -527,6 +541,13 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
     if (u.ctx_gate) {                               // v3.4: two-stage settle disclosure
         usage["ctx_gate"] = sfx::JV(true);
         usage["ctx_alpha"] = std::round(u.ctx_alpha * 1000.0) / 1000.0;
+    }
+    if (u.bigram_tokens > 0)                        // v3.6.0: order lanes energized
+        usage["bigram_tokens"] = static_cast<double>(u.bigram_tokens);
+    if (u.perturb_check) {                          // v3.6.0: BED §8 contrast disclosure
+        usage["perturb_check"] = sfx::JV(true);
+        usage["perturb_margin_real"] = std::round(u.perturb_margin_real * 1000.0f) / 1000.0f;
+        usage["perturb_margin_broken"] = std::round(u.perturb_margin_broken * 1000.0f) / 1000.0f;
     }
     return sfx::JV(sfx::JVObj{{"answers", sfx::JV(out)}, {"usage", sfx::JV(usage)}});
 }
@@ -1708,6 +1729,14 @@ int main(int argc, char** argv) {
         else if (k == "--hops") { if (i + 1 >= argc) usage_exit(); a.hops = std::strtol(argv[++i], nullptr, 10); if (a.hops < 1 || a.hops > 8) usage_exit(); }
         else if (k == "--ctx-gate") a.ctx_gate = true;
         else if (k == "--ctx-alpha") { if (i + 1 >= argc) usage_exit(); a.ctx_alpha = std::strtof(argv[++i], nullptr); if (a.ctx_alpha <= 0 || a.ctx_alpha > 1) usage_exit(); }
+        else if (k == "--bigrams") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.bigrams_mode = 1;
+            else if (v == "off") a.bigrams_mode = -1;
+            else usage_exit();
+        }
+        else if (k == "--perturb-check") a.perturb_check = true;
         else if (k == "--evidence") a.evidence = true;
         else if (k == "--adversarial") a.adversarial = true;
         else if (k == "--mix") { if (i + 1 >= argc) usage_exit(); a.mix = argv[++i]; }

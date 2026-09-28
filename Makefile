@@ -180,6 +180,12 @@ bench: build/syfox models
 	./build/syfox bench --model model-game --split train | tee build/bench-game.json
 	./build/syfox bench --model model-guard --split train | tee build/bench-guard.json
 
+# v3.6.0 measured head-to-head vs JEV AI on JEV's published axes
+# (runs the parity bench JSON through tools/jev_bench.py; writes
+# build/jev_comparison.json).
+jev-compare: bench
+	python3 tools/jev_bench.py
+
 bench-heldout: build/syfox
 	./build/syfox bench --model model-tickets --split heldout | tee build/bench-heldout-tickets.json
 	./build/syfox bench --model model-game --split heldout | tee build/bench-heldout-game.json
@@ -204,7 +210,7 @@ serve: build/syfox models
 clean:
 	rm -rf build
 
-.PHONY: all models models-augmented models-vast models-vast-full models-multilingual bench-multilingual typos bench-extra heldout-gate test bench bench-heldout coverage demo serve omp adv-big throughput density clean
+.PHONY: all models models-augmented models-vast models-vast-full models-multilingual bench-multilingual typos bench-extra heldout-gate test bench bench-heldout jev-compare coverage demo serve omp adv-big throughput density clean ci readout-silence jas-test
 
 # ---------------------------------------------------------------------------
 # v3 Milestone 1 — big-corpus models (data/big, 70/15/15 splits).
@@ -405,10 +411,19 @@ build/rebuild_sem: src/rebuild_sem.cpp $(CORE_HDRS)
 # dedicated bank77 fabric, and the two-stage router end-to-end. Every step
 # exits non-zero on regression, so `make ci` is the pre-commit gate.
 ci: build/syfox test
-	./build/syfox decide --router model-router16 --model model-b77-sem \
-		--energy-norm --state "Why am I missing my refund" \
-		--questions '{"intent":{"type":"choice","instructions":"","criteria":{"c00":"refund in my account","c33":"money back","c61":"app crash"}}}' \
-		| python3 tools/assert_route.py
-	python3 tools/ablation_suite.py --model model-b77-sem \
-		--eval data/bank77_cal.jsonl --limit 40 --energy-norm
+	@# v3.6.0 BUGFIX: the router/ablation gates need model-router16,
+	@# model-b77-sem and data/bank77_cal.jsonl — all gitignored (rebuild
+	@# locally with make b77-sem router16). On a fresh clone they are SKIPPED
+	@# loudly instead of failing the whole gate; the core gates below always run.
+	@if [ -d model-router16 ] && [ -d model-b77-sem ] && [ -f data/bank77_cal.jsonl ]; then \
+		./build/syfox decide --router model-router16 --model model-b77-sem \
+			--energy-norm --state "Why am I missing my refund" \
+			--questions '{"intent":{"type":"choice","instructions":"","criteria":{"c00":"refund in my account","c33":"money back","c61":"app crash"}}}' \
+			| python3 tools/assert_route.py && \
+		python3 tools/ablation_suite.py --model model-b77-sem \
+			--eval data/bank77_cal.jsonl --limit 40 --energy-norm || exit 1; \
+	else \
+		echo "SKIP route+ablation gates: model-router16 / model-b77-sem / bank77 data absent (gitignored; rebuild with make b77-sem router16)"; \
+	fi
 	bash tests/readout_silence_test.sh
+	bash tests/jas_test.sh

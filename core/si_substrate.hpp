@@ -202,6 +202,34 @@ public:
         return it == out_.end() ? 0 : it->second.size();
     }
 
+    // -- v3.6.0 DOCUMENT-FREQUENCY TABLE (CMD §2.2 rarity grounding; MIMS §6
+    // fan-out derivation) -----------------------------------------------
+    // The engine calls begin_df_lesson() once per lesson and note_df() once
+    // per (lesson, node), so df(n) = number of lessons containing n. The
+    // rarity factor log1p(L/(1+df))/log1p(L) ∈ (0,1] then scales the
+    // STATE-side bind weights in hebbian_lesson: a token that fires in every
+    // lesson distinguishes nothing and binds weakly; a rare token binds
+    // strongly. This is CMD's "ubiquitous participants are suppressed by
+    // construction, not by a rule" — no stopword list, one counted formula.
+    // Active only when the table is non-empty (fresh learns note df; fabrics
+    // loaded from a pre-v3.6 file have no 'IDF5' tail and every factor is
+    // 1.0, so the replay contract holds bit for bit).
+    void begin_df_lesson() { ++df_lessons_; }
+    void note_df(NodeId id) { ++df_[id]; }
+    std::uint32_t df_of(NodeId id) const {
+        auto it = df_.find(id);
+        return it == df_.end() ? 0u : it->second;
+    }
+    std::uint64_t df_lesson_count() const { return df_lessons_; }
+    std::size_t df_table_size() const { return df_.size(); }
+    bool idf_active() const { return !df_.empty() && df_lessons_ > 0; }
+    float idf_factor(NodeId id) const {
+        if (!idf_active()) return 1.0f;
+        const double L = static_cast<double>(df_lessons_);
+        const double d = static_cast<double>(df_of(id));
+        return static_cast<float>(std::log1p(L / (1.0 + d)) / std::log1p(L));
+    }
+
     // -- Hebbian lane binding (fire together -> wire together) ---------------
     void bind(NodeId a, NodeId b, float w) {
         if (a == b || w <= 0.0f) return;
@@ -559,6 +587,23 @@ public:
             nodes_[i].energy = (1.0f - alpha) * nodes_[i].energy + alpha * ctx[i];
     }
 
+    // v3.6.0 — BED §8 perturbation-contrast support: snapshot the settled
+    // field (energies only; salience/present_ belong to the composition, not
+    // the measurement) and restore it after a diagnostic re-settle. The
+    // perturbation check settles a structure-broken copy of the state in a
+    // SCRATCH pass, measures its margins, then restores the real field so the
+    // readout that follows measures exactly what the un-checked decide()
+    // would have measured. Deterministic; no physics touched.
+    std::vector<float> snapshot_field() const {
+        std::vector<float> e(nodes_.size());
+        for (std::size_t i = 0; i < nodes_.size(); ++i) e[i] = nodes_[i].energy;
+        return e;
+    }
+    void restore_field(const std::vector<float>& e) {
+        const std::size_t n = std::min(nodes_.size(), e.size());
+        for (std::size_t i = 0; i < n; ++i) nodes_[i].energy = e[i];
+    }
+
     float node_energy(NodeId id) const {
         return id < nodes_.size() ? nodes_[id].energy : 0.0f;
     }
@@ -613,7 +658,12 @@ public:
             for (NodeId b : o_ids) {
                 float wa = 1.0f / std::sqrt(nodes_[a].mass);
                 float wb = 1.0f / std::sqrt(nodes_[b].mass);
-                bind(a, b, cfg_.learn_eta * eta_scale * (wa + wb));
+                // v3.6.0 (CMD §2.2 / MIMS §6): rarity weighting on the STATE
+                // side only. Outcome anchors keep full weight — their df is
+                // per-class, and a class label seen often is not a stopword.
+                // idf_factor is 1.0 whenever the df table is absent (pre-v3.6
+                // fabrics), so existing lanes are reproduced exactly.
+                bind(a, b, cfg_.learn_eta * eta_scale * (wa + wb) * idf_factor(a));
             }
         enforce_lane_decay();
     }
@@ -903,6 +953,25 @@ public:
             f.write(reinterpret_cast<const char*>(&fb), 4);
             for (NodeId w : kv.second.forbidden) f.write(reinterpret_cast<const char*>(&w), 4);
         }
+        // v3.6.0 IDF TAIL — document-frequency table + lesson counter (CMD §2.2
+        // / MIMS §6 rarity grounding). Magic-guarded 'IDF5' after the context
+        // block: pre-v3.6 files end here and load() leaves df_ empty, which
+        // makes every idf_factor 1.0 — the replay contract, bit for bit.
+        const std::uint32_t idf_magic = 0x49444635u;             // 'IDF5'
+        f.write(reinterpret_cast<const char*>(&idf_magic), 4);
+        const std::uint64_t lesson_count = df_lessons_;
+        f.write(reinterpret_cast<const char*>(&lesson_count), 8);
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> sorted_df;
+        sorted_df.reserve(df_.size());
+        for (const auto& kv : df_) sorted_df.emplace_back(kv.first, kv.second);
+        std::sort(sorted_df.begin(), sorted_df.end(),
+                  [](const auto& x, const auto& y) { return x.first < y.first; });
+        const std::uint32_t dfc = static_cast<std::uint32_t>(sorted_df.size());
+        f.write(reinterpret_cast<const char*>(&dfc), 4);
+        for (const auto& kv : sorted_df) {
+            f.write(reinterpret_cast<const char*>(&kv.first), 4);
+            f.write(reinterpret_cast<const char*>(&kv.second), 4);
+        }
     }
 
     // v3.2.1: reports failure. A missing substrate used to load SILENTLY as an
@@ -1017,6 +1086,26 @@ public:
                     }
                     if (ok) lane_ctx_[key] = std::move(sig);
                 }
+            }
+        }
+        // v3.6.0 IDF tail (optional, magic-guarded 'IDF5'): pre-v3.6 files end
+        // after the context block; the failed magic read leaves df_ empty and
+        // every idf_factor at 1.0.
+        std::uint32_t idf_magic = 0;
+        if (f.read(reinterpret_cast<char*>(&idf_magic), 4) && idf_magic == 0x49444635u) {
+            std::uint64_t lesson_count = 0;
+            std::uint32_t dfc = 0;
+            if (f.read(reinterpret_cast<char*>(&lesson_count), 8) &&
+                f.read(reinterpret_cast<char*>(&dfc), 4)) {
+                df_lessons_ = lesson_count;
+                bool ok = true;
+                for (std::uint32_t k = 0; k < dfc && ok; ++k) {
+                    std::uint32_t id = 0, c = 0;
+                    ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&id), 4));
+                    if (ok) ok = static_cast<bool>(f.read(reinterpret_cast<char*>(&c), 4));
+                    if (ok) df_[static_cast<NodeId>(id)] = c;
+                }
+                if (!ok) { df_.clear(); df_lessons_ = 0; }   // torn tail: stay inert
             }
         }
         return true;
@@ -1194,6 +1283,10 @@ private:
     std::unordered_map<NodeId, std::vector<std::pair<NodeId, float>>> out_;
     // Derivation provenance: lane key -> generation (sparse; observed lanes absent = 0)
     std::unordered_map<std::uint64_t, std::uint32_t> derived_gen_;
+    // v3.6.0 document-frequency table (node -> lessons containing it) and the
+    // lesson counter; persisted in the 'IDF5' tail. Empty table = IDF inert.
+    std::unordered_map<NodeId, std::uint32_t> df_;
+    std::uint64_t df_lessons_ = 0;
     // v3 Milestone 3: audit ledger (support/counter events, provenance window)
     std::unordered_map<std::uint64_t, LaneEvidence> lane_evidence_;
     // v3.2 semantic field state ------------------------------------------------

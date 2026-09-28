@@ -1,0 +1,8 @@
+{"state": "alice gave the book to bob", "insertions": 0, "gold": "alice"}
+{"state": "bob gave the book to alice", "insertions": 0, "gold": "bob"}
+{"state": "alice quickly gave the book to bob", "insertions": 1, "gold": "alice"}
+{"state": "bob quickly gave the book to alice", "insertions": 1, "gold": "bob"}
+{"state": "alice quietly and quickly gave the heavy book to bob", "insertions": 3, "gold": "alice"}
+{"state": "bob quietly and quickly gave the heavy book to alice", "insertions": 3, "gold": "bob"}
+{"state": "alice, before the meeting, quietly and quickly gave the very heavy book to polite bob", "insertions": 6, "gold": "alice"}
+{"state": "bob, before the meeting, quietly and quickly gave the very heavy book to polite alice", "insertions": 6, "gold": "bob"}

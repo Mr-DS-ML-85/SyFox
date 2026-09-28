@@ -964,6 +964,89 @@ replays bit-identically, runs offline at zero marginal cost, and now carries
 order in its fabric — and everything JEV keeps closed, the 54-paper corpus
 that built this engine is in the open.
 
+## v3.7 — the representation papers land: PPMI+SVD dense vectors, energy-space self-supervision, typed ordered lanes, generalized tool scope
+
+The readout-side analysis of the v3.6 fabric was precise: the representation
+is hand-written by the tokenizer (bag-of-words stems), everything downstream
+inherits that one choice, and no readout flag can fix it — the fixes have to
+be REPRESENTATIONAL, not dynamical. v3.7 lands all four moves from that
+analysis. The SI core stays frozen end to end: decay 0.82, diffusion 0.45,
+dual-channel readout, Hebbian learning — every mechanism below is fabric
+construction, training loop, or decision-layer tooling.
+
+**Move 1 — PPMI + truncated SVD (`core/distvec.hpp`, opt-in `--distvec`).**
+The 1990s answer (Deerwester et al. 1990; Levy & Goldberg 2014), and it is
+not neural: the symmetric Hebbian lane fabric IS a co-occurrence observation,
+so the builder computes PPMI over the lane weights (hub pollution pays
+through the marginal), then factorizes with deterministic subspace iteration
++ Rayleigh-Ritz (cyclic Jacobi) and keeps the PSD part — U·Sigma^beta,
+Perron/frequency axis dropped, isolated rows zeroed. Every content node gets
+a dense k-dim vector (default 300), and the semantic RESONANCE EDGES are
+re-selected from the dense space (small fabrics exact-scan; large fabrics use
+deterministic 2-hop lane candidates). Settle physics untouched — the edges
+are the same mechanism v3.2 shipped, only chosen by a representation that
+generalizes. Engineering found on the way, each pinned by test: the raw-FNV
+hash bit collapses the init basis (splitmix64 finalizer added); a singular
+±1 init silently loses subspace rank (deterministic canonical-basis repair);
+degenerate ±|lambda| pairs never separate under plain subspace iteration
+(Rayleigh-Ritz rotation added); small fabrics (n <= 512) use the full space,
+so their spectrum is exact. Vectors persist in a magic-guarded 'DSTV' tail;
+every pre-v3.7 fabric replays bit-identically (unit-tested both ways).
+
+**Move 2 — energy-space self-supervision (`syfox pretrain`).** The direct
+analog of next-token prediction, expressed as lane physics: take UNLABELED
+raw text, hide one token (deterministic stride), inject the rest, settle,
+read out which BASIN got the energy (the true token's node against the
+strongest non-context node), strengthen the failed context->token lanes with
+error-weighted Hebbian. The loss is measurable —
+mean over masked positions of `1 - e_true/(e_true+e_best_other)` — and it is
+reported per epoch. No labels, no gradients, no fitted parameters. MEASURED
+(data/pretrain_corpus.txt, 55 lines, 603 masked positions/epoch, 12 epochs,
+eta-scale 2): epoch loss 0.463 -> 0.445 (falls, plateaus, bit-deterministic
+across runs), vocabulary grows 0 -> 191 nodes with real lanes.
+
+**Move 3 — typed ordered lanes (`core/roles.hpp`, opt-in `--typed-lanes`).**
+The strong version of order, not the bigram patch: nodes carry a ROLE
+(S/V/O/M/F from a compact scene grammar — closed function-word list, seed
+verb-cue lexicon, prepositional-patient rule for "to/for"), and relation-
+typed pair nodes (`w#s>v#v`, `w#v>o#o`, `w#s>o#o`, `!w#v` for negation)
+intern exactly like the v3.6 bigrams and bind to the outcome anchors through
+the same Hebbian lesson. Old fabrics contain no typed nodes, so the
+decide-side injection is a no-op on them — the replay contract, unit-tested
+both ways. MEASURED (data/role_reversal_{train,probe}.jsonl, 10 rows, 4
+insertion distances 0/1/3/6): the bag fabric answers 4/8 probes at chance;
+the typed fabric answers 6/8 and separates both distance-0 reversal pairs
+(unit-pinned deterministically). Margins stay near the toy fabric's noise
+floor (0.004-0.014) — the mechanism is real and pinned; scale is the
+limiting factor, as with every fabric-construction effect in this engine.
+
+**Move 4 — generalized tool scope (`syfox tools`, `decide --tools`).** The
+calc pattern (field refuses, verified tool computes, register records the
+refusal was principled) is now a typed contract carried by EVERY register
+claim: `field_behavior` / `tool` / `tool_verified` on all five
+impossibilities, printed by `syfox tools [--text]`. `decide --tools` runs
+the arithmetic relevance heuristic and discloses the oracle's derivation in
+usage (`tool_used/tool_expression/tool_value`, provenance
+established_by_experiment) while the field still answers or defers exactly
+as it measures. Default off; bench bit-identity untouched.
+
+**The moves compose — the OOD bridge (measured, data/v37_tables.json).** A
+labeled billing/technical fabric defers 6/6 on probe rows whose words it has
+never seen (clean baseline). `pretrain` over the UNLABELED corpus interns
+those words with real lanes; after temperature calibration on the labeled
+rows and the disclosed `--energy-norm` dose gain (same knob on every
+variant), the pretrain fabric answers 6/6 probes correctly (by-construction
+golds, disclosed in the table). The plain fabric under the SAME knobs
+answers 3/6 at 0.5 accuracy — the chance floor — which is precisely the
+measured difference between a manufactured answer and a bridged one: the
+pretrain lanes carry the energy to the right basin, the plain fabric's
+function-word carryover does not.
+
+Regression: bench bit-identical to v3.6 on every shipped fabric (tickets
+choice 1.000 / score 1.000 defer 0.063, guard 0.778, game defer 0.333,
+OOD defer 1.0 x3, deterministic x3); full unit suite (4 new test groups)
+green; readout-silence ALL PASS; jas-test ALL PASS; `make ci` green.
+
 ## Architectural boundaries (System-2 limits — honest list)
 
 These are NOT bugs; they are capabilities a bag-of-words SI core does not
@@ -985,22 +1068,30 @@ carries them.
   fabric would be needed for crisp transitive chains.
 - **Arithmetic.** No numeric circuit exists in the physics; temperature/
   counting questions answered by token salience alone (architectural limit,
-  documented since v3.3, shared with the upstream repo).
+  documented since v3.3, shared with the upstream repo). SCOPE-ESCAPE (v3.5,
+  generalized v3.7): the calc oracle computes OUTSIDE the field — `syfox calc`
+  standalone, and `decide --tools` discloses the oracle's derivation in usage
+  while the field still measures. The register records the contract.
 - **Temporal ordering is training-side, not inference-side.** "Latest/after"
   probes answer only when the fabric carries lanes that encode the ordering
   (the latest-temperature probe answers via the question gate at conf 0.117);
   a fabric without such lanes cannot infer order at readout. Since v3.6 a
   fabric trained with bigram lanes (the default) carries ADJACENCY — a
-  weaker but real form of order — and the perturbation check discloses when
-  a decision is order-carried rather than bag-carried.
+  weaker but real form of order — and since v3.7 the opt-in `--typed-lanes`
+  construction adds relation-typed roles (S/V/O, negation) on top. The
+  perturbation check discloses when a decision is order-carried rather than
+  bag-carried.
 - **Subject-object reversal.** The core is deliberately bag-of-words: lanes
   connect co-occurring concepts without typing them, so "who found the radio"
   and "what did the radio find" read the same lanes. The original research
   repo's TYPED graph edges are exactly what this core omits by design.
-  SCOPE-ESCAPE (v3.6): fabrics trained with the default bigram lanes carry
-  token ORDER — "alice beat bob" and "bob beat alice" now energize different
-  nodes and decide differently (unit-tested); the theorem's scope is the
-  bag-only fabric, and the register's status line already records the escape.
+  SCOPE-ESCAPE (v3.6 + v3.7): fabrics trained with the default bigram lanes
+  carry token ORDER ("alice beat bob" and "bob beat alice" decide
+  differently, unit-tested); the v3.7 `--typed-lanes` construction adds the
+  strong version — (word, role) nodes and relation-typed S>V, V>O, S>O pair
+  lanes, which survive inserted material that dilutes bigrams (measured
+  6/8 vs 4/8 at chance on the reversal probe; both distance-0 reversals
+  pinned in unit tests). The theorem's scope is the untyped bag fabric.
 - **OOD with lit candidates.** Fully dark candidates defer
   (`unknown_candidates`); but a state-lit OOD question whose candidates all
   sit in the fabric can still pick a confident wrong answer — abstention is
@@ -1008,6 +1099,13 @@ carries them.
   Since v3.6 the opt-in `--perturb-check` adds a structure-contrast defer:
   when a decision's margin survives breaking the state's token order, it was
   a bag statistic, not structure, and defers as `perturbation_tie`.
+  PARTIAL ESCAPE (v3.7, measured): `pretrain` turns UNLABELED text into
+  lanes, so "semantically-known-but-lexically-unseen" words stop being dark —
+  the OOD probe suite went from 6/6 honest deferral to 6/6 answered correct
+  (by-construction golds disclosed; data/v37_tables.json) — while the plain
+  fabric under identical knobs answers at the 0.5 chance floor. The
+  fixed-threshold floor itself stays: a bridge that reaches only dust still
+  defers, by design.
 
 ## License & credit
 

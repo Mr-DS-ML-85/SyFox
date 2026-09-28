@@ -12,6 +12,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 
 static int failures = 0;
@@ -1575,6 +1576,243 @@ static void test_multi_hop() {
 // the radio probe: the answer holds, confidence moves (0.056 -> 0.061), OOD
 // abstention is preserved. Deterministic; disclosed in usage.
 // ---------------------------------------------------------------------------
+// ============================================================================
+// v3.7.0 — the representation papers (the four moves of the limit analysis)
+// ============================================================================
+
+static void test_distvec() {
+    std::cout << "[distvec: PPMI+SVD dense representation (Move 1)]\n";
+    using namespace si;
+    // Three clusters, no cross lanes — enough rank for a real embedding
+    // (after the Perron/frequency axis is dropped, each block still
+    // contributes its own positive directions).
+    const char* blocks[3][4] = {
+        {"cat", "dog", "puppy", "kitten"},
+        {"invoice", "refund", "charge", "billing"},
+        {"flight", "hotel", "booking", "luggage"}};
+    auto build = [&blocks]() {
+        Substrate s;
+        for (int b = 0; b < 3; ++b)
+            for (int w = 0; w < 4; ++w) s.intern(blocks[b][w]);
+        for (int r = 0; r < 4; ++r)
+            for (int b = 0; b < 3; ++b) {
+                s.bind(s.find(blocks[b][0]), s.find(blocks[b][1]), 0.5f);
+                s.bind(s.find(blocks[b][1]), s.find(blocks[b][2]), 0.5f);
+                s.bind(s.find(blocks[b][2]), s.find(blocks[b][3]), 0.5f);
+                s.bind(s.find(blocks[b][0]), s.find(blocks[b][3]), 0.3f);
+            }
+        return s;
+    };
+    Substrate s = build();
+    si::dist::DistConfig dc;
+    dc.dims = 6; dc.iterations = 3; dc.edge_k = 2; dc.edge_theta = 0.30f;
+    si::dist::build_field(s, dc);
+    CHECK(s.has_distvecs(), "dense vectors installed");
+    CHECK(s.dist_dims() == 6, "dims honored");
+    // semantic structure in the dense space: co-occurring words align,
+    // lane-disjoint words do not (norm-floored, noise cannot fake kinship)
+    auto cos = [&](const char* a, const char* b) {
+        const std::vector<float>& V = s.distvecs();
+        const int k = s.dist_dims();
+        const NodeId ia = s.find(a), ib = s.find(b);
+        float dot = 0, na = 0, nb = 0;
+        for (int d = 0; d < k; ++d) {
+            dot += V[ia * k + d] * V[ib * k + d];
+            na += V[ia * k + d] * V[ia * k + d];
+            nb += V[ib * k + d] * V[ib * k + d];
+        }
+        if (na <= 1e-12f || nb <= 1e-12f) return 0.0f;
+        return dot / (std::sqrt(na) * std::sqrt(nb));
+    };
+    CHECK(cos("cat", "puppy") > 0.5f && cos("cat", "puppy") > cos("cat", "invoice") + 0.2f,
+          "co-occurring words align; lane-disjoint words do not");
+    CHECK(cos("invoice", "refund") > 0.5f && cos("invoice", "refund") > cos("flight", "refund") + 0.2f,
+          "second cluster aligns; cross-cluster stays low");
+    CHECK(s.resonance_edge_count() > 0, "resonance edges selected from the dense space");
+    // determinism: same fabric -> bit-identical vectors
+    Substrate s2 = build();
+    si::dist::build_field(s2, dc);
+    CHECK(0 == std::memcmp(s2.distvecs().data(), s.distvecs().data(),
+                           s.distvecs().size() * sizeof(float)),
+          "PPMI+SVD is bit-deterministic");
+    // DSTV tail roundtrip: vectors survive save/load bit for bit
+    s.save("build/test_distvec.bin");
+    Substrate s3;
+    CHECK(s3.load("build/test_distvec.bin"), "load with DSTV tail");
+    CHECK(s3.has_distvecs() && s3.dist_dims() == s.dist_dims(), "tail dims roundtrip");
+    CHECK(0 == std::memcmp(s3.distvecs().data(), s.distvecs().data(),
+                           s.distvecs().size() * sizeof(float)),
+          "vectors bit-identical after roundtrip");
+    // a fabric saved without distvecs (dims 0) loads without them: the
+    // replay contract for every pre-v3.7 model
+    Substrate s4;
+    s4.intern("solo");
+    s4.save("build/test_nodistvec.bin");
+    Substrate s5;
+    CHECK(s5.load("build/test_nodistvec.bin") && !s5.has_distvecs(),
+          "absence roundtrips: old fabrics stay inert");
+}
+
+static void test_pretrain() {
+    std::cout << "[pretrain: energy-space self-supervision (Move 2)]\n";
+    const char* path = "build/test_pretrain_corpus.txt";
+    {
+        std::ofstream f(path);
+        f << "the customer wants a refund for the duplicate charge\n";
+        f << "the customer reported the parcel never arrived\n";
+        f << "the invoice was charged twice on the card\n";
+        f << "the delivery is late and the customer is angry\n";
+    }
+    syfox::Engine e1;
+    auto r1 = e1.pretrain(path, 3, 1, 1.0f);
+    CHECK(r1.lines == 4, "lines consumed");
+    CHECK(r1.masked > 0, "masked positions settled");
+    CHECK(r1.epoch_loss.size() == 3, "per-epoch loss reported");
+    bool in_range = true;
+    for (double l : r1.epoch_loss) in_range = in_range && l >= 0.0 && l <= 1.0;
+    CHECK(in_range, "basin loss in [0,1]");
+    CHECK(r1.interned_new > 0 && r1.vocab_after >= r1.interned_new,
+          "raw text grew the vocabulary with no labels");
+    // the training signal: a longer run drives the basin loss down
+    syfox::Engine e2;
+    auto r2 = e2.pretrain(path, 12, 1, 1.0f);
+    CHECK(r2.epoch_loss.back() < r2.epoch_loss.front(),
+          "self-supervision improves the masked-basin objective");
+    // determinism: same corpus, same schedule -> bit-identical loss curve
+    syfox::Engine e3;
+    auto r3 = e3.pretrain(path, 3, 1, 1.0f);
+    bool same_curve = r3.epoch_loss.size() == r1.epoch_loss.size();
+    for (std::size_t i = 0; same_curve && i < r3.epoch_loss.size(); ++i)
+        same_curve = r3.epoch_loss[i] == r1.epoch_loss[i];
+    CHECK(same_curve, "pretrain is bit-deterministic");
+    // vocabulary + lanes persist through save/load
+    e1.save_model("build/model-pretrain-test");
+    syfox::Engine e4;
+    CHECK(e4.load_model("build/model-pretrain-test"), "pretrained model loads");
+    CHECK(e4.substrate().node_count() == e1.substrate().node_count(),
+          "grown vocabulary roundtrips");
+}
+
+static void test_typed_lanes() {
+    std::cout << "[typed lanes: (word, role) nodes (Move 3)]\n";
+    using Role = si::roles::Role;
+    // tagging: subject before the verb, object after it
+    auto w1 = si::norm::normalize("alice gave bob the book");
+    auto r1 = si::roles::tag(w1);
+    CHECK(r1[0] == Role::S, "subject tagged before the verb");
+    CHECK(r1[1] == Role::V, "verb cue tagged");
+    CHECK(r1[2] == Role::O, "nearest content after the verb is the object");
+    // reversal: the S>O typed pair FLIPS — the relation carries the asymmetry
+    auto w2 = si::norm::normalize("bob gave the book to alice");
+    auto p1 = si::roles::typed_pairs_of(w1);
+    auto p2 = si::roles::typed_pairs_of(w2);
+    CHECK(p1.size() == 3 && p2.size() == 3, "S>V, V>O, S>O pairs emitted");
+    CHECK(p1[2] != p2[2], "S>O typed lanes differ under reversal");
+    CHECK(p1[0] != p2[0], "S>V typed lanes differ under reversal");
+    // negation marker
+    auto w3 = si::norm::normalize("alice did not pay the invoice");
+    auto p3 = si::roles::typed_pairs_of(w3);
+    bool neg = false;
+    for (const auto& t : p3) if (!t.empty() && t[0] == '!') neg = true;
+    CHECK(neg, "negated verb emits the marker node");
+    // mangled names can never collide with normalized words
+    bool mangled = false;
+    for (const auto& t : p1)
+        if (t.find("#s>") != std::string::npos) mangled = true;
+    CHECK(mangled, "typed names carry the role separators");
+    // ---- fabric behavior: reversal separation on a typed fabric ----------
+    // Three lessons per class with VARIED verbs: the role evidence must
+    // accumulate across lessons the way real training data provides it —
+    // every alice row binds alice#s>V#v and alice#s>O#o toward alice, every
+    // bob row the mirror, while the shared bag stays ambiguous.
+    const char* reversed_a = "alice gave the book to bob";
+    const char* reversed_b = "bob gave the book to alice";
+    sfx::JV q = sfx::JV::parse(
+        R"({"q1":{"type":"choice","instructions":"who is the giver",)"
+        R"("criteria":{"alice":"alice gave","bob":"bob gave"}}})");
+    si::roles::typed_lanes_enabled() = true;
+    syfox::Engine te;
+    te.set_defer_margin(0);                    // measure separation, not abstention
+    te.learn_example("alice gave the book to bob", "", "alice giver");
+    te.learn_example("alice sent the parcel to bob", "", "alice sender");
+    te.learn_example("alice paid the invoice to bob", "", "alice payer");
+    te.learn_example("bob gave the book to alice", "", "bob giver");
+    te.learn_example("bob sent the parcel to alice", "", "bob sender");
+    te.learn_example("bob paid the invoice to alice", "", "bob payer");
+    syfox::Usage ua, ub;
+    auto aa = te.decide(reversed_a, q, ua);
+    auto ab = te.decide(reversed_b, q, ub);
+    CHECK(!aa[0].deferred && aa[0].choice == "alice", "typed fabric answers reversal a");
+    CHECK(!ab[0].deferred && ab[0].choice == "bob", "typed fabric answers reversal b");
+    CHECK(ua.typed_tokens > 0, "typed nodes energized at decide");
+    // a state with an UNSEEN verb still routes by the S>O relation alone
+    syfox::Usage uc;
+    auto ac = te.decide("alice mailed the contract to bob", q, uc);
+    CHECK(!ac[0].deferred && ac[0].choice == "alice",
+          "role evidence generalizes to unseen verbs");
+    // ---- replay contract: a bag fabric is a no-op at decide --------------
+    si::roles::typed_lanes_enabled() = false;
+    syfox::Engine be;
+    be.set_defer_margin(0);
+    be.learn_example(reversed_a, "", "alice giver");
+    be.learn_example(reversed_b, "", "bob giver");
+    bool bag_has_typed = false;
+    for (const auto& t : si::roles::typed_pairs_of(si::norm::normalize(reversed_a)))
+        if (be.substrate().has(t)) bag_has_typed = true;
+    CHECK(!bag_has_typed, "bag fabric interned no typed nodes");
+    // decide with typed lanes OFF vs ON must be bit-identical on it
+    si::roles::typed_lanes_enabled() = false;
+    syfox::Usage u1, u2;
+    auto a1 = be.decide(reversed_a, q, u1);
+    si::roles::typed_lanes_enabled() = true;
+    auto a2 = be.decide(reversed_a, q, u2);
+    CHECK(a1[0].choice == a2[0].choice && u1.settled_energy == u2.settled_energy,
+          "typed injection is a no-op on fabrics without typed nodes");
+    si::roles::typed_lanes_enabled() = false;
+}
+
+static void test_tools_registry() {
+    std::cout << "[tools: generalized tool scope (Move 4)]\n";
+    auto tj = syfox::jas::tools_json();
+    CHECK(tj.has("tools") && tj.at("tools").is_arr(), "tools registry present");
+    CHECK(tj.at("tools").arr.size() == 5, "every register claim carries a tool contract");
+    bool have_calc = false, all_have_contract = true;
+    for (const auto& t : tj.at("tools").arr) {
+        if (!(t.has("field_behavior") && t.has("tool") && t.has("tool_verified")
+              && t.has("established_by"))) all_have_contract = false;
+        if (t.at("tool").as_str().find("calc oracle") != std::string::npos) have_calc = true;
+    }
+    CHECK(all_have_contract, "field/tool/verification triple on every entry");
+    CHECK(have_calc, "calc oracle registered");
+    // the register JSON also carries the contract now
+    auto rj = syfox::jas::register_json();
+    CHECK(rj.at("claims").arr.size() == 5 && rj.at("claims").arr[0].has("tool"),
+          "register claims carry the tool contract");
+    // decide-time disclosure: the oracle computes; the field still measures
+    syfox::Engine e;
+    e.set_defer_margin(0);
+    e.learn_example("the invoice total is pending", "", "pending total");
+    e.set_tools_check(true);
+    sfx::JV q = sfx::JV::parse(
+        R"({"q1":{"type":"choice","criteria":)"
+        R"({"pending total":"the total is pending","paid total":"the total is paid"}}})");
+    syfox::Usage u;
+    auto ans = e.decide("what is 17 times 23 plus 5", q, u);
+    CHECK(u.tool_checked && u.tool_used, "tool scope ran on arithmetic state");
+    CHECK(u.tool_name == "calc" && u.tool_expression == "17*23+5" && u.tool_value == "396",
+          "oracle derivation disclosed with provenance");
+    // non-arithmetic state: checked but no tool fired
+    syfox::Usage u2;
+    (void)e.decide("the invoice total is pending", q, u2);
+    CHECK(u2.tool_checked && !u2.tool_used, "no tool fired without arithmetic");
+    // default off: no disclosure, no cost
+    syfox::Engine e2;
+    e2.learn_example("the invoice total is pending", "", "pending total");
+    syfox::Usage u3;
+    (void)e2.decide("what is 17 times 23 plus 5", q, u3);
+    CHECK(!u3.tool_checked, "tool scope is opt-in");
+}
+
 static void test_jas() {
     std::cout << "[jas: J-A-S cycle + calc derivation oracle + impossibility register]\n";
     using syfox::calc::evaluate;
@@ -1993,6 +2231,10 @@ int main() {
     test_ctx_gate();
     test_fabric36();
     test_jas();
+    test_distvec();
+    test_pretrain();
+    test_typed_lanes();
+    test_tools_registry();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

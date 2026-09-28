@@ -41,6 +41,7 @@
 #include <omp.h>
 #endif
 #include <fstream>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -792,6 +793,33 @@ public:
     std::size_t resonance_edge_count() const { return sem_edge_count_; }
     std::size_t lane_context_count() const { return lane_ctx_.size(); }
 
+    // ---------------------------------------------------------------------
+    // v3.7.0 DISTRIBUTIONAL FIELD (distvec.hpp, Move 1 of the limit analysis):
+    // dense PPMI+SVD vectors over the lane co-occurrence structure, plus the
+    // public install surface the builder uses. The vectors REPLACE NOTHING:
+    // semvecs_ (trigram+grounding) still feeds omega/freq_match; the dense
+    // vectors re-select the resonance EDGE SET only. Absent (dims 0) on every
+    // pre-v3.7 fabric — bit-identical replay.
+    void set_distvecs(std::vector<float>&& v, int dims) {
+        distvecs_ = std::move(v);
+        dist_dims_ = (distvecs_.size() == static_cast<std::size_t>(dims) * node_count()
+                      && dims > 0) ? dims : 0;
+        if (dist_dims_ == 0) distvecs_.clear();
+    }
+    bool has_distvecs() const { return dist_dims_ > 0; }
+    int dist_dims() const { return dist_dims_; }
+    const std::vector<float>& distvecs() const { return distvecs_; }
+
+    // install a resonance-edge CSR (distvec.hpp edge selection; same storage
+    // and settle role as the SEM4 tail edges built by build_semantics)
+    void set_semantic_edges(std::vector<std::pair<NodeId, float>>&& edges,
+                            std::vector<std::size_t>&& offs) {
+        if (offs.size() != nodes_.size() + 1) return;   // shape guard
+        sem_edges_ = std::move(edges);
+        sem_off_ = std::move(offs);
+        sem_edge_count_ = sem_edges_.size();
+    }
+
     // semantic vector of a node (empty vector when semantics absent)
     std::vector<float> sem_vector(NodeId id) const {
         std::vector<float> v;
@@ -972,6 +1000,17 @@ public:
             f.write(reinterpret_cast<const char*>(&kv.first), 4);
             f.write(reinterpret_cast<const char*>(&kv.second), 4);
         }
+        // v3.7.0 DSTV TAIL — dense PPMI+SVD vectors (distvec.hpp). Magic-guarded
+        // after the IDF block: pre-v3.7 files end here and load() leaves the
+        // distributional field absent — the replay contract, bit for bit.
+        const std::uint32_t dstv_magic = 0x44535456u;            // 'DSTV'
+        f.write(reinterpret_cast<const char*>(&dstv_magic), 4);
+        const std::uint32_t ddims = static_cast<std::uint32_t>(dist_dims_);
+        f.write(reinterpret_cast<const char*>(&ddims), 4);
+        if (ddims > 0) {
+            f.write(reinterpret_cast<const char*>(distvecs_.data()),
+                    static_cast<std::streamsize>(distvecs_.size() * sizeof(float)));
+        }
     }
 
     // v3.2.1: reports failure. A missing substrate used to load SILENTLY as an
@@ -1106,6 +1145,23 @@ public:
                     if (ok) df_[static_cast<NodeId>(id)] = c;
                 }
                 if (!ok) { df_.clear(); df_lessons_ = 0; }   // torn tail: stay inert
+            }
+        }
+        // v3.7.0 DSTV tail (optional, magic-guarded 'DSTV'): pre-v3.7 files end
+        // after the IDF block; the failed magic read leaves the distributional
+        // field absent and the fabric replays exactly as before.
+        std::uint32_t dstv_magic = 0;
+        if (f.read(reinterpret_cast<char*>(&dstv_magic), 4) && dstv_magic == 0x44535456u) {
+            std::uint32_t ddims = 0;
+            if (f.read(reinterpret_cast<char*>(&ddims), 4) && ddims > 0 && ddims <= 4096) {
+                const std::size_t need = nodes_.size() * static_cast<std::size_t>(ddims);
+                distvecs_.assign(need, 0.0f);
+                if (!f.read(reinterpret_cast<char*>(distvecs_.data()),
+                            static_cast<std::streamsize>(need * sizeof(float)))) {
+                    distvecs_.clear(); dist_dims_ = 0;       // torn tail: stay absent
+                } else {
+                    dist_dims_ = static_cast<int>(ddims);
+                }
             }
         }
         return true;
@@ -1289,6 +1345,9 @@ private:
     std::uint64_t df_lessons_ = 0;
     // v3 Milestone 3: audit ledger (support/counter events, provenance window)
     std::unordered_map<std::uint64_t, LaneEvidence> lane_evidence_;
+    // v3.7.0 distributional field (PPMI+SVD over the lane fabric); empty = absent
+    std::vector<float> distvecs_;                      // nodes_ * dist_dims_ (row-major)
+    int dist_dims_ = 0;
     // v3.2 semantic field state ------------------------------------------------
     std::vector<float> semvecs_;                       // nodes_ * SEM_DIMS (row-major); empty = absent
     std::vector<std::pair<NodeId, float>> sem_edges_;  // resonance edges, CSR payload

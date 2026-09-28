@@ -100,6 +100,16 @@ struct Args {
     bool compile_oracle = false;     // calc --compile: emit C++ -> g++ -> run
     bool register_text = false;      // register --text: human report to stderr
     float question_gate_floor = 0;   // --question-gate-floor F (0 = engine default 0.25)
+    // v3.7.0 representation papers: PPMI+SVD distvec (Move 1), energy-space
+    // self-supervision (Move 2), typed ordered lanes (Move 3), generalized
+    // tool scope (Move 4)
+    std::string corpus;              // pretrain --corpus: raw unlabeled text
+    long mask_stride = 1;            // pretrain --mask-stride S (mask every S-th token)
+    float eta_scale = 1.0f;          // pretrain --eta-scale F (Hebbian cap on the error signal)
+    int typed_lanes_mode = 0;        // --typed-lanes on|off: 1/-1 explicit; 0 = default OFF
+    bool distvec = false;            // --distvec: PPMI+SVD resonance edges at save (learn/pretrain)
+    bool tools_check = false;        // decide --tools: disclose the oracle derivation in usage
+    long distvec_dims = 0;           // --distvec-dims K (0 = default 300)
 };
 
 // v3.2.1 — BUG #1 disclosure: a kill switch on a model that lacks the
@@ -206,6 +216,13 @@ void apply_modes(syfox::Engine& eng, const Args& a) {
     // injection is a no-op on fabrics without bigram nodes)
     if (a.bigrams_mode != 0)
         si::norm::bigrams_enabled() = (a.bigrams_mode == 1);
+    // v3.7.0 typed ordered lanes (--typed-lanes on|off; default OFF — a seed
+    // lexicon is not yet a general grammar; decide-side injection is a no-op
+    // on fabrics without typed nodes)
+    if (a.typed_lanes_mode != 0)
+        si::roles::typed_lanes_enabled() = (a.typed_lanes_mode == 1);
+    // v3.7.0 Move 4: decide-time tool disclosure (opt-in; usage-only)
+    if (a.tools_check) eng.set_tools_check(true);
     // v3 Milestone 5: --threads N controls deterministic parallel settle on
     // OMP builds (bit-identical to sequential; test-verified). N=1 forces the
     // sequential path; N=0 leaves the default. Non-OMP builds ignore it.
@@ -298,6 +315,10 @@ void cmd_learn(const Args& a) {
     // v3.6.0 ordered bigram lanes: explicit --bigrams wins; default ON.
     if (a.bigrams_mode != 0)
         si::norm::bigrams_enabled() = (a.bigrams_mode == 1);
+    // v3.7.0 typed ordered lanes: explicit --typed-lanes wins; default OFF
+    // (a seed lexicon is not yet a general grammar).
+    if (a.typed_lanes_mode != 0)
+        si::roles::typed_lanes_enabled() = (a.typed_lanes_mode == 1);
     // Milestone-1 firewall: hidden/calibration splits never teach the fabric.
     if (!syfox::firewall::learn_may_read(a.examples)) {
         std::cerr << "syfox: firewall: " << a.examples << " is a "
@@ -349,6 +370,9 @@ void cmd_learn(const Args& a) {
             // other command uses load_or_die().
             eng.load_model(resolve_model_dir(dir));
             eng.set_context(dir);                             // audit context tag (M3)
+            // v3.7.0 Move 1: opt-in dense distributional field at save
+            if (a.distvec) eng.set_distvec(true);
+            if (a.distvec_dims > 0) eng.set_distvec_dims(a.distvec_dims);
             // v3.1.3 BUGFIX: this loop MUST teach g.second (this script
             // family's rows), not epoch_rows (the whole file). The v2.2 code
             // iterated epoch_rows here, so every per-script substrate was
@@ -398,6 +422,9 @@ void cmd_learn(const Args& a) {
     syfox::Engine eng;
     eng.load_model(resolve_model_dir(a.model));                 // incremental if model exists (fresh = first learn)
     eng.set_context(a.model);                                   // audit context tag (M3)
+    // v3.7.0 Move 1: opt-in dense distributional field at save
+    if (a.distvec) eng.set_distvec(true);
+    if (a.distvec_dims > 0) eng.set_distvec_dims(a.distvec_dims);
     for (const auto* exp : epoch_rows) {
         std::string state = exp->at("state").as_str();
         const sfx::JV& qs = exp->at("questions");
@@ -544,6 +571,18 @@ sfx::JV answers_to_json(const std::vector<syfox::Answer>& ans, const syfox::Usag
     }
     if (u.bigram_tokens > 0)                        // v3.6.0: order lanes energized
         usage["bigram_tokens"] = static_cast<double>(u.bigram_tokens);
+    if (u.typed_tokens > 0)                         // v3.7.0: role lanes energized
+        usage["typed_tokens"] = static_cast<double>(u.typed_tokens);
+    if (u.tool_checked) {                           // v3.7.0 Move 4: tool-scope disclosure
+        usage["tool_checked"] = sfx::JV(true);
+        if (u.tool_used) {
+            usage["tool_used"] = sfx::JV(true);
+            usage["tool"] = sfx::JV(u.tool_name);
+            usage["tool_expression"] = sfx::JV(u.tool_expression);
+            usage["tool_value"] = sfx::JV(u.tool_value);
+            usage["tool_provenance"] = sfx::JV("established_by_experiment");
+        }
+    }
     if (u.perturb_check) {                          // v3.6.0: BED §8 contrast disclosure
         usage["perturb_check"] = sfx::JV(true);
         usage["perturb_margin_real"] = std::round(u.perturb_margin_real * 1000.0f) / 1000.0f;
@@ -1286,6 +1325,9 @@ void usage_exit() {
         "                   passes — lower them for fast probes on large evals)\n"
         "  syfox recall    --model DIR --state '...' (--memories FILE.jsonl | --examples FILE.jsonl) [--topk N]\n"
         "  syfox active    --deferrals FILE.jsonl --out FILE.jsonl [--min-count N]\n"
+        "  syfox pretrain  --model DIR --corpus RAW.txt [--epochs N] [--mask-stride S]\n"
+        "                  [--eta-scale F] [--distvec] [--distvec-dims K]\n"
+        "  syfox tools     [--text]\n"
         "  syfox version\neval-split honesty (v2.1): --split heldout scores data/<domain>_heldout.jsonl\n"
         "(rows the fabric never learned from); the default train file is in-sample.\n"
         "token normalization (v2.1): data/synonyms.txt folds synonyms + Porter-stems\n"
@@ -1669,6 +1711,57 @@ void cmd_jas(const Args& a) {
 // v3.5 JAS — the impossibility register: warrants for every "cannot".
 // --------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v3.7.0 (Move 2): `syfox pretrain` — energy-space self-supervision over
+// UNLABELED raw text. Masks one token per stride, settles the context,
+// reads out the true token's BASIN against the strongest non-context node,
+// and strengthens the failed lanes with error-weighted Hebbian. The mean
+// basin loss per epoch is the measurable training signal; the vocabulary
+// grows on sight of every line. --distvec additionally rebuilds the PPMI+SVD
+// resonance field at save (Move 1).
+// ---------------------------------------------------------------------------
+void cmd_pretrain(const Args& a) {
+    if (a.corpus.empty() || a.model.empty()) usage_exit();
+    syfox::Engine eng;
+    eng.load_model(resolve_model_dir(a.model));   // incremental: fresh = first contact
+    eng.set_context(a.model);
+    if (a.typed_lanes_mode != 0)
+        si::roles::typed_lanes_enabled() = (a.typed_lanes_mode == 1);
+    // v3.7.0 Move 1: opt-in dense distributional field at save
+    if (a.distvec) eng.set_distvec(true);
+    if (a.distvec_dims > 0) eng.set_distvec_dims(a.distvec_dims);
+    const std::size_t vocab_before = eng.substrate().node_count();
+    auto rep = eng.pretrain(a.corpus, static_cast<int>(a.epochs),
+                            static_cast<std::size_t>(a.mask_stride), a.eta_scale);
+    eng.save_model(a.model);
+    sfx::JVObj out{
+        {"command", sfx::JV("pretrain")},
+        {"model", sfx::JV(a.model)},
+        {"corpus", sfx::JV(a.corpus)},
+        {"epochs", sfx::JV(static_cast<double>(a.epochs))},
+        {"mask_stride", sfx::JV(static_cast<double>(a.mask_stride))},
+        {"eta_scale", sfx::JV(a.eta_scale)},
+        {"vocab_before", sfx::JV(static_cast<double>(vocab_before))},
+        {"distvec", sfx::JV(a.distvec)},
+        {"report", rep.to_json()}};
+    std::ofstream rf(resolve_model_dir(a.model) + "/pretrain.json");
+    if (rf) rf << sfx::JV(sfx::JVObj{{"pretrain", sfx::JV(out)}}).dump() << "\n";
+    std::cout << sfx::JV(std::move(out)).dump() << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// v3.7.0 (Move 4): `syfox tools` — the generalized tool registry. The calc
+// pattern as a typed contract: the field refuses/defers honestly, the
+// verified tool computes exactly, the register records that the refusal was
+// principled. --text prints the human report to stderr.
+// ---------------------------------------------------------------------------
+void cmd_tools(const Args& a) {
+    sfx::JV reg = syfox::jas::tools_json();
+    reg.obj["command"] = sfx::JV("tools");
+    if (a.register_text) syfox::jas::report_tools(stderr);
+    std::cout << reg.dump() << "\n";
+}
+
 void cmd_register(const Args& a) {
     sfx::JV reg = syfox::jas::register_json();
     reg.obj["command"] = sfx::JV("register");
@@ -1774,6 +1867,20 @@ int main(int argc, char** argv) {
         else if (k == "--min-support") { if (i + 1 >= argc) usage_exit(); a.min_support = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--compile") a.compile_oracle = true;
         else if (k == "--text") a.register_text = true;
+        // v3.7.0 representation papers
+        else if (k == "--corpus") need(a.corpus);
+        else if (k == "--mask-stride") { if (i + 1 >= argc) usage_exit(); a.mask_stride = std::strtol(argv[++i], nullptr, 10); if (a.mask_stride < 1) usage_exit(); }
+        else if (k == "--eta-scale") { if (i + 1 >= argc) usage_exit(); a.eta_scale = std::strtof(argv[++i], nullptr); if (a.eta_scale < 0) usage_exit(); }
+        else if (k == "--typed-lanes") {
+            if (i + 1 >= argc) usage_exit();
+            const std::string v = argv[++i];
+            if (v == "on") a.typed_lanes_mode = 1;
+            else if (v == "off") a.typed_lanes_mode = -1;
+            else usage_exit();
+        }
+        else if (k == "--distvec") a.distvec = true;
+        else if (k == "--distvec-dims") { if (i + 1 >= argc) usage_exit(); a.distvec_dims = std::strtol(argv[++i], nullptr, 10); if (a.distvec_dims < 2 || a.distvec_dims > 4096) usage_exit(); }
+        else if (k == "--tools") a.tools_check = true;
         else usage_exit();
     }
     // v2.1 (P4): one synonym table for the whole process. --synonyms wins;
@@ -1802,5 +1909,7 @@ int main(int argc, char** argv) {
     if (cmd == "calc") { if (a.expr.empty()) usage_exit(); cmd_calc(a); return 0; }
     if (cmd == "jas") { if (a.lessons.empty() || a.holdout.empty() || a.model.empty()) usage_exit(); cmd_jas(a); return 0; }
     if (cmd == "register") { cmd_register(a); return 0; }
+    if (cmd == "pretrain") { cmd_pretrain(a); return 0; }
+    if (cmd == "tools") { cmd_tools(a); return 0; }
     usage_exit();
 }

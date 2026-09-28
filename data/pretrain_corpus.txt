@@ -1,0 +1,55 @@
+# Unlabeled raw text for the v3.7 pretrain probe (Move 2).
+# Lines mix KNOWN fabric words (refund, card, crash, login) with vocabulary
+# the labeled corpora never carry (emollient, soothing, itinerary, gala...):
+# exactly the "semantically-known-but-lexically-unseen" words the OOD defer
+# fires on today. No labels anywhere — pretrain is self-supervised.
+the customer wants a refund for the duplicate charge on the card
+the card was charged twice and the refund is still pending
+she applied an emollient cream that was soothing after the long flight
+the soothing emollient healed the dry skin during the hotel stay
+the app crash happened right after the login screen loaded
+every login attempt ends in a crash and the bug report is long
+the itinerary for the gala dinner arrived late by the courier
+the gala itinerary listed the banquet hall and the arrival time
+the courier delivered the parcel and the invoice was charged correctly
+a duplicate invoice arrived but the refund covered the extra charge
+the hotel booking was soothing news after the delayed flight
+the flight was delayed so the hotel itinerary changed again
+the login bug crashed the session and the card page froze
+the skin cream was an emollient so the dryness faded and the skin calmed
+the banquet hall manager refunded the gala deposit to the card
+the courier lost the parcel and the refund request is urgent
+the booking confirmation never arrived although the card was charged
+the crash report shows the login module failed before the dashboard
+the emollient lotion soothed the irritation and the skin recovered
+the gala banquet was booked and the itinerary confirmed the hall
+the duplicate charge dispute needs the invoice and the card statement
+the hotel reception printed the revised itinerary for the gala
+after the crash the customer reinstalled the app and the login worked
+the soothing balm was an emollient that calmed the irritated skin
+the refund for the lost parcel arrived on the card this morning
+the flight crew apologized and the hotel offered a soothing discount
+the login screen crashed twice then the bug was reported by the customer
+the banquet deposit was refunded because the hall was double booked
+the invoice shows the duplicate charge and the refund pending status
+the courier tracking says the parcel arrives before the gala dinner
+the skin clinic recommended an emollient ointment for the dry patch
+the flight booking included the hotel transfer and the gala tickets
+the card statement lists the duplicate charge and the refund credit
+the app update fixed the login crash and the session stayed stable
+the itinerary app crashed while the gala schedule was syncing
+the emollient cream soothed the sunburn after the beach excursion
+the refund team confirmed the duplicate charge reversal on the card
+the hotel hall was decorated for the banquet and the gala reception
+the parcel contents were damaged although the courier box looked fine
+the login token expired and the session crashed on refresh
+the soothing gel was an effective emollient for the sunburned skin
+the flight delay announcement came while the hotel shuttle waited
+the invoice dispute was resolved and the refund settled the balance
+the gala invitation listed the banquet menu and the seating chart
+the card charge was reversed and the refund confirmation email arrived
+the courier rerouted the parcel because the gala address had changed
+the emollient cream order was refunded to the card this week
+the soothing skin cream cost was charged twice and then refunded
+the itinerary app crashed during the gala login and the bug was filed
+the hotel booking charge hit the card twice and the refund is pending

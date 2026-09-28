@@ -21,6 +21,9 @@
 #include "normalize.hpp"
 #include "ngram.hpp"
 #include "recall.hpp"
+#include "roles.hpp"
+#include "distvec.hpp"
+#include "calc.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -35,7 +38,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.6.0";
+inline const char* VERSION = "3.7.0";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -57,6 +60,14 @@ inline constexpr float kUnknownCandidateFloor = 0.01f;
 // (MRS §4b grounds bigram lanes like any other lane; the 0.5 fraction keeps
 // order evidence subordinate to lexical evidence).
 inline constexpr float kBigramDose = 0.5f;
+// v3.7.0: decide-side TYPED pair injection dose as a fraction of the state
+// dose (same grounding argument as the bigrams; role evidence is another
+// subordinate channel, not the headline).
+inline constexpr float kTypedDose = 0.5f;
+// v3.7.0 (Move 2): pretrain error-weighting cap. The masked-basin loss is
+// in (0,1]; a lane that failed to light its basin binds at up to full
+// Hebbian strength, a basin that already wins binds at the residual.
+inline constexpr float kPretrainEtaCap = 1.0f;
 
 // Sub-word traction gate: an UNKNOWN word earns trigram bridges only when a
 // meaningful fraction of its trigrams already exist in the fabric — the
@@ -135,6 +146,17 @@ struct Usage {
     bool perturb_check = false;
     float perturb_margin_real = 0.0f;
     float perturb_margin_broken = 0.0f;
+    // v3.7.0 disclosures: typed pair nodes energized (Move 3); and the
+    // generalized tool scope (Move 4): when --tools runs the arithmetic
+    // relevance heuristic and the state asks for a computation, the ORACLE
+    // result is disclosed here while the field still answers (or defers) as
+    // it measures — the register records that the refusal would be principled.
+    std::size_t typed_tokens = 0;
+    bool tool_checked = false;
+    bool tool_used = false;
+    std::string tool_name;
+    std::string tool_expression;
+    std::string tool_value;
 };
 
 struct Calibration {
@@ -199,6 +221,21 @@ public:
         // substrate v4 tail so decide-time needs no rebuild.
         si_.finalize_contexts();
         si_.build_semantics();
+        // v3.7.0 (Move 1): when --distvec is on, the resonance EDGE SET is
+        // re-selected from dense PPMI+SVD vectors over the lane co-occurrence
+        // structure (distvec.hpp) and the vectors persist in a DSTV tail.
+        // Settle physics is untouched — the edges are the same mechanism, only
+        // chosen by a representation that generalizes. Rebuilt only when the
+        // fabric moved since the last build (any learn/pretrain sets the dirty
+        // flag; repeated saves without learning skip the SVD).
+        if (distvec_on_ && distvec_dirty_) {
+            si::dist::DistConfig dc;
+            if (distvec_dims_ > 0) dc.dims = static_cast<int>(distvec_dims_);
+            if (si_.node_count() < static_cast<std::size_t>(dc.dims))
+                dc.dims = std::max<int>(1, static_cast<int>(si_.node_count()) - 1);
+            si::dist::build_field(si_, dc);
+            distvec_dirty_ = false;
+        }
         si_.save(dir + "/substrate.bin");
         std::ofstream cf(dir + "/calibration.json");
         cf << calib_.to_json().dump();
@@ -218,7 +255,11 @@ public:
             // CMD/MIMS rarity weighting, and the lesson count it was counted
             // over. Absent (0) on fabrics built before bigram lanes landed.
             {"df_nodes", static_cast<double>(si_.df_table_size())},
-            {"df_lessons", static_cast<double>(si_.df_lesson_count())}}).dump();
+            {"df_lessons", static_cast<double>(si_.df_lesson_count())},
+            // v3.7.0 fabric disclosures: the dense distributional field (Move 1)
+            // and the typed-lane + pretrain provenance (Moves 2-3).
+            {"distvec", si_.has_distvecs()},
+            {"distvec_dims", static_cast<double>(si_.dist_dims())}}).dump();
         // v3 Milestone 3: the audit trail. conflicts.jsonl = every detected
         // contradiction; lessons_index.jsonl = state-hash -> outcome index
         // (so a LATER learn invocation still detects contradictions against
@@ -279,6 +320,26 @@ public:
     // defers choice answers whose real margin was not earned by structure.
     void set_perturb_check(bool on) { perturb_on_ = on; }
     bool perturb_check_on() const { return perturb_on_; }
+
+    // v3.7.0 (Move 1) — dense distributional field at save time (distvec.hpp).
+    // Default OFF: the PPMI+SVD build is a once-per-save fabric construction
+    // step and every existing fabric must replay bit-identically, so the
+    // operator opts in per build (--distvec). The flag never touches settle
+    // physics; it only selects which resonance edges exist.
+    void set_distvec(bool on) { distvec_on_ = on; }
+    bool distvec_on() const { return distvec_on_; }
+    // embedding width override (--distvec-dims K; 0 = the 300 default)
+    void set_distvec_dims(long k) { distvec_dims_ = k; }
+
+    // v3.7.0 (Move 4) — generalized tool scope at decide time. When on, the
+    // arithmetic relevance heuristic (calc::detect, the SAME heuristic the
+    // v3.5 calc oracle ships) runs over the state before the settle; a hit
+    // discloses the oracle's derivation in usage (tool_used/tool_value) while
+    // the field still answers or defers exactly as it measures. The register
+    // records that the refusal would be principled; the tool computes; the
+    // disclosure carries the provenance. Default OFF (bench bit-identity).
+    void set_tools_check(bool on) { tools_check_on_ = on; }
+    bool tools_check_on() const { return tools_check_on_; }
 
     // v3.2.1: returns false when the substrate file is missing (honest load
     // failure — callers surface a clear error instead of deciding on an
@@ -496,6 +557,17 @@ public:
                 if (!(augment && si_.has(bg))) si_.intern(bg);
                 state_full.push_back(bg);
             }
+        // v3.7.0 (Move 3): widen with TYPED ORDERED PAIR nodes — (word, role)
+        // relations from the scene grammar in roles.hpp. Interned like the
+        // bigrams (mangled names never collide with normalized tokens), df
+        // noted like the bigrams, bound to the outcome anchors by the SAME
+        // hebbian_lesson below. Fabrics learned with typed lanes off contain
+        // no typed nodes; the decide-side block is then a no-op (replay).
+        if (si::roles::typed_lanes_enabled())
+            for (const auto& tp : si::roles::typed_pairs_of(words)) {
+                if (!(augment && si_.has(tp))) si_.intern(tp);
+                state_full.push_back(tp);
+            }
         {
             std::unordered_set<std::string> df_seen;
             for (const auto& w : words)
@@ -503,6 +575,9 @@ public:
             if (si::norm::bigrams_enabled())
                 for (const auto& bg : si::norm::bigrams_of(words))
                     if (df_seen.insert(bg).second && si_.has(bg)) si_.note_df(si_.find(bg));
+            if (si::roles::typed_lanes_enabled())
+                for (const auto& tp : si::roles::typed_pairs_of(words))
+                    if (df_seen.insert(tp).second && si_.has(tp)) si_.note_df(si_.find(tp));
         }
         si_.hebbian_lesson(state_full, outcome, eta);
         // v3.2 Stage 2: context-signature accumulation on the state->outcome
@@ -693,6 +768,13 @@ public:
                 if (!(augment && si_.has(bg))) si_.intern(bg);
                 state_full.push_back(bg);
             }
+        // v3.7.0 (Move 3): typed pair widening, mirrored from learn_example —
+        // noul lessons carry the same fabric construction.
+        if (si::roles::typed_lanes_enabled())
+            for (const auto& tp : si::roles::typed_pairs_of(words)) {
+                if (!(augment && si_.has(tp))) si_.intern(tp);
+                state_full.push_back(tp);
+            }
         {
             std::unordered_set<std::string> df_seen;
             for (const auto& w : words)
@@ -700,6 +782,9 @@ public:
             if (si::norm::bigrams_enabled())
                 for (const auto& bg : si::norm::bigrams_of(words))
                     if (df_seen.insert(bg).second && si_.has(bg)) si_.note_df(si_.find(bg));
+            if (si::roles::typed_lanes_enabled())
+                for (const auto& tp : si::roles::typed_pairs_of(words))
+                    if (df_seen.insert(tp).second && si_.has(tp)) si_.note_df(si_.find(tp));
         }
         if (y) {
             si_.hebbian_lesson(state_full, instr, 2.0f * eta);   // supporting evidence binds hard
@@ -780,6 +865,26 @@ public:
         const std::vector<std::string> words = si::norm::normalize(state);
         usage.state_tokens = words.size();
 
+        // v3.7.0 (Move 4) — generalized tool scope: the field's job stops at a
+        // relevance heuristic; a detected computation is handed to the VERIFIED
+        // oracle and the derivation is disclosed. The field still answers or
+        // defers exactly as it measures below — this is the calc pattern made
+        // first-class at decide time: field refuses/defers honestly, tool
+        // computes exactly, register carries the provenance.
+        if (tools_check_on_) {
+            usage.tool_checked = true;
+            const calc::ArithDetect ad = calc::detect(state);
+            if (ad.has_arithmetic) {
+                const calc::CalcResult cr = calc::evaluate(ad.expression);
+                if (cr.ok) {
+                    usage.tool_used = true;
+                    usage.tool_name = "calc";
+                    usage.tool_expression = ad.expression;
+                    usage.tool_value = cr.text();
+                }
+            }
+        }
+
         // v3.4 question-context gating, STAGE 1 (opt-in): settle the question's
         // own tokens (instructions + criteria descriptions, no labels) into a
         // context field. The question drives the fabric's lanes from ITS side,
@@ -837,6 +942,19 @@ public:
             if (!bgs.empty()) si_.inject(bgs, state_dose(words) * kBigramDose);
         }
         usage.bigram_tokens = bigram_hits;
+        // v3.7.0 (Move 3): inject the state's TYPED pair nodes that the fabric
+        // actually carries. Fabrics learned with typed lanes off contain no
+        // typed nodes -> has() filters everything -> no-op, bit-identical
+        // replay (unit-tested both ways, same contract as the bigrams).
+        std::size_t typed_hits = 0;
+        if (si::roles::typed_lanes_enabled() && words.size() >= 2) {
+            std::vector<std::string> tps;
+            for (const auto& tp : si::roles::typed_pairs_of(words))
+                if (si_.has(tp)) tps.push_back(tp);
+            typed_hits = tps.size();
+            if (!tps.empty()) si_.inject(tps, state_dose(words) * kTypedDose);
+        }
+        usage.typed_tokens = typed_hits;
         if (si::norm::grams_enabled()) {                 // bridges for corrupted forms, gated
             std::vector<std::string> bridges;
             for (const auto& w : words)
@@ -905,6 +1023,14 @@ public:
                         if (si_.has(bg)) pbgs.push_back(bg);
                     if (!pbgs.empty()) si_.inject(pbgs, state_dose(pw) * kBigramDose);
                 }
+                // v3.7.0: typed pairs of the BROKEN stream, mirrored exactly —
+                // the perturbation field must see the same composition rules.
+                if (si::roles::typed_lanes_enabled()) {
+                    std::vector<std::string> ptps;
+                    for (const auto& tp : si::roles::typed_pairs_of(pw))
+                        if (si_.has(tp)) ptps.push_back(tp);
+                    if (!ptps.empty()) si_.inject(ptps, state_dose(pw) * kTypedDose);
+                }
                 si_.settle();
                 const auto pert_m = margins(*first_choice);
                 si_.restore_field(saved);                        // measure what decide() measured
@@ -972,6 +1098,14 @@ public:
                     if (si_.has(bg)) hbgs.push_back(bg);
                 if (!hbgs.empty()) si_.inject(hbgs, state_dose(hw0) * kBigramDose);
             }
+            // v3.7.0: typed pair injection mirrored from decide() — same
+            // fit/decide parity lesson.
+            if (si::roles::typed_lanes_enabled() && hw0.size() >= 2) {
+                std::vector<std::string> htps;
+                for (const auto& tp : si::roles::typed_pairs_of(hw0))
+                    if (si_.has(tp)) htps.push_back(tp);
+                if (!htps.empty()) si_.inject(htps, state_dose(hw0) * kTypedDose);
+            }
             if (si::norm::grams_enabled()) {
                 const std::vector<std::string> words2 = si::norm::normalize(state);
                 std::vector<std::string> bridges;
@@ -1022,6 +1156,122 @@ public:
             }
         }
         return rows;
+    }
+
+    // =====================================================================
+    // v3.7.0 (Move 2) — ENERGY-SPACE SELF-SUPERVISION: the pretrain loop.
+    // The direct analog of next-token prediction, expressed as lane physics:
+    //   1. take UNLABELED raw text (one line = one stream),
+    //   2. hide one token (deterministic stride schedule),
+    //   3. inject the rest, settle,
+    //   4. read out which BASIN got the energy — the true token's node
+    //      against the strongest non-context node in the settled field,
+    //   5. strengthen the context->true-token lanes in proportion to the
+    //      FAILURE (error-weighted Hebbian): a basin that already wins binds
+    //      at its residual; a basin that lost binds hard.
+    // The loss is measurable and reported per epoch: mean of
+    //   loss = 1 - e_true / (e_true + e_best_other)
+    // over every masked position. No labels, no gradients, no fitted
+    // parameters — the existing Hebbian rule, gated by a measured field
+    // signal. Deterministic end to end: lines in file order, positions in
+    // stream order, no RNG anywhere.
+    //
+    // This is what makes raw text into training signal, removing the
+    // dependence on labeled corpora for VOCABULARY and CO-OCCURRENCE: words
+    // that never appear in a labeled lesson become nodes with lanes and
+    // resonance structure here, which is exactly what the distributional
+    // field (Move 1) then factorizes.
+    struct PretrainReport {
+        std::size_t lines = 0;            // lines consumed
+        std::size_t tokens = 0;           // total tokens seen
+        std::size_t interned_new = 0;     // vocabulary growth (first epoch)
+        std::size_t masked = 0;           // masked positions settled
+        std::vector<double> epoch_loss;   // mean basin loss per epoch
+        std::size_t vocab_after = 0;
+        sfx::JV to_json() const {
+            sfx::JVObj o{{"lines", static_cast<double>(lines)},
+                         {"tokens", static_cast<double>(tokens)},
+                         {"interned_new", static_cast<double>(interned_new)},
+                         {"masked", static_cast<double>(masked)},
+                         {"vocab_after", static_cast<double>(vocab_after)}};
+            sfx::JVArr losses;
+            for (double l : epoch_loss) losses.push_back(sfx::JV(l));
+            o["epoch_mean_loss"] = sfx::JV(std::move(losses));
+            return sfx::JV(std::move(o));
+        }
+    };
+
+    PretrainReport pretrain(const std::string& corpus_path, int epochs,
+                            std::size_t mask_stride, float eta_scale) {
+        PretrainReport rep;
+        if (epochs < 1) epochs = 1;
+        if (mask_stride < 1) mask_stride = 1;
+        std::ifstream in(corpus_path);
+        if (!in) return rep;
+        std::vector<std::vector<std::string>> lines;
+        std::string raw;
+        while (std::getline(in, raw)) {
+            if (raw.empty()) continue;
+            std::vector<std::string> w = si::norm::normalize(raw);
+            if (w.size() < 3) continue;           // need context + target
+            lines.push_back(std::move(w));
+        }
+        rep.lines = lines.size();
+        for (std::size_t e = 0; e < static_cast<std::size_t>(epochs); ++e) {
+            double loss_sum = 0.0;
+            std::size_t loss_n = 0;
+            for (const auto& words : lines) {
+                // vocabulary growth happens on sight of the line (every epoch;
+                // intern() is idempotent, the counter only counts the first)
+                for (const auto& t : words) {
+                    ++rep.tokens;
+                    if (!si_.has(t)) { si_.intern(t); ++rep.interned_new; }
+                }
+                // df: this line is a lesson for the rarity weighting too
+                si_.begin_df_lesson();
+                {
+                    std::unordered_set<std::string> seen;
+                    for (const auto& t : words)
+                        if (seen.insert(t).second && si_.has(t)) si_.note_df(si_.find(t));
+                }
+                for (std::size_t i = 0; i < words.size(); i += mask_stride) {
+                    // context = the line minus the masked slot
+                    std::vector<std::string> ctx;
+                    ctx.reserve(words.size() - 1);
+                    for (std::size_t j = 0; j < words.size(); ++j)
+                        if (j != i) ctx.push_back(words[j]);
+                    const std::string& target = words[i];
+                    si_.reset_field();
+                    si_.inject(ctx, si_.config().inject_energy);
+                    si_.settle();
+                    // basin readout: true node vs strongest non-context node
+                    const si::NodeId tid = si_.find(target);
+                    std::unordered_set<si::NodeId> ctx_ids;
+                    for (const auto& c : ctx) ctx_ids.insert(si_.find(c));
+                    float e_true = si_.node_energy(tid);
+                    float e_other = 0.0f;
+                    for (si::NodeId id = 0; id < si_.node_count(); ++id) {
+                        if (id == tid || ctx_ids.count(id)) continue;
+                        const float en = si_.node_energy(id);
+                        if (en > e_other) e_other = en;
+                    }
+                    float loss;
+                    if (e_true <= 0.0f && e_other <= 0.0f) loss = 1.0f;   // nothing lit
+                    else if (e_other <= 0.0f) loss = 0.0f;                // true basin won outright
+                    else loss = 1.0f - e_true / (e_true + e_other);
+                    // error-weighted Hebbian: strengthen what failed, scaled
+                    // by the operator's eta_scale, capped at full strength
+                    const float scale = std::min(kPretrainEtaCap, std::max(0.0f, loss * eta_scale));
+                    if (scale > 0.0f) si_.hebbian_lesson(ctx, {target}, scale);
+                    loss_sum += loss;
+                    ++loss_n;
+                    ++rep.masked;
+                }
+            }
+            rep.epoch_loss.push_back(loss_n > 0 ? loss_sum / static_cast<double>(loss_n) : 0.0);
+        }
+        rep.vocab_after = si_.node_count();
+        return rep;
     }
 
 private:
@@ -1492,6 +1742,10 @@ private:
     bool ctx_gate_on_ = false;        // v3.4 question-context two-stage settle (default OFF)
     bool perturb_on_ = false;         // v3.6.0 BED §8 perturbation-contrast check (default OFF)
     float ctx_alpha_ = 0.5f;          // v3.4 context-field weight in the composed field
+    bool distvec_on_ = false;         // v3.7.0 Move 1: PPMI+SVD resonance edges at save (default OFF)
+    bool distvec_dirty_ = true;       // fabric moved since the last distvec build
+    long distvec_dims_ = 0;           // v3.7.0: embedding width override (0 = default 300)
+    bool tools_check_on_ = false;     // v3.7.0 Move 4: decide-time tool disclosure (default OFF)
     // Milestone-3 audit state
     std::string context_ = "default";
     std::uint64_t teach_seq_ = 0;

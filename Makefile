@@ -8,7 +8,7 @@ all: build/syfox build/syfox-test build/libsyfox_core.so build/rebuild_sem
 build:
 	mkdir -p build
 
-CORE_HDRS := core/syfox.hpp core/si_substrate.hpp core/normalize.hpp core/ngram.hpp core/script.hpp core/derive.hpp core/bench.hpp core/gate.hpp core/recall.hpp core/json.hpp core/firewall.hpp core/calc.hpp core/jas.hpp
+CORE_HDRS := core/syfox.hpp core/si_substrate.hpp core/normalize.hpp core/ngram.hpp core/script.hpp core/derive.hpp core/bench.hpp core/gate.hpp core/recall.hpp core/json.hpp core/firewall.hpp core/calc.hpp core/jas.hpp core/roles.hpp core/distvec.hpp
 
 build/syfox: src/syfox_cli.cpp $(CORE_HDRS) | build
 	$(CXX) $(CXXFLAGS) -I. $< -o $@
@@ -416,14 +416,14 @@ ci: build/syfox test
 	@# locally with make b77-sem router16). On a fresh clone they are SKIPPED
 	@# loudly instead of failing the whole gate; the core gates below always run.
 	@if [ -d model-router16 ] && [ -d model-b77-sem ] && [ -f data/bank77_cal.jsonl ]; then \
-		./build/syfox decide --router model-router16 --model model-b77-sem \
-			--energy-norm --state "Why am I missing my refund" \
-			--questions '{"intent":{"type":"choice","instructions":"","criteria":{"c00":"refund in my account","c33":"money back","c61":"app crash"}}}' \
-			| python3 tools/assert_route.py && \
-		python3 tools/ablation_suite.py --model model-b77-sem \
-			--eval data/bank77_cal.jsonl --limit 40 --energy-norm || exit 1; \
+	        ./build/syfox decide --router model-router16 --model model-b77-sem \
+	                --energy-norm --state "Why am I missing my refund" \
+	                --questions '{"intent":{"type":"choice","instructions":"","criteria":{"c00":"refund in my account","c33":"money back","c61":"app crash"}}}' \
+	                | python3 tools/assert_route.py && \
+	        python3 tools/ablation_suite.py --model model-b77-sem \
+	                --eval data/bank77_cal.jsonl --limit 40 --energy-norm || exit 1; \
 	else \
-		echo "SKIP route+ablation gates: model-router16 / model-b77-sem / bank77 data absent (gitignored; rebuild with make b77-sem router16)"; \
+	        echo "SKIP route+ablation gates: model-router16 / model-b77-sem / bank77 data absent (gitignored; rebuild with make b77-sem router16)"; \
 	fi
 	bash tests/readout_silence_test.sh
 	bash tests/jas_test.sh

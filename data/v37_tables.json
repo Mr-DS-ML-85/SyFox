@@ -1,0 +1,135 @@
+{
+  "suite": "syfox-v3.7.0-representation-moves",
+  "probe_files": [
+    "data/role_reversal_train.jsonl",
+    "data/role_reversal_probe.jsonl",
+    "data/pretrain_corpus.txt"
+  ],
+  "role_reversal": {
+    "bag": {
+      "0": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.01
+      },
+      "1": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.01
+      },
+      "3": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.01
+      },
+      "6": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.012
+      }
+    },
+    "bigram": {
+      "0": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.012
+      },
+      "1": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.011
+      },
+      "3": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.007
+      },
+      "6": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.008
+      }
+    },
+    "typed": {
+      "0": {
+        "n": 2,
+        "answered_correct": 2,
+        "accuracy": 1.0,
+        "mean_margin": 0.014
+      },
+      "1": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.004
+      },
+      "3": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.005
+      },
+      "6": {
+        "n": 2,
+        "answered_correct": 1,
+        "accuracy": 0.5,
+        "mean_margin": 0.008
+      }
+    }
+  },
+  "ood_bridge": {
+    "plain": {
+      "probes": 6,
+      "deferred": 0,
+      "defer_rate": 0.0,
+      "answered_correct": 3,
+      "answered_accuracy": 0.5,
+      "note": "probe golds are BY CONSTRUCTION (the pretrain lines bind each probe word to one class's vocabulary); disclosed, not hidden"
+    },
+    "pretrain": {
+      "probes": 6,
+      "deferred": 0,
+      "defer_rate": 0.0,
+      "answered_correct": 6,
+      "answered_accuracy": 1.0,
+      "note": "probe golds are BY CONSTRUCTION (the pretrain lines bind each probe word to one class's vocabulary); disclosed, not hidden"
+    },
+    "pretrain_distvec": {
+      "probes": 6,
+      "deferred": 0,
+      "defer_rate": 0.0,
+      "answered_correct": 6,
+      "answered_accuracy": 1.0,
+      "note": "probe golds are BY CONSTRUCTION (the pretrain lines bind each probe word to one class's vocabulary); disclosed, not hidden"
+    }
+  },
+  "pretrain_loss": {
+    "epoch_mean_loss": [
+      0.463359,
+      0.444814,
+      0.442742,
+      0.445035,
+      0.444644,
+      0.445079,
+      0.445193,
+      0.446105,
+      0.446334,
+      0.446186,
+      0.446353,
+      0.446541
+    ],
+    "deterministic": true,
+    "lines": 55,
+    "masked_per_epoch": 603,
+    "vocab_growth": 191,
+    "interned_new": 191
+  }
+}

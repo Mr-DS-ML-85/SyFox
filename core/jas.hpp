@@ -82,6 +82,20 @@ struct ImpossibilityClaim {
     std::string parent;      // axiom (DERIVED) or law (THEOREM)
     std::string status;      // STANDS | SCOPE ESCAPED | REFUTED
     std::string bypass;      // how it was/would be escaped
+    // v3.7.0 (Move 4 — generalized tool scope): the CALC PATTERN made a typed
+    // contract. For every claim the register records the three parts of the
+    // escape architecture:
+    //   field_behavior — what the FIELD does when the case arrives (refuse /
+    //                    defer honestly, with the reason string)
+    //   tool           — the verified sidecar that DOES the thing exactly
+    //                    (empty when no tool exists yet: the claim stands)
+    //   tool_verified  — the measured evidence that the tool computes, not
+    //                    guesses (a test, a probe suite, a g++ agreement)
+    // The field never computes; the tool computes; the register records that
+    // the refusal was principled. That is the whole architecture.
+    std::string field_behavior;   // what the honest field does with the case
+    std::string tool;             // verified escape tool (empty = none yet)
+    std::string tool_verified;    // how the tool's exactness is measured
 };
 
 // syfox's own register, seeded from README "Architectural boundaries" —
@@ -102,6 +116,16 @@ inline std::vector<ImpossibilityClaim> syfox_impossibilities() {
                       "sensory layer stops being the object the theorem "
                       "quantifies over. Same theorem class as the lineage's "
                       "metformin/metfromin claim (measured 7/7 there).";
+        c.field_behavior = "answers from the bag; v3.6 perturbation-contrast "
+                           "check defers when the margin was not earned by "
+                           "structure (reason perturbation_tie)";
+        c.tool    = "typed ordered lanes (v3.7 roles.hpp: (word, role) nodes, "
+                    "relation-typed pair lanes S>V, V>O, S>O, negation marker) "
+                    "on top of the v3.6 ordered bigram lanes";
+        c.tool_verified = "role-reversal probe suite (data/role_reversal_*.jsonl): "
+                          "reversal pairs with intervening material separate on "
+                          "typed fabrics where the bag ties; unit test_typed_lanes "
+                          "pins tagging + replay both ways";
         v.push_back(c);
     }
     {
@@ -120,6 +144,16 @@ inline std::vector<ImpossibilityClaim> syfox_impossibilities() {
                       "experiment). The field still cannot compute — the "
                       "computation happens OUTSIDE it. Scope escape, not a "
                       "violation.";
+        c.field_behavior = "refuses to compute (the theorem stands); decide "
+                           "--tools discloses the oracle's derivation in usage "
+                           "while the field answers or defers as it measures";
+        c.tool    = "calc oracle (v3.5 core/calc.hpp) — 6 derivation primitives, "
+                    "recursive-descent grammar, rejecting verifier, exact "
+                    "integer path, overflow-guarded; --compile hands the "
+                    "computation to g++";
+        c.tool_verified = "tests/jas_test.sh pins 17*23=391, 2+3*4=14, word "
+                          "problems, 1/0 rejected; g++ oracle agreement = true; "
+                          "decide --tools discloses tool_value provenance";
         v.push_back(c);
     }
     {
@@ -135,6 +169,14 @@ inline std::vector<ImpossibilityClaim> syfox_impossibilities() {
                       "chain to 1 hop. One fabric answering a 3-hop chain "
                       "crisply retracts this claim — an INDUCED claim is only "
                       "a survey of failures.";
+        c.field_behavior = "answers with near-tied probabilities; v3.4 "
+                           "defer-margin surfaces the tie as honest ambiguous_tie";
+        c.tool    = "derive --gate bridge lanes (shipped): transitive pre-"
+                    "derivation (l9) + analogy lanes gated by relative Fisher "
+                    "distance (rbg/graph_fisher) collapse hops at learn time";
+        c.tool_verified = "derive gate replays no-regression on committed gate "
+                          "rows; the INDUCED survey stands until a 3-hop probe "
+                          "answers crisply";
         v.push_back(c);
     }
     {
@@ -149,6 +191,12 @@ inline std::vector<ImpossibilityClaim> syfox_impossibilities() {
                       "order-consistent Hebbian) revises the parent, and the "
                       "retraction propagates upward. The limit is not "
                       "independent.";
+        c.field_behavior = "carries adjacency through the v3.6 bigram lanes "
+                           "where the fabric has them; bare bags defer per "
+                           "the parent axiom";
+        c.tool    = "ordered bigram lanes (v3.6) + typed ordered lanes (v3.7)";
+        c.tool_verified = "v3.6 transposition probe 7/7 (measured); typed-lane "
+                          "reversal probe suite (v3.7); both unit-pinned";
         v.push_back(c);
     }
     {
@@ -165,6 +213,18 @@ inline std::vector<ImpossibilityClaim> syfox_impossibilities() {
                       "(vght), re-injection self-consistency (bsma), tension-"
                       "gated thresholds (rifa). Until one measures zero "
                       "confident-wrong at nonzero coverage, the survey stands.";
+        c.field_behavior = "defers: unknown_candidates (absolute 0.01 floor), "
+                           "unknown_vocabulary (0.05 floor), perturbation_tie "
+                           "(v3.6), ambiguous_tie (v3.4) — all disclosed with "
+                           "reasons";
+        c.tool    = "pretrain + distvec (v3.7): unlabeled raw text grows the "
+                    "vocabulary with real lanes (Move 2) and the PPMI+SVD "
+                    "dense field connects semantically-known-but-lexically-"
+                    "unseen words to the anchored basins (Move 1) — the OOD "
+                    "defer stops firing on words the corpus KNOWS";
+        c.tool_verified = "pretrain basin-loss curve measured per epoch (mean "
+                          "loss falls); OOD probe suite before/after pretrain "
+                          "recorded in data/v37_tables.json";
         v.push_back(c);
     }
     return v;
@@ -179,6 +239,10 @@ inline sfx::JV register_json() {
         o["parent"]    = sfx::JV(c.parent);
         o["status"]    = sfx::JV(c.status);
         o["bypass"]    = sfx::JV(c.bypass);
+        // v3.7.0 (Move 4): the generalized tool-scope contract.
+        o["field_behavior"] = sfx::JV(c.field_behavior);
+        o["tool"]           = sfx::JV(c.tool);
+        o["tool_verified"]  = sfx::JV(c.tool_verified);
         arr.push_back(sfx::JV(std::move(o)));
     }
     sfx::JVObj out;
@@ -189,6 +253,51 @@ inline sfx::JV register_json() {
                           "scope error until proven otherwise.");
     out["claims"] = sfx::JV(std::move(arr));
     return sfx::JV(std::move(out));
+}
+
+// ---------------------------------------------------------------------
+// v3.7.0 (Move 4) — THE TOOLS REGISTRY: the calc pattern generalized.
+// The architecture in one line: FIELD = perception + routing + honest
+// abstention. TOOLS = exact operations. The register is the typed contract
+// between them. `syfox tools` prints it; every entry names what the field
+// does honestly, which verified tool computes instead, and how the tool's
+// exactness is measured.
+// ---------------------------------------------------------------------
+inline sfx::JV tools_json() {
+    sfx::JVArr arr;
+    for (const auto& c : syfox_impossibilities()) {
+        sfx::JVObj o;
+        o["claim"] = sfx::JV(c.statement);
+        o["warrant"] = sfx::JV(warrant_name(c.warrant));
+        o["field_behavior"] = sfx::JV(c.field_behavior);
+        o["tool"] = sfx::JV(c.tool.empty() ? "none yet (claim stands)" : c.tool);
+        o["tool_verified"] = sfx::JV(c.tool_verified);
+        o["established_by"] = sfx::JV(c.tool.empty()
+            ? "honest_deferral"
+            : "established_by_experiment");
+        arr.push_back(sfx::JV(std::move(o)));
+    }
+    sfx::JVObj out;
+    out["register"] = sfx::JV("tools");
+    out["contract"] = sfx::JV("field refuses/defers honestly -> verified tool "
+                              "computes exactly -> register records the refusal "
+                              "was principled (provenance established_by_experiment)");
+    out["tools"] = sfx::JV(std::move(arr));
+    return sfx::JV(std::move(out));
+}
+
+inline void report_tools(std::FILE* out = stderr) {
+    std::fprintf(out, "===================== TOOLS REGISTRY =====================\n");
+    std::fprintf(out, "Field = perception + routing + honest abstention.\n");
+    std::fprintf(out, "Tools = exact operations. The register is the typed\n");
+    std::fprintf(out, "contract between them.\n\n");
+    for (const auto& c : syfox_impossibilities()) {
+        std::fprintf(out, "  [%s] %s\n", warrant_name(c.warrant), c.statement.c_str());
+        std::fprintf(out, "      field does : %s\n", c.field_behavior.c_str());
+        std::fprintf(out, "      tool       : %s\n",
+                     c.tool.empty() ? "none yet (claim stands)" : c.tool.c_str());
+        std::fprintf(out, "      verified by: %s\n\n", c.tool_verified.c_str());
+    }
 }
 
 inline void report_register(std::FILE* out = stderr) {

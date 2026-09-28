@@ -1,3 +1,55 @@
+## v3.5.0 — JAS: the J-A-S cycle, the impossibility register, the arithmetic oracle
+
+Ported from research-paper/jas.md + the central paper's substrate/thinker
+division of labour; the SI settle physics stays frozen and decide() is
+bit-identical (bench verified). Three additive CLI commands, one new test
+group, one new CI gate.
+
+- `core/jas.hpp` — the cycle: E labeled rows -> J the jump (counting leaps
+  to a universal STRONGER than the evidence; axioms ranked
+  confidence/support/token, deterministic) -> A->S deduction per holdout
+  row -> experiment (oracle = observed label) -> refutation -> revision
+  under a structural restriction (T AND U, fit on TRAIN only, never on its
+  own counterexamples) -> round 2 on fresh rows. Verdicts:
+  SURVIVES | REFUTED_AND_REVISED_SURVIVES_HELDOUT |
+  REFUTED_AND_REVISION_ALSO_REFUTED | REFUTED_AND_REVISION_UNTESTED |
+  REFUTED_IN_ROUND2_REVISE_NEXT_CYCLE | NO_TESTABLE_AXIOMS. Refutations
+  append to <model>/refuted.axioms (with the counterexample row);
+  survivors to <model>/verified.axioms (provenance INDUCED). The frozen
+  field is scored on the same rows as the disclosed "relevance heuristic"
+  column. Per-row experiment disclosure in JSON (predicted/actual/
+  CONSISTENT|REFUTES|NO_PREDICTION, conflicts flagged).
+- `syfox register [--model M] [--text]` — the impossibility register:
+  five architectural boundaries seeded with warrants
+  (2 THEOREM / 2 INDUCED / 1 DERIVED), each with parent + status + bypass;
+  two THEOREM claims are SCOPE-ESCAPED (arithmetic -> calc oracle;
+  subject-object -> ordered/typed lanes); persists
+  <model>/impossibility.json.
+- `core/calc.hpp` + `syfox calc --expr ... [--compile]` — the arithmetic
+  derivation oracle: 6 primitives, one recursive-descent grammar, a
+  verifier that rejects (1/0 errors), overflow-guarded exact integer path,
+  word-problem mapping (times->*, plus->+, ...). --compile EMITS a C++
+  translation unit, compiles with g++, runs it, discloses
+  agreement + provenance established_by_experiment. MEASURED: 17*23=391
+  (g++ agrees), 2+3*4=14, (2+3)^2/5=5, 2^10=1024, word problem -> 396,
+  1/0 rejected. The field never computes — the theorem stands, the
+  capability escaped its scope.
+- Tests: unit group test_jas (oracle exactness, detection, register
+  invariants, full cycle arc incl. refutation->revision->convergence,
+  survival-is-not-proof); CI gate tests/jas_test.sh (make jas-test, wired
+  into make ci; pins oracle values, register shape, verdict space,
+  byte-determinism of cycle JSON x2); demo fabric data/jas_cycle_demo.jsonl.
+- README: v3.5 section + "Why the 24-domain accuracy is low" table mapping
+  each measured failure shape to its fabric-construction root cause and the
+  paper that unlocks the fix (MRS/CPSB/RADE ordered+typed lanes, CMD IDF
+  weights, rbg+graph_fisher Fisher-gated bridge lanes, BED perturbation
+  negatives, l9 transitive pre-derivation); Architectural boundaries now
+  cross-reference the register.
+- MEASURED regression: bench bit-identical to v3.4.0 (tickets choice
+  0.875 / score 1.000 defer 0.063; guard 0.778; game all-deferred
+  choice_defer_rate 1.0; ood_defer_rate 1.0; deterministic x3). Full unit
+  suite passes. VERSION 3.4.0 -> 3.5.0
+
 ## v3.4.0 — honest defer for ties, multi-hop readout walk, question-context gate
 
 Three decision-layer mechanisms; the SI substrate physics (decay 0.82,

@@ -790,12 +790,105 @@ knob is measured, deterministic, and disclosed):
   (with a disclosed confidence tradeoff). Deterministic; two settled fields
   composed at the decision layer — settle physics untouched.
 
+## v3.5 — JAS: the J-A-S cycle, the impossibility register, the arithmetic oracle
+
+Ported from the lineage's research papers — `research-paper/jas.md` (the
+J-A-S cycle) and the central paper's division of labour: **the substrate is
+the relevance heuristic; claims that can be destroyed live above it; an
+external oracle decides**. No physics touched, no fitted parameter, no
+gradient. Three new commands:
+
+- **`syfox jas --model M --lessons F --holdout F`** — the cycle as a running
+  loop. E sense experience (labeled rows) → J the jump: counting leaps to a
+  universal STRONGER than the evidence ("every row containing token T has
+  label L" — that gap is what makes it refutable; a restatement of the
+  frequency is only a summary) → A→S deduction: each holdout row gets a
+  mechanical prediction → experiment: the oracle is the observed label →
+  refutation is logged → revision under a STRUCTURAL restriction
+  (T AND U, checkable before any experiment, never fitted to its own
+  counterexamples) → round 2 on held-out rows the first round never saw.
+  The frozen field is scored on the same rows as the disclosed
+  "relevance heuristic" column. MEASURED on the demo fabric
+  (`data/jas_cycle_demo.jsonl`, 18 train / 6 holdout rows): the jump
+  induced 3 universals; round-2 fresh rows REFUTED one (the 2/2-observed
+  `customer → refund` axiom died on "parcel shipping refund requested by
+  the customer" with a disclosed conflict) — verdict
+  `REFUTED_IN_ROUND2_REVISE_NEXT_CYCLE`, counterexample appended to
+  `<model>/refuted.axioms`. A clean holdout yields `SURVIVES` — survival is
+  not proof; induction confers no warrant beyond not-yet-destroyed.
+  Unit test `test_jas` pins the full arc: refutation → revision
+  (`alpha AND one → A`) → convergence on fresh rows.
+- **`syfox register [--model M] [--text]`** — the **impossibility register**:
+  every "X cannot be done" claim records its WARRANT — ASSERTED / INDUCED /
+  DERIVED / THEOREM — because warrant determines what a counterexample
+  MEANS. For a THEOREM it is a scope error until proven otherwise (Minsky–
+  Papert was never violated; multilayer networks left its scope). syfox's
+  five architectural boundaries are seeded with honest warrants — two are
+  already SCOPE-ESCAPED by this very release (see below) — and persist to
+  `<model>/impossibility.json`.
+- **`syfox calc --expr "17*23" [--compile]`** — the arithmetic derivation
+  oracle, and the honest answer to "why can't the engine compute": **the
+  field never computes**. Six primitives (+ − × ÷ % ^) compose through one
+  recursive-descent grammar into arbitrarily deep derivations (the thinker
+  ratio: few primitives, exponential reachable expressions), with a
+  verifier that rejects rather than guesses (`1/0` errors, never answers).
+  Word problems map number words to operators (times → ×, plus → +, …) —
+  detection is a relevance heuristic, exactly the division the central
+  paper prescribes. `--compile` runs the full JAS experiment: the engine
+  EMITS a C++ translation unit, hands it to g++ (external, deterministic,
+  indifferent — it shares no representation with the substrate), runs it,
+  and discloses `agreement` + `provenance: established_by_experiment`.
+  MEASURED: `17*23` → 391 with g++ agreement true; `2+3*4` → 14;
+  `(2+3)^2/5` → 5; "what is 17 times 23 plus 5" → 396. This is precisely
+  how the original repo "wrote code and calculated numbers" — the compiler
+  computed, never the field. The impossibility theorem "the settled energy
+  field cannot compute exact arithmetic" STANDS; the capability escaped its
+  scope to the decision layer + oracle. Scope escape, not a violation.
+
+CI gate: `make jas-test` (wired into `make ci`); `tests/jas_test.sh` pins
+the oracle values, the register shape, the cycle verdicts, and byte-level
+determinism of the cycle JSON.
+
+### Why the 24-domain accuracy is low — and which paper unlocks each fix
+
+A per-domain bag-of-words fabric (one fabric per corpus, ~900 training
+rows, untyped unweighted co-occurrence lanes) measured on 24 corpora:
+
+| Measured shape | Root cause (from the fabric's construction) | Paper remedy (status) |
+| --- | --- | --- |
+| paws 0.500 (chance), xnli 0.333 (chance) | word-swap / entailment pairs are a MULTISET-INVARIANCE problem — untyped bag-of-words literally cannot see the difference (same theorem class as `metformin`/`metfromin`) | ordered + typed lanes: MRS bigram lanes (measured 7/7 on transpositions), CPSB role asymmetry, RADE typed edges — MODERATE fabric change, physics frozen |
+| sst2 0.677 (best case) | short, binary, polarity tokens dominate lanes — the one regime bag-of-words handles | (no fix needed — the honest baseline) |
+| agnews 0.594, imdb 0.573, amazon 0.573 | longer texts: function-word mass dilutes the unweighted lanes | CMD rarity weights `w = log(N/(1+df))` + habituation analog — MODERATE (lane weighting at learn time) |
+| sst5 0.268, emotion 0.297 | fine-grained 5/6-way classes → class nodes settle near-tied; the v3.4 defer layer honestly refuses most of them | bridge lanes gated by relative Fisher distance (rbg + graph_fisher) to sharpen class basins — MODERATE |
+| tweetml 0.34–0.50 (8 languages) | ~280 rows/language, no subword morphology, sparse token overlap | MRS bigram lanes + per-language fabrics with banding (hnca/mims) — MODERATE |
+| hate3 0.417, tweet_off 0.52, tweet_sent 0.386 | implicit toxicity carries no surface co-occurrence; label skew | perturbation-negative lessons (BED "manifold sculpting": swap subject/object, reorder, splice) so lanes carry structure, not marginal statistics — MODERATE |
+| obqa 0.401, dbpedia 0.43 | needs world knowledge beyond one-pass co-occurrence on ~900 rows | l9-L3 transitive pre-derivation with cited premises + analogy lanes — MODERATE |
+| wikiqa 0.63 | answer selection benefits from the v3.3 question gate; typed matching absent | RADE proof-pass readout over typed lanes — the typed-fabric half again |
+
+The pattern is one sentence: **the limits are representational (what the
+lanes encode), not dynamical (how energy settles)** — which is why every
+remedy in the papers lands on fabric construction or the decision layer
+and none requires touching the frozen physics. Port order by
+measured-value-per-risk: (1) IDF/rarity lane weights (CMD), (2) bigram
+lanes (MRS/CPSB — also the subject-object scope escape), (3) bridge lanes
+Fisher-gated (rbg + graph_fisher), (4) perturbation negatives (BED),
+(5) transitive pre-derivation (l9). The JAS layer is the harness that will
+hold each of these accountable: every claimed fix lands as an induced
+axiom, gets staked on held-out rows, and survives or is retracted.
+
 ## Architectural boundaries (System-2 limits — honest list)
 
 These are NOT bugs; they are capabilities a bag-of-words SI core does not
 have and cannot fake. Each is measured; none is hidden by a confident-looking
 wrong answer — the v3.4 defer layer converts most of them into honest
-deferrals.
+deferrals. Since v3.5 each boundary ALSO lives in the impossibility register
+(`syfox register`) with its WARRANT: multi-hop >2 and the fixed-threshold
+limit are INDUCED (surveys of failures, refutable by construction), temporal
+ordering is DERIVED (from the parent axiom "lanes are unordered multisets"),
+subject-object and field-arithmetic are THEOREMS — and two of them are
+already SCOPE-ESCAPED: arithmetic by the calc oracle (computation happens
+outside the field), subject-object by ordered/typed lanes when a fabric
+carries them.
 
 - **Multi-hop propagation beyond 2 hops stays near-tied.** Diffusion carries
   2-hop chains (alarm → lights answers at depth 1); 3-4 hop targets gain only

@@ -8,10 +8,14 @@
 #include "core/gate.hpp"
 #include "core/recall.hpp"
 #include "core/firewall.hpp"
+#include "core/calc.hpp"
+#include "core/jas.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -20,6 +24,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unistd.h>
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
@@ -84,6 +89,14 @@ struct Args {
     std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
     // v3.3 question-conditioned readout (opt-in; see core/syfox.hpp note)
     bool question_gate = false;      // --question-gate: enable readout gating
+    // v3.5 JAS: the J-A-S cycle + arithmetic oracle + impossibility register
+    std::string expr;                // calc --expr: expression or free text
+    std::string lessons;             // jas --lessons: training rows (E)
+    std::string holdout;             // jas --holdout: oracle rows
+    std::size_t max_axioms = 3;      // jas --max-axioms: top-K leaps
+    int min_support = 2;             // jas --min-support: observations per leap
+    bool compile_oracle = false;     // calc --compile: emit C++ -> g++ -> run
+    bool register_text = false;      // register --text: human report to stderr
     float question_gate_floor = 0;   // --question-gate-floor F (0 = engine default 0.25)
 };
 
@@ -1367,8 +1380,289 @@ void usage_exit() {
         "  state and the final field composes as (1-alpha)*state + alpha*context\n"
         "  (alpha default 0.5). Disclosed as usage.ctx_gate/ctx_alpha. Flags:\n"
         "  --ctx-gate (enable), --ctx-alpha F. Deterministic; settle physics\n"
-        "  untouched (two settled fields composed at the decision layer).\n";
+        "  untouched (two settled fields composed at the decision layer).\n"
+        "JAS cycle (v3.5, read the research-paper/jas.md): Einstein's J-A-S\n"
+        "  epistemology as a running loop. E sense experience (labeled rows)\n"
+        "  -> J the jump (counting leaps to a universal STRONGER than the\n"
+        "  evidence — that gap makes it refutable) -> A->S deduction (each\n"
+        "  holdout row gets a mechanical prediction) -> experiment (the\n"
+        "  oracle is the observed label) -> refutation -> revision under a\n"
+        "  structural restriction (T AND U, checkable before any experiment)\n"
+        "  -> round 2 on held-out rows the first round never saw. Refuted\n"
+        "  axioms append to <model>/refuted.axioms; survivors to\n"
+        "  <model>/verified.axioms (provenance: INDUCED). The frozen field\n"
+        "  is scored on the same rows as the relevance heuristic column.\n"
+        "  Flags: --model M --lessons F --holdout F [--max-axioms K]\n"
+        "  [--min-support N]. No physics touched; no fitted parameter.\n"
+        "impossibility register (v3.5): every \"X cannot be done\" claim\n"
+        "  records its WARRANT — ASSERTED / INDUCED / DERIVED / THEOREM —\n"
+        "  because warrant determines what a counterexample MEANS: for a\n"
+        "  THEOREM it is a scope error until proven otherwise. syfox's five\n"
+        "  architectural boundaries are seeded with honest warrants; two\n"
+        "  (subject-object, arithmetic) are already scope-escaped.\n"
+        "  Commands: `register [--model M] [--text]` prints/persists it.\n"
+        "calc — the arithmetic derivation oracle (v3.5): |Pi|=6 primitives\n"
+        "  (+ - * / % ^) compose via one recursive-descent grammar into\n"
+        "  arbitrarily deep derivations. The FIELD NEVER COMPUTES — the\n"
+        "  central paper: the substrate is the relevance heuristic; a\n"
+        "  calculator is a trivial SI system because it DERIVES. --compile\n"
+        "  goes further: the engine EMITS a C++ translation unit, hands it\n"
+        "  to g++ (external, deterministic, indifferent), runs it, and\n"
+        "  discloses provenance established_by_experiment + agreement with\n"
+        "  the internal derivation. This is how the lineage 'wrote code and\n"
+        "  calculated numbers' — the compiler computed, never the field.\n"
+        "  Usage: calc --expr \"17*23\" [--compile]; word problems auto-map\n"
+        "  number words to operators (times -> *, plus -> +, ...).\n";
     std::exit(2);
+}
+
+// --------------------------------------------------------------------------
+// v3.5 JAS — calc: the arithmetic derivation oracle.
+// The field never computes. The decision layer derives (6 primitives, one
+// grammar); --compile additionally EMITS a C++ translation unit and hands
+// the computation to g++ — external, deterministic, indifferent — exactly
+// the compile-verify oracle of research-paper/jas.md / src/synth.cpp.
+// --------------------------------------------------------------------------
+
+// recursive-descent EMITTER: prints the expression as pure C++ (no shared
+// code with the internal evaluator — the oracle must not share
+// representation with the substrate), mapping ^ -> std::pow, % -> fmod.
+struct Emit {
+    const std::vector<syfox::calc::Tok>* toks;
+    std::size_t pos = 0;
+    bool ok = true;
+
+    const syfox::calc::Tok& peek() const { return (*toks)[pos]; }
+    void advance() { if (peek().kind != syfox::calc::Tok::END) ++pos; }
+
+    std::string prim() {
+        if (peek().kind == syfox::calc::Tok::LP) {
+            advance();
+            std::string e = expr();
+            if (!ok) return e;
+            if (peek().kind != syfox::calc::Tok::RP) { ok = false; return e; }
+            advance();
+            return "(" + e + ")";
+        }
+        if (peek().kind != syfox::calc::Tok::NUM) { ok = false; return "0"; }
+        std::string t = peek().text;
+        advance();
+        return "(" + t + ")";
+    }
+    std::string power() {
+        std::string base = prim();
+        if (!ok) return base;
+        if (peek().kind == syfox::calc::Tok::OP && peek().text == "^") {
+            advance();
+            std::string exp = power();
+            if (!ok) return exp;
+            return "std::pow(" + base + ", " + exp + ")";
+        }
+        return base;
+    }
+    std::string term() {
+        std::string left = power();
+        if (!ok) return left;
+        while (peek().kind == syfox::calc::Tok::OP &&
+               (peek().text == "*" || peek().text == "/" || peek().text == "%")) {
+            const std::string op = peek().text;
+            advance();
+            std::string right = power();
+            if (!ok) return right;
+            left = (op == "%") ? "std::fmod(" + left + ", " + right + ")"
+                               : "(" + left + op + right + ")";
+        }
+        return left;
+    }
+    std::string expr() {
+        std::string left = term();
+        if (!ok) return left;
+        while (peek().kind == syfox::calc::Tok::OP &&
+               (peek().text == "+" || peek().text == "-")) {
+            const std::string op = peek().text;
+            advance();
+            std::string right = term();
+            if (!ok) return right;
+            left = "(" + left + op + right + ")";
+        }
+        return left;
+    }
+};
+
+void cmd_calc(const Args& a) {
+    // number words -> operators when the text is not already a clean formula
+    std::string source = a.expr;
+    syfox::calc::ArithDetect d = syfox::calc::detect(source);
+    if (d.has_arithmetic && source.find_first_not_of("0123456789+-*/%^(). \t") != std::string::npos)
+        source = d.expression;
+
+    sfx::JVObj out;
+    out["command"] = sfx::JV("calc");
+    out["expression"] = sfx::JV(source);
+    if (!d.cue.empty()) out["cue"] = sfx::JV(d.cue);
+    out["provenance"] = sfx::JV("decision-layer derivation; the settled energy "
+                                "field does not compute (see impossibility "
+                                "register, THEOREM #2)");
+
+    syfox::calc::CalcResult r = syfox::calc::evaluate(source);
+    if (!r.ok) {
+        out["ok"] = sfx::JV(false);
+        out["error"] = sfx::JV(r.error);
+        std::cout << sfx::JV(std::move(out)).dump() << "\n";
+        return;
+    }
+    out["ok"] = sfx::JV(true);
+    out["value"] = sfx::JV(r.text());
+    out["integral"] = sfx::JV(r.integral);
+    out["oracle"] = sfx::JV("internal-derivation");
+    out["oracle_agreement"] = sfx::JV(nullptr);
+
+    if (a.compile_oracle) {
+        // the experiment: emit pure C++, let g++ compute, run it, compare.
+        std::string terr;
+        std::vector<syfox::calc::Tok> toks = syfox::calc::tokenize(source, terr);
+        Emit em; em.toks = &toks;
+        std::string cpp_expr = em.expr();
+        const bool emit_ok = em.ok && terr.empty() &&
+                             toks.size() > 0 && toks.back().kind == syfox::calc::Tok::END &&
+                             em.pos == toks.size() - 1;
+        if (!emit_ok) {
+            out["compile_oracle"] = sfx::JV(sfx::JVObj{
+                {"status", sfx::JV("emission_failed")},
+                {"detail", sfx::JV(terr.empty() ? "expression did not reduce" : terr)}});
+        } else {
+            char name[256];
+            std::snprintf(name, sizeof(name), "build/jas_oracle_%d", static_cast<int>(getpid()));
+            const std::string src = std::string(name) + ".cpp";
+            const std::string bin = std::string(name) + ".bin";
+            std::FILE* f = std::fopen(src.c_str(), "w");
+            if (!f) {
+                out["compile_oracle"] = sfx::JV(sfx::JVObj{
+                    {"status", sfx::JV("unavailable")}, {"detail", sfx::JV("cannot write emission file")}});
+            } else {
+                std::fprintf(f, "// emitted by syfox jas (experiment: S -> E)\n");
+                std::fprintf(f, "#include <cstdio>\n#include <cmath>\n");
+                std::fprintf(f, "int main(){ std::printf(\"%%.10g\\n\", (double)(%s)); return 0; }\n",
+                             cpp_expr.c_str());
+                std::fclose(f);
+                const std::string cmd = "g++ -std=c++17 -O0 -o " + bin + " " + src + " 2>/dev/null";
+                const int cc = std::system(cmd.c_str());
+                if (cc != 0) {
+                    out["compile_oracle"] = sfx::JV(sfx::JVObj{
+                        {"status", sfx::JV("unavailable")},
+                        {"detail", sfx::JV("g++ not available or compile failed — "
+                                           "the internal derivation stands, "
+                                           "disclosed as such")}});
+                } else {
+                    const std::string run = bin + " > " + bin + ".out 2>/dev/null";
+                    const int rc = std::system(run.c_str());
+                    std::ifstream o(bin + ".out");
+                    std::string got;
+                    if (o) std::getline(o, got);
+                    double gotv = std::strtod(got.c_str(), nullptr);
+                    const bool agree = rc == 0 && !got.empty() &&
+                        std::fabs(gotv - (r.integral ? static_cast<double>(r.iv) : r.dv))
+                            <= 1e-9 * std::max(1.0, std::fabs(gotv));
+                    sfx::JVObj oracle;
+                    oracle["status"] = sfx::JV(rc == 0 ? "ran" : "run_failed");
+                    oracle["emitted"] = sfx::JV(src);
+                    oracle["emitted_code"] = sfx::JV("double x = " + cpp_expr + ";");
+                    oracle["output"] = sfx::JV(got);
+                    oracle["agreement"] = sfx::JV(agree);
+                    oracle["provenance"] = sfx::JV("established_by_experiment");
+                    out["compile_oracle"] = sfx::JV(std::move(oracle));
+                    out["oracle"] = sfx::JV(agree ? "g++ (external compile-verify)"
+                                                  : "internal-derivation (oracle DISAGREES — refute and investigate)");
+                }
+                std::remove(src.c_str());
+                std::remove(bin.c_str());
+                std::remove((bin + ".out").c_str());
+            }
+        }
+    }
+    std::cout << sfx::JV(std::move(out)).dump() << "\n";
+}
+
+// --------------------------------------------------------------------------
+// v3.5 JAS — the cycle: E -> J -> A -> S -> experiment -> refutation -> J2.
+// --------------------------------------------------------------------------
+
+void cmd_jas(const Args& a) {
+    std::string err;
+    std::vector<syfox::jas::Row> train = syfox::jas::load_rows(a.lessons, err);
+    if (!err.empty()) { std::cerr << "syfox: jas: " << err << "\n"; std::exit(2); }
+    std::vector<syfox::jas::Row> holdout = syfox::jas::load_rows(a.holdout, err);
+    if (!err.empty()) { std::cerr << "syfox: jas: " << err << "\n"; std::exit(2); }
+
+    // the field layer: the frozen fabric decides the SAME rows (relevance
+    // heuristic column). The engine is loaded read-only; no teach happens.
+    syfox::Engine eng;
+    load_or_die(eng, resolve_model_dir(a.model), "jas");
+    apply_modes(eng, a);
+
+    syfox::jas::CycleConfig cfg;
+    cfg.max_axioms = a.max_axioms;
+    cfg.min_support = a.min_support;
+
+    auto decide_field = [&eng](const std::string& state, const sfx::JV& questions,
+                               std::string& choice, bool& deferred) -> bool {
+        syfox::Usage u;
+        auto ans = eng.decide(state, questions, u);
+        if (ans.empty()) return false;
+        choice = ans[0].choice;
+        deferred = ans[0].deferred;
+        return true;
+    };
+
+    syfox::jas::CycleReport rep = syfox::jas::run_cycle(
+        train, holdout, cfg, decide_field, resolve_model_dir(a.model), err);
+    if (!err.empty()) { std::cerr << "syfox: jas: " << err << "\n"; std::exit(2); }
+
+    // human summary to stderr; machine JSON to stdout (repo convention)
+    std::fprintf(stderr, "[E] sense experience : %d train rows, %d holdout rows\n",
+                 rep.train_rows, rep.holdout_rows);
+    std::fprintf(stderr, "[J] the jump         : %zu induced universal(s), provenance INDUCED\n",
+                 rep.axioms.size());
+    for (const auto& ax : rep.axioms)
+        std::fprintf(stderr, "      leap  : \"%s\"  (%d/%d = %.1f%% observed)\n",
+                     ax.statement.c_str(), ax.support, ax.total, 100.0 * ax.confidence);
+    std::fprintf(stderr, "[experiment] round 1 : consistent %d, REFUTED %d, no-prediction %d, conflict %d\n",
+                 rep.r1_consistent, rep.r1_refuted, rep.r1_no_prediction, rep.r1_conflict);
+    std::fprintf(stderr, "[field layer]        : answered %d, correct %d, deferred %d (acc %.4f over answered)\n",
+                 rep.field_answered, rep.field_correct, rep.field_deferred, rep.field_acc);
+    if (rep.revised)
+        std::fprintf(stderr, "[revision]           : %zu axiom(s) restricted to a structural predicate\n",
+                     rep.revised_axioms.size());
+    std::fprintf(stderr, "[experiment] round 2 : tested %d, consistent %d, refuted %d, no-prediction %d (fresh rows)\n",
+                 rep.r2_tested, rep.r2_consistent, rep.r2_refuted, rep.r2_no_prediction);
+    std::fprintf(stderr, "[verdict]            : %s\n", rep.verdict.c_str());
+
+    sfx::JV out = syfox::jas::report_json(rep);
+    out.obj["model"] = sfx::JV(resolve_model_dir(a.model));
+    out.obj["lessons"] = sfx::JV(a.lessons);
+    out.obj["holdout"] = sfx::JV(a.holdout);
+    std::cout << out.dump() << "\n";
+}
+
+// --------------------------------------------------------------------------
+// v3.5 JAS — the impossibility register: warrants for every "cannot".
+// --------------------------------------------------------------------------
+
+void cmd_register(const Args& a) {
+    sfx::JV reg = syfox::jas::register_json();
+    reg.obj["command"] = sfx::JV("register");
+    if (!a.model.empty()) {
+        const std::string path = resolve_model_dir(a.model) + "/impossibility.json";
+        std::ofstream f(path);
+        if (f) {
+            f << reg.dump() << "\n";
+            reg.obj["persisted"] = sfx::JV(path);
+        } else {
+            reg.obj["persisted"] = sfx::JV(nullptr);
+        }
+    }
+    if (a.register_text) syfox::jas::report_register(stderr);
+    std::cout << reg.dump() << "\n";
 }
 
 } // namespace
@@ -1443,6 +1737,14 @@ int main(int argc, char** argv) {
         else if (k == "--router") need(a.router);
         else if (k == "--question-gate") a.question_gate = true;
         else if (k == "--question-gate-floor") { if (i + 1 >= argc) usage_exit(); a.question_gate_floor = std::strtof(argv[++i], nullptr); }
+        // v3.5 JAS flags
+        else if (k == "--expr") need(a.expr);
+        else if (k == "--lessons") need(a.lessons);
+        else if (k == "--holdout") need(a.holdout);
+        else if (k == "--max-axioms") { if (i + 1 >= argc) usage_exit(); a.max_axioms = static_cast<std::size_t>(std::strtoul(argv[++i], nullptr, 10)); }
+        else if (k == "--min-support") { if (i + 1 >= argc) usage_exit(); a.min_support = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--compile") a.compile_oracle = true;
+        else if (k == "--text") a.register_text = true;
         else usage_exit();
     }
     // v2.1 (P4): one synonym table for the whole process. --synonyms wins;
@@ -1468,5 +1770,8 @@ int main(int argc, char** argv) {
     if (cmd == "bench") { cmd_bench(a); return 0; }
     if (cmd == "recall") { cmd_recall(a); return 0; }
     if (cmd == "active") { cmd_active(a); return 0; }
+    if (cmd == "calc") { if (a.expr.empty()) usage_exit(); cmd_calc(a); return 0; }
+    if (cmd == "jas") { if (a.lessons.empty() || a.holdout.empty() || a.model.empty()) usage_exit(); cmd_jas(a); return 0; }
+    if (cmd == "register") { cmd_register(a); return 0; }
     usage_exit();
 }

@@ -7,6 +7,8 @@
 #include "core/bench.hpp"
 #include "core/gate.hpp"
 #include "core/recall.hpp"
+#include "core/calc.hpp"
+#include "core/jas.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -1573,6 +1575,97 @@ static void test_multi_hop() {
 // the radio probe: the answer holds, confidence moves (0.056 -> 0.061), OOD
 // abstention is preserved. Deterministic; disclosed in usage.
 // ---------------------------------------------------------------------------
+static void test_jas() {
+    std::cout << "[jas: J-A-S cycle + calc derivation oracle + impossibility register]\n";
+    using syfox::calc::evaluate;
+    // ---- the derivation oracle: exact, composed, never sampled ---------
+    auto r1 = evaluate("17*23");
+    CHECK(r1.ok && r1.integral && r1.iv == 391, "17*23 derives 391 exactly");
+    auto r2 = evaluate("2+3*4");
+    CHECK(r2.ok && r2.integral && r2.iv == 14, "precedence derives 14");
+    auto r3 = evaluate("(2+3)^2/5");
+    CHECK(r3.ok && r3.integral && r3.iv == 5, "parens + power exact path");
+    auto r4 = evaluate("2^10");
+    CHECK(r4.ok && r4.integral && r4.iv == 1024, "right-assoc power");
+    auto r5 = evaluate("1/0");
+    CHECK(!r5.ok, "1/0 rejected by the verifier, never guessed");
+    auto r6 = evaluate("7 % 3");
+    CHECK(r6.ok && r6.integral && r6.iv == 1, "modulo exact");
+    // detection is a relevance heuristic only — the field never computes
+    auto d1 = syfox::calc::detect("what is 17 times 23 plus 5");
+    CHECK(d1.has_arithmetic && d1.expression == "17*23+5", "word problem maps to operators");
+    auto d2 = syfox::calc::detect("my parcel was late and the box was crushed");
+    CHECK(!d2.has_arithmetic, "non-arithmetic text does not fire detection");
+
+    // ---- the impossibility register: warrants, not just claims ---------
+    auto reg = syfox::jas::syfox_impossibilities();
+    CHECK(reg.size() == 5, "five architectural boundaries seeded");
+    bool thm = false, ind = false, der = false;
+    for (const auto& c : reg) {
+        if (c.warrant == syfox::jas::Warrant::THEOREM) thm = true;
+        if (c.warrant == syfox::jas::Warrant::INDUCED) ind = true;
+        if (c.warrant == syfox::jas::Warrant::DERIVED) der = true;
+        CHECK(!c.statement.empty() && !c.parent.empty() && !c.bypass.empty(),
+              "claim carries statement + parent + bypass");
+    }
+    CHECK(thm && ind && der, "warrants THEOREM/INDUCED/DERIVED all present");
+    CHECK(std::string(syfox::jas::warrant_name(syfox::jas::Warrant::THEOREM)) == "THEOREM",
+          "warrant naming");
+    // the arithmetic THEOREM is scope-escaped by calc — never "violated"
+    bool arith_thm = false;
+    for (const auto& c : reg)
+        if (c.warrant == syfox::jas::Warrant::THEOREM &&
+            c.statement.find("arithmetic") != std::string::npos)
+            arith_thm = c.status.find("SCOPE ESCAPED") != std::string::npos;
+    CHECK(arith_thm, "arithmetic theorem: scope escape, not a violation");
+
+    // ---- the cycle: refutation is the deliverable ----------------------
+    // train: alpha is an IMPERFECT predictor (3/4) so the leap is refutable
+    // and the revision (alpha AND one -> A) is reachable
+    auto mk = [](const std::string& s, const std::string& l) {
+        syfox::jas::Row r; r.state = s; r.label = l; return r;
+    };
+    std::vector<syfox::jas::Row> train = {
+        mk("alpha one x", "A"), mk("alpha one y", "A"), mk("alpha two z", "A"),
+        mk("alpha beta mix", "B"), mk("beta one w", "B"), mk("beta two v", "B"),
+        mk("beta three u", "B"),
+    };
+    // holdout round-1 rows refute; round-2 rows are FRESH (never fit)
+    std::vector<syfox::jas::Row> holdout = {
+        mk("alpha beta gamma", "B"), mk("beta epsilon", "B"),
+        mk("alpha one delta", "A"), mk("gamma zeta", "A"),
+    };
+    syfox::jas::CycleConfig cfg;
+    cfg.max_axioms = 2;
+    cfg.min_support = 2;
+    auto no_field = [](const std::string&, const sfx::JV&,
+                       std::string&, bool&) { return false; };
+    std::string err;
+    auto rep = syfox::jas::run_cycle(train, holdout, cfg, no_field, "", err);
+    CHECK(err.empty(), "cycle runs clean");
+    CHECK(rep.axioms.size() == 2 && rep.axioms[0].token == "beta" &&
+          rep.axioms[1].token == "alpha",
+          "top axioms deterministic (confidence, support, token)");
+    CHECK(std::fabs(rep.axioms[1].confidence - 0.75) < 1e-9,
+          "confidence is the observed frequency that prompted the leap "
+          "(alpha -> A was 3/4 on train; counting, not vibes)");
+    CHECK(rep.r1_refuted == 1 && !rep.r1_counterexample.empty(),
+          "the oracle REFUTED the universal (one counterexample ends it)");
+    CHECK(rep.revised && rep.revised_axioms[0].extra == "one",
+          "revision = structural restriction (alpha AND one), checkable in advance");
+    CHECK(rep.verdict == "REFUTED_AND_REVISED_SURVIVES_HELDOUT",
+          "revised axiom survives FRESH held-out rows: the cycle converged");
+    CHECK(rep.r2_tested == 2, "round 2 tested only rows round 1 never saw");
+    // clean holdout -> honest survival, NOT proof
+    std::vector<syfox::jas::Row> clean = {
+        mk("alpha two sea", "A"), mk("beta one ray", "B"),
+        mk("alpha two sun", "A"), mk("beta two sky", "B"),
+    };
+    auto rep2 = syfox::jas::run_cycle(train, clean, cfg, no_field, "", err);
+    CHECK(err.empty() && rep2.verdict == "SURVIVES" && !rep2.revised,
+          "survival is not proof; no revision without refutation");
+}
+
 static void test_ctx_gate() {
     std::cout << "[v3.4 question-context gate]\n";
     const std::string dir = "build/test_v34_ctx";
@@ -1669,6 +1762,7 @@ int main() {
     test_defer_ties();
     test_multi_hop();
     test_ctx_gate();
+    test_jas();
     if (failures) { std::cout << failures << " FAILURES\n"; return 1; }
     std::cout << "all tests passed\n";
     return 0;

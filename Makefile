@@ -8,7 +8,7 @@ all: build/syfox build/syfox-test build/libsyfox_core.so build/rebuild_sem
 build:
 	mkdir -p build
 
-CORE_HDRS := core/syfox.hpp core/si_substrate.hpp core/normalize.hpp core/ngram.hpp core/script.hpp core/derive.hpp core/bench.hpp core/gate.hpp core/recall.hpp core/json.hpp core/firewall.hpp
+CORE_HDRS := core/syfox.hpp core/si_substrate.hpp core/normalize.hpp core/ngram.hpp core/script.hpp core/derive.hpp core/bench.hpp core/gate.hpp core/recall.hpp core/json.hpp core/firewall.hpp core/calc.hpp core/jas.hpp
 
 build/syfox: src/syfox_cli.cpp $(CORE_HDRS) | build
 	$(CXX) $(CXXFLAGS) -I. $< -o $@
@@ -164,6 +164,12 @@ test: build/syfox-test
 # defer with the layer-specific reason (builds the QA probe fabric on demand).
 readout-silence: build/syfox
 	bash tests/readout_silence_test.sh
+	bash tests/jas_test.sh
+
+# v3.5 JAS regression: the J-A-S cycle, the calc derivation oracle, and the
+# impossibility register (builds the demo fabric on demand).
+jas-test: build/syfox
+	bash tests/jas_test.sh
 
 # Jev-parity eval suite on the three seed models.
 #   make bench           -> train split (in-sample; labelled as such)

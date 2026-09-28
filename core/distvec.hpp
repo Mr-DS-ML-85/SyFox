@@ -68,7 +68,15 @@ struct DistConfig {
     int iterations = 5;          // subspace iterations (fixed, deterministic)
     float beta = 0.5f;           // vector = U * Sigma^beta
     bool drop_first = true;      // drop the Perron axis (see svd_embeddings)
-    std::size_t exact_scan_max = 8000;   // n below this: exact top-k neighbour scan
+    // v3.7.1 SCALING FIX: the exact neighbour scan is O(n^2 * k) — measured
+    // on this tree it IS the superlinear curve (76 s @ 5,595 nodes, 156 s @
+    // 7,985, ~O(n^1.9); extrapolation: ~15 h at 94,773). The cap drops from
+    // 8000 to 2000 (exact cost there: 4M pairs x k, about a second); larger
+    // fabrics use the deterministic 2-hop lane closure, whose semantics are
+    // already documented above this size ("pairs with no lane path have PPMI
+    // cosine ~0 by construction"). Disclosed behaviour change for fabrics in
+    // (2000, 8000] nodes: they move from the exact path to the 2-hop path.
+    std::size_t exact_scan_max = 2000;   // n below this: exact top-k neighbour scan
     std::size_t cand_top_t = 32; // large fabrics: top-T lanes expand 2-hop candidates
     float edge_theta = 0.50f;    // min cosine for a resonance edge (= sem_theta)
     int edge_k = 6;              // resonance edges per node (= sem_neighbors)
@@ -127,64 +135,120 @@ inline Ppmi build_ppmi(const Substrate& s) {
 }
 
 // ----------------------------------------------------------------------------
-// Modified Gram-Schmidt, in-place, columns d = 0..k-1 of an n*k row-major
-// matrix. Columns processed in ascending order (fixed); rank-deficient
-// columns are zeroed (their eigenvector slot stays empty — deterministic).
-// Inner row loops parallelize safely: each row entry is updated independently.
+// Orthonormalization, in-place, COLUMNS d = 0..k-1 of a COLUMN-MAJOR k*n
+// working matrix (row d = basis vector d, contiguous over the n nodes).
+//
+// v3.7.1 SCALING FIX. The v3.7.0 version worked on an n*k ROW-MAJOR matrix:
+// every dot/axpy walked memory with stride k, and each (column, previous)
+// pair launched TWO OpenMP parallel regions — at k=375 that is ~840k regions
+// per call across 6 calls, with worst-case cache behaviour. The blocked
+// "twice is enough" Gram-Schmidt here (BCGS2; the stability standard for
+// block orthogonalization) makes every inner loop a contiguous pass and
+// needs O(k/BLOCK) regions per call:
+//   per block of BLOCK columns:
+//     1. cross-project the block against ALL finished columns (two passes —
+//        the second is the reorthogonalization that restores MGS-grade
+//        orthogonality; classical "twice is enough" rule),
+//     2. MGS-orthonormalize WITHIN the block (serial: BLOCK^2/2 pairs x n
+//        contiguous dots — small),
+//     3. cross-project again, within-block MGS again (pass 2),
+//     4. normalize; a column that still collapses gets the SAME deterministic
+//        canonical-basis rank repair as v3.7.0 (serial, rare).
+// Columns are processed in ascending block order (fixed); all reductions are
+// plain per-entry loops over contiguous memory under schedule(static) —
+// fixed summation order, deterministic.
 // ----------------------------------------------------------------------------
-inline void mgs_orthonormalize(std::vector<float>& X, std::size_t n, std::size_t k) {
-    for (std::size_t d = 0; d < k; ++d) {
-        for (std::size_t pr = 0; pr < d; ++pr) {
+inline void mgs_orthonormalize_cm(std::vector<float>& X, std::size_t n, std::size_t k);
+
+// serial within-block MGS used by the blocked driver below: orthonormalizes
+// columns [d0, d1) of the cm matrix against each other (normalizing as it
+// goes). Returns the set of column indices that collapsed (rank repair).
+inline void mgs_block_serial(std::vector<float>& X, std::size_t n,
+                             std::size_t d0, std::size_t d1,
+                             std::vector<std::size_t>& collapsed) {
+    collapsed.clear();
+    for (std::size_t d = d0; d < d1; ++d) {
+        float* col_d = &X[d * n];
+        for (std::size_t pr = d0; pr < d; ++pr) {
+            const float* col_p = &X[pr * n];
             float dot = 0.0f;
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static) reduction(+:dot)
-#endif
-            for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii)
-                dot += X[static_cast<std::size_t>(ii) * k + pr] * X[static_cast<std::size_t>(ii) * k + d];
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-            for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii)
-                X[static_cast<std::size_t>(ii) * k + d] -= dot * X[static_cast<std::size_t>(ii) * k + pr];
+            for (std::size_t i = 0; i < n; ++i) dot += col_p[i] * col_d[i];
+            for (std::size_t i = 0; i < n; ++i) col_d[i] -= dot * col_p[i];
         }
         float n2 = 0.0f;
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static) reduction(+:n2)
-#endif
-        for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii)
-            n2 += X[static_cast<std::size_t>(ii) * k + d] * X[static_cast<std::size_t>(ii) * k + d];
-        if (n2 <= 1e-12f) {
-            // RANK REPAIR (measured necessity): the ±1 hash basis can be
-            // singular for small n — a collapsed column stays zero forever
-            // (W·0 = 0) and the subspace silently loses rank. Replace it
-            // deterministically: the first canonical basis vector whose
-            // residual against columns 0..d-1 is well-conditioned.
-            for (std::size_t r = 0; r < n; ++r) {
-                for (std::size_t i = 0; i < n; ++i)
-                    X[i * k + d] = (i == r) ? 1.0f : 0.0f;
-                for (std::size_t pr = 0; pr < d; ++pr) {
-                    float dot = 0.0f;
-                    for (std::size_t i = 0; i < n; ++i)
-                        dot += X[i * k + pr] * X[i * k + d];
-                    for (std::size_t i = 0; i < n; ++i)
-                        X[i * k + d] -= dot * X[i * k + pr];
-                }
-                float n2r = 0.0f;
-                for (std::size_t i = 0; i < n; ++i)
-                    n2r += X[i * k + d] * X[i * k + d];
-                if (n2r > 1e-6f) {
-                    const float inv = 1.0f / std::sqrt(n2r);
-                    for (std::size_t i = 0; i < n; ++i) X[i * k + d] *= inv;
-                    break;
-                }
-            }
-        } else {
-            const float inv = 1.0f / std::sqrt(n2);
+        for (std::size_t i = 0; i < n; ++i) n2 += col_d[i] * col_d[i];
+        if (n2 <= 1e-12f) { collapsed.push_back(d); continue; }
+        const float inv = 1.0f / std::sqrt(n2);
+        for (std::size_t i = 0; i < n; ++i) col_d[i] *= inv;
+    }
+}
+
+inline void mgs_orthonormalize_cm(std::vector<float>& X, std::size_t n, std::size_t k) {
+    const std::size_t BLOCK = 32;
+    for (std::size_t b0 = 0; b0 < k; b0 += BLOCK) {
+        const std::size_t b1 = std::min(k, b0 + BLOCK);
+        // two (cross-project -> within-block MGS) passes: BCGS2
+        for (int pass = 0; pass < 2; ++pass) {
+            // cross-projection against finished columns [0, b0): for each
+            // finished row pr and block row d, dot = <pr, d>; then
+            // col_d -= dot * col_pr. Both stages are contiguous per-entry
+            // loops; ONE parallel region per stage over (pr, d) / d.
+            if (b0 > 0) {
+                std::vector<float> G(b0 * (b1 - b0), 0.0f);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
-            for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii)
-                X[static_cast<std::size_t>(ii) * k + d] *= inv;
+                for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(b0); ++aa) {
+                    const float* col_a = &X[static_cast<std::size_t>(aa) * n];
+                    for (std::size_t d = b0; d < b1; ++d) {
+                        const float* col_d = &X[d * n];
+                        float dot = 0.0f;
+                        for (std::size_t i = 0; i < n; ++i) dot += col_a[i] * col_d[i];
+                        G[static_cast<std::size_t>(aa) * (b1 - b0) + (d - b0)] = dot;
+                    }
+                }
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+                for (std::ptrdiff_t dd = 0; dd < static_cast<std::ptrdiff_t>(b1 - b0); ++dd) {
+                    const std::size_t d = b0 + static_cast<std::size_t>(dd);
+                    float* col_d = &X[d * n];
+                    for (std::size_t aa = 0; aa < b0; ++aa) {
+                        const float g = G[aa * (b1 - b0) + static_cast<std::size_t>(dd)];
+                        if (g == 0.0f) continue;
+                        const float* col_a = &X[aa * n];
+                        for (std::size_t i = 0; i < n; ++i) col_d[i] -= g * col_a[i];
+                    }
+                }
+            }
+            std::vector<std::size_t> collapsed;
+            mgs_block_serial(X, n, b0, b1, collapsed);
+            // RANK REPAIR (measured necessity, unchanged from v3.7.0): the
+            // ±1 hash basis can be singular for small n — a collapsed column
+            // stays zero forever (W·0 = 0) and the subspace silently loses
+            // rank. Replace it deterministically: the first canonical basis
+            // vector whose residual against ALL finished columns is
+            // well-conditioned. (Serial: repair is rare and small.)
+            for (const std::size_t d : collapsed) {
+                float* col_d = &X[d * n];
+                for (std::size_t r = 0; r < n; ++r) {
+                    for (std::size_t i = 0; i < n; ++i)
+                        col_d[i] = (i == r) ? 1.0f : 0.0f;
+                    for (std::size_t pr = 0; pr < d; ++pr) {
+                        const float* col_p = &X[pr * n];
+                        float dot = 0.0f;
+                        for (std::size_t i = 0; i < n; ++i) dot += col_p[i] * col_d[i];
+                        for (std::size_t i = 0; i < n; ++i) col_d[i] -= dot * col_p[i];
+                    }
+                    float n2r = 0.0f;
+                    for (std::size_t i = 0; i < n; ++i) n2r += col_d[i] * col_d[i];
+                    if (n2r > 1e-6f) {
+                        const float inv = 1.0f / std::sqrt(n2r);
+                        for (std::size_t i = 0; i < n; ++i) col_d[i] *= inv;
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -293,42 +357,64 @@ inline void svd_embeddings(const Substrate& s, const Ppmi& p, const DistConfig& 
     // ASCII inputs (measured: every init column collapsed onto one pattern
     // and MGS zeroed the subspace), so the hash runs through the splitmix64
     // finalizer first — a fixed, dependency-free bit mixer.
-    std::vector<float> X(n * k, 0.0f);
-    for (std::size_t i = 0; i < n; ++i) {
-        const std::string base = s.concept_of(static_cast<NodeId>(i));
-        for (std::size_t d = 0; d < k; ++d) {
+    //
+    // v3.7.1 SCALING: the per-node FNV string hash is computed ONCE (n hashes
+    // instead of n*k string walks — at 94k nodes x 375 dims that was ~500M
+    // char operations), and each column seeds from mix(base_hash, d) through
+    // the same finalizer. The resulting ±1 pattern differs from v3.7.0's
+    // per-(node,dim) string seed (disclosed: tests pin determinism and
+    // roundtrip, never absolute vector values). Working basis X is now
+    // COLUMN-MAJOR k*n (row d contiguous over nodes) so every kernel below
+    // is a contiguous pass.
+    std::vector<float> X(k * n, 0.0f);
+    {
+        std::vector<std::uint64_t> base(n);
+        for (std::size_t i = 0; i < n; ++i) {
             std::uint64_t h = 1469598103934665603ull;
-            const std::string seed = base + "#sv#" + std::to_string(d);
-            for (unsigned char c : seed) { h ^= c; h *= 1099511628211ull; }
-            h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
-            h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
-            h ^= h >> 33;
-            X[i * k + d] = ((h >> 56) & 1u) ? 1.0f : -1.0f;
+            for (unsigned char c : s.concept_of(static_cast<NodeId>(i))) {
+                h ^= c; h *= 1099511628211ull;
+            }
+            base[i] = h;
+        }
+        for (std::size_t d = 0; d < k; ++d) {
+            float* col = &X[d * n];
+            for (std::size_t i = 0; i < n; ++i) {
+                std::uint64_t h = base[i]
+                    ^ (0x9E3779B97F4A7C15ull * static_cast<std::uint64_t>(d + 1));
+                h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
+                h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
+                h ^= h >> 33;
+                col[i] = ((h >> 56) & 1u) ? 1.0f : -1.0f;
+            }
         }
     }
-    mgs_orthonormalize(X, n, k);
+    mgs_orthonormalize_cm(X, n, k);
 
     // fixed-iteration subspace walk with TWO buffers (no aliasing):
     // Y = W X (read basis, write scratch), then X = orth(Y).
-    std::vector<float> Y(n * k, 0.0f);
+    // v3.7.1: column d of Y gathers X's row d through the CSR targets —
+    // k sequential contiguous passes over the CSR arrays (O(E*k) total,
+    // same FLOPs, no strided scatter).
+    std::vector<float> Y(k * n, 0.0f);
     for (int it = 0; it < cfg.iterations; ++it) {
         std::fill(Y.begin(), Y.end(), 0.0f);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
-        for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
-            const std::size_t i = static_cast<std::size_t>(ii);
-            const std::size_t b = p.off[i], e = p.off[i + 1];
-            if (b == e) continue;
-            float* out = &Y[i * k];
-            for (std::size_t t = b; t < e; ++t) {
-                const float w = p.val[t];
-                const float* row = &X[static_cast<std::size_t>(p.dst[t]) * k];
-                for (std::size_t d = 0; d < k; ++d) out[d] += w * row[d];
+        for (std::ptrdiff_t dd = 0; dd < static_cast<std::ptrdiff_t>(k); ++dd) {
+            const std::size_t d = static_cast<std::size_t>(dd);
+            const float* xd = &X[d * n];
+            float* yd = &Y[d * n];
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t b = p.off[i], e = p.off[i + 1];
+                if (b == e) continue;
+                float acc = 0.0f;
+                for (std::size_t t = b; t < e; ++t) acc += p.val[t] * xd[p.dst[t]];
+                yd[i] = acc;
             }
         }
         X.swap(Y);
-        mgs_orthonormalize(X, n, k);
+        mgs_orthonormalize_cm(X, n, k);
     }
 
     // RAYLEIGH-RITZ: R = X^T W X (k x k symmetric), Jacobi-eigendecomposed,
@@ -336,46 +422,66 @@ inline void svd_embeddings(const Substrate& s, const Ppmi& p, const DistConfig& 
     // degenerate pairs the plain walk cannot.
     std::vector<float> ritz_vals, ritz_vecs;
     {
-        std::vector<float> Z(n * k, 0.0f);
+        std::vector<float> Z(k * n, 0.0f);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
-        for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
-            const std::size_t i = static_cast<std::size_t>(ii);
-            const std::size_t b = p.off[i], e = p.off[i + 1];
-            if (b == e) continue;
-            float* out = &Z[i * k];
-            for (std::size_t t = b; t < e; ++t) {
-                const float w = p.val[t];
-                const float* row = &X[static_cast<std::size_t>(p.dst[t]) * k];
-                for (std::size_t d = 0; d < k; ++d) out[d] += w * row[d];
+        for (std::ptrdiff_t dd = 0; dd < static_cast<std::ptrdiff_t>(k); ++dd) {
+            const std::size_t d = static_cast<std::size_t>(dd);
+            const float* xd = &X[d * n];
+            float* zd = &Z[d * n];
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t b = p.off[i], e = p.off[i + 1];
+                if (b == e) continue;
+                float acc = 0.0f;
+                for (std::size_t t = b; t < e; ++t) acc += p.val[t] * xd[p.dst[t]];
+                zd[i] = acc;
             }
         }
+        // v3.7.1: R's entries are contiguous cm dots; parallel over rows a,
+        // upper triangle only (symmetric by W) — same values, fixed order.
         std::vector<float> R(k * k, 0.0f);
-        for (std::size_t a = 0; a < k; ++a)
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+        for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(k); ++aa) {
+            const std::size_t a = static_cast<std::size_t>(aa);
+            const float* xa = &X[a * n];
             for (std::size_t b2 = a; b2 < k; ++b2) {
-                float s = 0.0f;
-                for (std::size_t i = 0; i < n; ++i)
-                    s += X[i * k + a] * Z[i * k + b2];
-                R[a * k + b2] = s;
-                R[b2 * k + a] = s;                           // symmetric by W
+                const float* zb = &Z[b2 * n];
+                float ssum = 0.0f;
+                for (std::size_t i = 0; i < n; ++i) ssum += xa[i] * zb[i];
+                R[a * k + b2] = ssum;
+                R[b2 * k + a] = ssum;
             }
+        }
         jacobi_eigen(R, k, ritz_vals, ritz_vecs);
-        // rotate the basis: X <- X * S  (n*k times k*k)
-        std::vector<float> A(n * k, 0.0f);
+        // rotate the basis: X <- X * S (n*k times k*k). v3.7.1: done through
+        // row-major temporaries so the GEMM inner loop is contiguous; the
+        // two transposes are O(n*k) gathers.
+        std::vector<float> Xrm(n * k, 0.0f), A(n * k, 0.0f);
+        for (std::size_t d = 0; d < k; ++d) {
+            const float* xd = &X[d * n];
+            for (std::size_t i = 0; i < n; ++i) Xrm[i * k + d] = xd[i];
+        }
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
         for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
             const std::size_t i = static_cast<std::size_t>(ii);
+            const float* xrow = &Xrm[i * k];
+            float* arow = &A[i * k];
             for (std::size_t d = 0; d < k; ++d) {
-                float s = 0.0f;
+                float ssum = 0.0f;
                 for (std::size_t j = 0; j < k; ++j)
-                    s += X[i * k + j] * ritz_vecs[j * k + d];
-                A[i * k + d] = s;
+                    ssum += xrow[j] * ritz_vecs[j * k + d];
+                arow[d] = ssum;
             }
         }
-        X.swap(A);
+        for (std::size_t d = 0; d < k; ++d) {
+            float* xd = &X[d * n];
+            for (std::size_t i = 0; i < n; ++i) xd[i] = A[i * k + d];
+        }
     }
 
     // PSD selection: Ritz values ALGEBRAIC descending (positive directions
@@ -396,10 +502,11 @@ inline void svd_embeddings(const Substrate& s, const Ppmi& p, const DistConfig& 
         if (ritz_vals[src] <= 1e-8f) break;                  // PSD part exhausted
         if (drop_perron && !perron_skipped) { perron_skipped = true; continue; }
         const float scale = std::pow(ritz_vals[src], cfg.beta);
+        const float* xsrc = &X[src * n];
         for (std::size_t i = 0; i < n; ++i) {
             const bool iso_row = (p.off[i + 1] == p.off[i]);
             vecs[i * k_out + out_d] =
-                iso_row ? 0.0f : X[i * k + src] * scale;
+                iso_row ? 0.0f : xsrc[i] * scale;
         }
         eigvals[out_d] = ritz_vals[src];
         ++out_d;
@@ -426,19 +533,28 @@ inline void build_edges(const Substrate& s, const std::vector<float>& vecs,
     const std::size_t kmax = static_cast<std::size_t>(std::max(1, cfg.edge_k));
     const float theta = cfg.edge_theta;
 
+    // v3.7.1: node norms computed ONCE (the exact scan previously recomputed
+    // each row's norm n times inside cos_at — n^3/2 redundant multiplies at
+    // the sizes where the scan runs).
+    std::vector<float> inv_norm(n, 0.0f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
+        const std::size_t i = static_cast<std::size_t>(ii);
+        float na2 = 0.0f;
+        for (std::size_t d = 0; d < k; ++d) na2 += vecs[i * k + d] * vecs[i * k + d];
+        inv_norm[i] = (na2 > 1e-12f) ? (1.0f / std::sqrt(na2)) : 0.0f;
+    }
+
     auto cos_at = [&](std::size_t i, std::size_t j) -> float {
+        const float ia = inv_norm[i], ib = inv_norm[j];
+        if (ia <= 0.0f || ib <= 0.0f) return 0.0f;   // dark node: no resonance
         const float* a = &vecs[i * k];
         const float* b = &vecs[j * k];
-        float dot = 0.0f, na = 0.0f, nb = 0.0f;
-        for (std::size_t d = 0; d < k; ++d) {
-            dot += a[d] * b[d];
-            na += a[d] * a[d];
-            nb += b[d] * b[d];
-        }
-        // norm floor: two numerically-empty vectors must not read as
-        // parallel through rounding dust
-        if (na <= 1e-12f || nb <= 1e-12f) return 0.0f;
-        return dot / (std::sqrt(na) * std::sqrt(nb));
+        float dot = 0.0f;
+        for (std::size_t d = 0; d < k; ++d) dot += a[d] * b[d];
+        return dot * ia * ib;
     };
 
     auto better = [](const std::pair<float, NodeId>& x, const std::pair<float, NodeId>& y) {
@@ -452,9 +568,7 @@ inline void build_edges(const Substrate& s, const std::vector<float>& vecs,
 #endif
     for (std::ptrdiff_t ii = 0; ii < static_cast<std::ptrdiff_t>(n); ++ii) {
         const std::size_t i = static_cast<std::size_t>(ii);
-        float na2 = 0.0f;
-        for (std::size_t d = 0; d < k; ++d) na2 += vecs[i * k + d] * vecs[i * k + d];
-        if (na2 <= 0.0f) continue;                       // dark node: no resonance
+        if (inv_norm[i] <= 0.0f) continue;               // dark node: no resonance
         std::vector<std::pair<float, NodeId>> best;
         auto push = [&](std::size_t j) {
             if (j == i) return;

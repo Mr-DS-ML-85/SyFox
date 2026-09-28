@@ -1,3 +1,47 @@
+## v3.3.1 — readout-silence threshold made explicit (BLOCKER fix)
+
+**The reported false defer, root-caused on the shipped tree.** The report
+said `{Tariq, Salma}` false-defers with `unknown_candidates` because the
+readout threshold (~0.35) sits above a valid candidate's energy (0.301).
+On the shipped v3.3.0 code the check is an implicit `> 0` — there is no
+0.35 constant — and the case does NOT reproduce: on the QA probe fabric
+(`model-reasoning-probe`), Test 2 `{Tariq, Salma}` ANSWERS `Tariq`
+(max candidate 0.8759, Salma 0.4811, settled field 2.4594, all measured
+with `SYFOX_DEBUG_READOUT=1`). The reported threshold matches a local
+mid-v3.4 worktree state, not this tree. The hardening below landed
+regardless, because the implicit `> 0` form has a real defect: a best
+candidate carrying dust-level diffusion carryover (`0 < e < 0.01`)
+was ANSWERED — a pick by noise — instead of deferred.
+
+**Fix (Option B, absolute floor).** `kUnknownCandidateFloor = 0.01f` —
+a named, documented, ABSOLUTE constant in `core/syfox.hpp`: defer with
+`reason: unknown_candidates` when the BEST candidate's readout energy is
+below 0.01. Deliberately absolute, not relative-to-field: a bright field
+sitting entirely on non-candidate nodes must defer, and a valid candidate
+on a dim field must answer. Measured guardrails: probe-fabric candidates
+0.19–0.88 all answer (0.19 measured WITHOUT energy-norm — do not raise
+the floor above 0.10); dark candidates 0.0000 still defer; the lit-field/
+dark-candidates OOD shape (`purple`/`submarine`) still defers with
+`unknown_candidates`; a fully dark field (`xyz abc def`) defers at the
+decide level with `unknown_vocabulary` (floor 0.05) before readout.
+
+**Debug visibility.** `SYFOX_DEBUG_READOUT=1` prints, on stderr: the
+decide-level field (`settled_energy`, `silence_floor`) and, per question,
+`max_candidate` + the active threshold + every candidate energy — a false
+defer is now diagnosable from one run.
+
+**Regression gate.** `tests/readout_silence_test.sh` pins 7 checks
+(2-candidate and 3-candidate valid cases answer; lowercase answers; dim
+energy-norm-OFF case answers; dark field defers with the decide-level
+reason; lit-field/dark-candidates defers with the readout-level reason).
+New `make readout-silence` target, wired into `make ci` (the script
+builds its own probe fabric from the committed
+`data/reasoning_probe_lessons.jsonl`). Verified: unit suite all pass;
+`make bench` bit-identical to the pre-fix snapshot (tickets 0.875/0.938,
+game 1.000, guard 0.778, `ood_defer_rate` 1.0 on all three,
+`deterministic` true on all three). README honest-silence section now
+documents both silence layers and their floors. VERSION 3.3.0 -> 3.3.1.
+
 ## v3.3.0 — question-conditioned readout, tie disclosure, readout silence
 
 **The `--evidence` "empty model" bug — root-caused, already cured, better

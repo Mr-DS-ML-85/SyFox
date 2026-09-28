@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <set>
@@ -34,7 +35,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.3.0";
+inline const char* VERSION = "3.3.1";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -44,6 +45,14 @@ inline const char* VERSION = "3.3.0";
 // not core physics: si_substrate.hpp is untouched.
 // ---------------------------------------------------------------------------
 inline constexpr float kBridgeEnergy = 1.0f;
+
+// v3.3.1 — readout-silence floor for unknown_candidates (ABSOLUTE, Option B).
+// Defer a choice/score question when the BEST candidate's readout energy is
+// below this: the settled field carries no measurable signal on any option.
+// 0.01 sits three orders below valid dim candidates (0.19 measured without
+// energy-norm) and well above float dust from diffusion carryover. Documented
+// in README (honest-silence section); debug visibility via SYFOX_DEBUG_READOUT=1.
+inline constexpr float kUnknownCandidateFloor = 0.01f;
 
 // Sub-word traction gate: an UNKNOWN word earns trigram bridges only when a
 // meaningful fraction of its trigrams already exist in the fabric — the
@@ -702,6 +711,12 @@ public:
         }
         si_.settle();
         usage.settled_energy = si_.total_energy();
+        // v3.3.1 readout-silence visibility (opt-in): SYFOX_DEBUG_READOUT=1
+        // prints the decide-level field so honest_silence vs readout-level
+        // unknown_candidates deferral is measurable, not guessed.
+        if (std::getenv("SYFOX_DEBUG_READOUT") != nullptr)
+            std::fprintf(stderr, "DEBUG: settled_energy=%.4f silence_floor=%.3f\n",
+                         usage.settled_energy, si_.config().silence_floor);
 
         // Honest silence: nothing settled => refuse to guess.
         bool silent = usage.settled_energy < si_.config().silence_floor;
@@ -985,9 +1000,27 @@ private:
         // criteria order (the reported "purple elephant" OOD mode answered a
         // tie at confidence 0). Deferring here is the same honest-silence
         // contract the dark-field case already follows.
-        bool any_energy = false;
-        for (float e : energies) if (e > 0.0f) { any_energy = true; break; }
-        if (!any_energy) {
+        // v3.3.1 — READOUT SILENCE THRESHOLD, explicit and documented.
+        // Shipped v3.3 checked `any candidate energy > 0`, which answers on
+        // dust-level diffusion carryover (0 < e < 0.01) picked by noise.
+        // The floor is now a named ABSOLUTE constant: defer when the BEST
+        // candidate carries less than 0.01 energy. Deliberately absolute
+        // (Option B), not relative-to-field: a lit field sitting entirely on
+        // non-candidate nodes must defer no matter how bright it is, and a
+        // valid candidate on a dim field must answer. Above 0.01 the physics
+        // measured real signal (probe-fabric candidates 0.19-0.88); below it
+        // the field is carryover. Do NOT raise above 0.10 — that false-defers
+        // valid dim candidates (measured 0.19 without energy-norm).
+        float max_energy = 0.0f;
+        for (float e : energies) max_energy = std::max(max_energy, e);
+        if (std::getenv("SYFOX_DEBUG_READOUT") != nullptr) {
+            std::fprintf(stderr, "DEBUG: max_candidate=%.3f threshold=%.3f\n",
+                         max_energy, kUnknownCandidateFloor);
+            for (std::size_t i = 0; i < labels.size(); ++i)
+                std::fprintf(stderr, "DEBUG:   candidate[%s]=%.4f\n",
+                             labels[i].c_str(), energies[i]);
+        }
+        if (max_energy < kUnknownCandidateFloor) {
             a.deferred = true;
             a.reason = "unknown_candidates";
             return;

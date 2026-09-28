@@ -612,6 +612,22 @@ state, nothing corroborated — every question returns:
 SyFox never guesses from nothing. For guardrails, combine this with a defer
 band: route answers with confidence below your threshold to a human.
 
+Silence is enforced at TWO layers, each with a documented absolute floor:
+
+| Layer | Floor | Reason | Fires when |
+|---|---|---|---|
+| decide (settled field) | `silence_floor = 0.05` total field energy | `honest_silence` / `unknown_vocabulary` | the whole field is dark — nothing was taught or resonated |
+| readout (candidates) | `kUnknownCandidateFloor = 0.01` best-candidate energy | `unknown_candidates` | the field is lit but NO option carries measurable signal |
+
+The readout floor is **absolute** (v3.3.1), not relative to field brightness: a
+bright field sitting entirely on non-candidate nodes must defer, and a valid
+candidate on a dim field must answer (measured: dim-mode candidates at 0.34
+answer; dust carryover below 0.01 defers instead of being picked by noise).
+Do not raise it above 0.10 — that false-defers valid dim candidates.
+Set `SYFOX_DEBUG_READOUT=1` to print per-candidate energies and the active
+threshold on stderr; `make readout-silence` (also in `make ci`) regression-gates
+the whole contract.
+
 ## Known limits (v2.2 — honest list)
 
 * Tone/sentiment questions need much more data than routing questions; with 22
@@ -726,10 +742,14 @@ Synthetic-Intelligence substrate (full story in the
 - **Exact-tie disclosure**: replies set `tied: true` when the top two
   probabilities are equal (the pick is deterministic criteria order; the
   v3.2 semantic readout term itself breaks most ties physically).
-- **Readout silence**: when NO candidate carries energy, decide defers
-  with `reason: unknown_candidates` instead of answering a uniform
+- **Readout silence**: when NO candidate carries measurable energy, decide
+  defers with `reason: unknown_candidates` instead of answering a uniform
   distribution by criteria order (the "unknown options answered by noise"
-  and pure-OOD failure modes).
+  and pure-OOD failure modes). v3.3.1 makes the threshold an explicit
+  absolute constant — `kUnknownCandidateFloor = 0.01` (was an implicit
+  `> 0` check that answered on dust-level carryover) — documented in the
+  honest-silence contract above, debug-visible via `SYFOX_DEBUG_READOUT=1`,
+  and pinned by `tests/readout_silence_test.sh` / `make readout-silence`.
 
 ## License & credit
 

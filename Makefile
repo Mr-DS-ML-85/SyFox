@@ -160,6 +160,11 @@ bench-extra: build/syfox
 test: build/syfox-test
 	./build/syfox-test
 
+# v3.3.1 readout-silence regression: valid candidates answer, true unknowns
+# defer with the layer-specific reason (builds the QA probe fabric on demand).
+readout-silence: build/syfox
+	bash tests/readout_silence_test.sh
+
 # Jev-parity eval suite on the three seed models.
 #   make bench           -> train split (in-sample; labelled as such)
 #   make bench-heldout   -> held-out split (the honest headline number)
@@ -400,3 +405,4 @@ ci: build/syfox test
 		| python3 tools/assert_route.py
 	python3 tools/ablation_suite.py --model model-b77-sem \
 		--eval data/bank77_cal.jsonl --limit 40 --energy-norm
+	bash tests/readout_silence_test.sh

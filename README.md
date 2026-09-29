@@ -1203,6 +1203,43 @@ that the engine now MEASURES and discloses when it is thinking deeper
 (adaptive depth), seeing more (multi-vector), reasoning by relation type
 (causal lanes), and whether it finished thinking (self-verification).
 
+## v3.9.1 — intra-category diagnostics: confusion matrix, honest totals, and the diffusion finding
+
+The tester's audit: within-category separation among the 22 card_management
+intents is the binding constraint (the fabric "understands banking but
+can't distinguish fine-grained intents"). The revised plan ran diagnostics
+first, then one intervention; every number is measured in this tree, tuning
+on cal only, hidden touched only for final validation.
+
+- BENCH DIAGNOSTICS (opt-in; default output byte-identical, pinned by
+  `test_bench_diagnostics`): `bench --confusion` emits the full N×N
+  gold×pred matrix (rows=gold, cols=pred, DEFER pseudo-class column; the
+  row-alignment invariant is unit-tested), `pairs_top`, and
+  `bench --dump-perrow FILE` dumps one record per choice question with the
+  RAW pre-temperature energy gap (`raw_margin` — disclosed on `Answer`).
+- THE CALIBRATION FINDING: on the dedicated bank77 fabric the cal fit
+  adopted T=0.0019, which saturates probability gaps at ~1.0 — the shipped
+  probability-gap defer axis is INERT there (0/1003 deferrals) and measured
+  ECE is 0.597/0.573 (cal/hidden) despite the fit's own 0.136. Disclosure
+  first; the fit's adoption guard needs its own follow-up.
+- PHYSICS SWEEP (all six CONFIG knobs now settable, frozen defaults,
+  clamped, replay-safe): decay/k_settle/hop_coupling/learn_eta measured
+  flat-to-inert; lane_cap 1024 +1.6 pts; **diffusion is the lever** —
+  monotone from 0.45 down to a boundary optimum 0.02: hidden honest total
+  0.424 → **0.571** (+14.7 pts), card_management 0.389 → **0.632**
+  (+24.3). SI equations untouched (a CONFIG value, chosen on cal, measured
+  once on hidden; no global default shipped).
+- HONEST NEGATIVES: no global defer threshold improves the honest total
+  (0.00 is optimal on cal); per-intent thresholds (33, cal-derived) do not
+  generalize (−2.0 pts on hidden); class frequency does not predict
+  accuracy (r = −0.043 hidden) — the constraint is confusability, not data
+  volume; the semantic field is load-bearing (−6.1 pts without it,
+  concentrated on the card cluster).
+- DOCS: `docs/HONEST_TOTAL.md` (acc × answered/total for every config) and
+  `docs/INTRACATEGORY_ATTACK.md` (the full report: confusion matrix,
+  sweeps, mechanism reading, recommendation). Tools: `tools/b77_*.py`.
+  Artifacts: `data/b77_diag/`.
+
 ## v3.9 — the constructive substrate: SI's Layer-2 reasoning stack, ported at last
 
 The v3.9 audit made two charges, both verified and both answered here.

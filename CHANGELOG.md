@@ -1,3 +1,34 @@
+## v3.9.1 — intra-category diagnostics: confusion matrix + honest totals + the diffusion finding
+
+Diagnostics-then-intervention per the tester's revised plan. Everything
+measured in-tree, tuning on cal only, hidden touched only for final
+validation; no global defer default shipped; no parity claims without the
+honest total (docs/HONEST_TOTAL.md).
+
+- BENCH (opt-in, default byte-identical): --confusion (NxN gold-x-pred JSON
+  matrix, DEFER pseudo-class, pairs_top; rows==labels alignment pinned by
+  unit test after the DEFER-shift bug was caught cross-checking the hidden
+  dump), --dump-perrow (per-choice-question records with the RAW
+  pre-temperature energy gap), Answer.raw_margin disclosure.
+- PHYSICS SWEEP KNOBS: set_decay/set_diffusion/set_hop_coupling/
+  set_learn_eta/set_lane_cap on the substrate (frozen defaults, clamped;
+  CLI --decay --diffusion --k-settle --hop-coupling --learn-eta --lane-cap
+  on bench/calibrate/learn/decide paths).
+- MEASURED (model-b77-sem, 19,690 nodes / 1.31M lanes, banking77):
+  calibration T=0.0019 makes the probability-gap defer axis inert
+  (0/1003) and ECE 0.597/0.573 measured; no global margin improves the
+  honest total; per-intent thresholds overfit cal (-2.0 hidden); class
+  frequency does not predict accuracy (r=-0.043); semantics -6.1 pts
+  without; decay/k_settle/hop_coupling/learn_eta flat; lane_cap 1024 +1.6;
+  DIFFUSION monotone to a boundary optimum: cal 0.401 -> 0.537, hidden
+  0.424 -> 0.571 (+14.7), card_management 0.389 -> 0.632 (+24.3). Replicates
+  on an independent reduced fabric family (+16.4). SI equations frozen
+  throughout - a CONFIG value, not a physics change.
+- TOOLS: b77_confusion_report.py, b77_margin_sweep.py, b77_apply_policy.py,
+  b77_freq_cut.py, b77_ablation_compare.py. ARTIFACTS: data/b77_diag/.
+- DOCS: docs/INTRACATEGORY_ATTACK.md + docs/HONEST_TOTAL.md. TESTS:
+  test_bench_diagnostics (confusion/dump/knobs/alignment invariant).
+
 ## v3.9.0 — the constructive substrate: SI's Layer-2 reasoning stack + the remaining paper mechanisms
 
 Answers the v3.9 audit ("SyFox is not a port of SI — it shares two

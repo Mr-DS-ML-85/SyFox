@@ -53,6 +53,11 @@ struct BenchConfig {
     int   determinism_runs = 2;     // full eval replays, compared byte-wise
     int   latency_reps     = 20;    // timed repeats per eval row
     float closecall_margin = 0.10f; // argmax margin below this = close call
+    // v3.9.1 diagnostics (opt-in; default OFF keeps every existing number and
+    // the JSON output byte-identical):
+    bool confusion        = false;  // per-class NxN gold-x-pred matrix (+ DEFER col)
+    bool dump_perrow      = false;  // one JSONL record per choice question
+                                    // (BenchReport.perrow_dump; CLI writes it)
 };
 
 // ---------------------------------------------------------------------------
@@ -127,6 +132,8 @@ struct Probe {
     sfx::JV     questions;
     std::map<std::string, std::string> labels;
     bool        taught = true;
+    int         row_idx = -1;   // v3.9.1: source row index in the eval file
+                                // (-1 for synthetic probes: close-calls, OOD)
 };
 
 // Deterministic nonsense vocabulary for the honesty probes. Every token is
@@ -203,7 +210,8 @@ inline std::vector<Probe> closecall_probes(const std::vector<sfx::JV>& rows, int
 // Eval probes from labelled rows: the row's own state, questions and labels.
 inline std::vector<Probe> eval_probes(const std::vector<sfx::JV>& rows) {
     std::vector<Probe> out;
-    for (const auto& r : rows) {
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto& r = rows[i];
         if (!r.has("state") || !r.has("questions") || !r.has("labels")) continue;
         if (!r.at("questions").is_obj() || !r.at("labels").is_obj()) continue;
         Probe p;
@@ -212,6 +220,7 @@ inline std::vector<Probe> eval_probes(const std::vector<sfx::JV>& rows) {
         for (const auto& kv : r.at("labels").obj)
             p.labels[kv.first] = kv.second.as_str();
         p.taught = true;
+        p.row_idx = static_cast<int>(i);
         out.push_back(p);
     }
     return out;
@@ -247,6 +256,12 @@ struct PassResult {
     // not "all wrong")
     long choice_total = 0, score_total = 0;
     std::vector<double> latency_us;
+    // v3.9.1 diagnostics (opt-in, BenchConfig.confusion): gold -> pred -> n
+    // over taught choice questions. Deferred rows land in the "DEFER"
+    // pseudo-class, so every matrix row sums to the class's total and the
+    // diagonal is per-class correct; per-intent answered fractions and
+    // honest totals (correct / total) read straight off the matrix.
+    std::map<std::string, std::map<std::string, long>> confusion;
 
     static int ece_bin(float conf) {
         int b = static_cast<int>(conf * 10.0f);
@@ -292,7 +307,9 @@ decision_signature(Engine& eng, const Probe& p) {
     return sig;
 }
 
-inline PassResult run_pass(Engine& eng, const std::vector<Probe>& probes, int latency_reps) {
+inline PassResult run_pass(Engine& eng, const std::vector<Probe>& probes,
+                           int latency_reps, bool collect_diag = false,
+                           std::vector<sfx::JV>* perrow = nullptr) {
     PassResult pr;
     for (const auto& p : probes) {
         // latency: time decide() calls for a stable p50/p95
@@ -319,20 +336,45 @@ inline PassResult run_pass(Engine& eng, const std::vector<Probe>& probes, int la
                 p.labels.count(qkv.first) ? p.labels.at(qkv.first) : "";
             if (type == "choice") ++pr.choice_total;
             else if (type == "score") ++pr.score_total;
+            // v3.9.1: raw top-2 extraction BEFORE the deferred gate — a
+            // deferred answer still carries its probability vector (the
+            // v3.4 honest-tie contract), and the per-row dump needs it so
+            // offline threshold sweeps see the full distribution.
+            std::string amax; float top = -1.0f, second = -1.0f;
+            for (const auto& kv : a.probabilities) {
+                if (kv.second > top) { second = top; top = kv.second; amax = kv.first; }
+                else if (kv.second > second) second = kv.second;
+            }
+            const bool has_probs = !a.probabilities.empty();
+            const float margin = std::max(0.0f, top - std::max(second, 0.0f));
+            if (type == "choice" && (collect_diag || perrow)) {
+                if (collect_diag) {
+                    const std::string pred = a.deferred ? std::string("DEFER") : amax;
+                    pr.confusion[stored.empty() ? std::string("?") : stored][pred] += 1;
+                }
+                if (perrow) {
+                    perrow->push_back(sfx::JV(sfx::JVObj{
+                        {"row", static_cast<double>(p.row_idx)},
+                        {"qid", sfx::JV(qkv.first)},
+                        {"gold", sfx::JV(stored)},
+                        {"deferred", sfx::JV(a.deferred)},
+                        {"reason", sfx::JV(a.reason)},
+                        {"pred", sfx::JV(amax)},
+                        {"p1", std::round(top * 1e6) / 1e6},
+                        {"margin", std::round(margin * 1e6) / 1e6},
+                        {"raw_margin", std::round(a.raw_margin * 1e6) / 1e6},
+                        {"conf", std::round(a.confidence * 1e6) / 1e6},
+                        {"tied", sfx::JV(a.tied)}}));
+                }
+            }
             if (a.deferred) continue;
             if (type == "choice" || type == "score") {
                 PassResult::QType& agg = (type == "choice") ? pr.choice : pr.score;
-                if (a.probabilities.empty()) continue;
-                std::string amax; float top = -1.0f, second = -1.0f;
-                for (const auto& kv : a.probabilities) {
-                    if (kv.second > top) { second = top; top = kv.second; amax = kv.first; }
-                    else if (kv.second > second) second = kv.second;
-                }
+                if (!has_probs) continue;
                 const bool correct = p.taught && label_matches(q, stored, amax);
                 ++agg.n;
                 agg.correct += correct ? 1 : 0;
                 agg.conf_sum += a.confidence;
-                const float margin = std::max(0.0f, top - std::max(second, 0.0f));
                 agg.margin_sum += margin;
                 agg.close_calls += (margin < 0.10f) ? 1 : 0;
                 Bin& b = agg.ece_bins[PassResult::ece_bin(top)];
@@ -377,6 +419,10 @@ struct BenchReport {
 
     // determinism (Jev: non-autoregressive one-pass)
     bool deterministic = true;
+
+    // v3.9.1 diagnostics (populated only when BenchConfig sets the flags)
+    std::map<std::string, std::map<std::string, long>> confusion;  // gold -> pred -> n
+    std::vector<sfx::JV> perrow_dump;                              // choice-question records
 
     sfx::JV to_json() const {
         const auto r2 = [](double v) { return std::round(v * 1000.0) / 1000.0; };
@@ -436,6 +482,61 @@ struct BenchReport {
         o["latency_us"] = sfx::JV(lat);
         o["deterministic"] = sfx::JV(deterministic);
         o["jev_reference"] = sfx::JV(jev);
+        // v3.9.1 diagnostics: emitted ONLY when the run collected them, so
+        // default bench output stays byte-identical to v3.9.0.
+        if (!confusion.empty()) {
+            // deterministic label order: sorted union of every gold and pred
+            std::set<std::string> labels;
+            for (const auto& g : confusion) {
+                labels.insert(g.first);
+                for (const auto& p : g.second) labels.insert(p.first);
+            }
+            sfx::JVArr lab_arr, mat;
+            std::vector<std::string> lab(labels.begin(), labels.end());
+            for (const auto& l : lab) lab_arr.push_back(sfx::JV(l));
+            std::map<std::string, int> idx;
+            for (std::size_t i = 0; i < lab.size(); ++i) idx[lab[i]] = static_cast<int>(i);
+            long deferred_total = 0;
+            std::vector<std::pair<std::pair<std::string,std::string>, long>> pairs;
+            // One row per label (row i == labels[i], ALWAYS aligned — a
+            // v3.9.1 bug caught by cross-checking the hidden dump: "DEFER"
+            // sorts before the c## golds and shifted every row by one when
+            // it was excluded from the row loop but present in labels).
+            for (const auto& l : lab) {
+                sfx::JVArr row;
+                std::vector<long> r(lab.size(), 0);
+                const auto git = confusion.find(l);
+                if (git != confusion.end()) {
+                    for (const auto& p : git->second) {
+                        r[static_cast<std::size_t>(idx[p.first])] = p.second;
+                        if (p.first == "DEFER") deferred_total += p.second;
+                        else if (p.first != l)
+                            pairs.push_back({{l, p.first}, p.second});
+                    }
+                }
+                for (long v : r) row.push_back(sfx::JV(static_cast<double>(v)));
+                mat.push_back(sfx::JV(std::move(row)));
+            }
+            std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
+                if (a.second != b.second) return a.second > b.second;
+                if (a.first.first != b.first.first) return a.first.first < b.first.first;
+                return a.first.second < b.first.second;
+            });
+            sfx::JVArr top_pairs;
+            for (std::size_t i = 0; i < pairs.size() && i < 20; ++i)
+                top_pairs.push_back(sfx::JV(sfx::JVObj{
+                    {"gold", sfx::JV(pairs[i].first.first)},
+                    {"pred", sfx::JV(pairs[i].first.second)},
+                    {"n", static_cast<double>(pairs[i].second)}}));
+            o["confusion"] = sfx::JV(sfx::JVObj{
+                {"labels", sfx::JV(std::move(lab_arr))},
+                {"matrix", sfx::JV(std::move(mat))},
+                {"deferred_total", static_cast<double>(deferred_total)},
+                {"pairs_top", sfx::JV(std::move(top_pairs))},
+                {"note", sfx::JV("rows=gold, cols=pred (labels sorted); DEFER column "
+                                  "counts honest deferrals, so each row sums to the "
+                                  "class total and the diagonal is per-class correct")}});
+        }
         return sfx::JV(o);
     }
 };
@@ -460,7 +561,9 @@ inline BenchReport run(Engine& eng, const std::vector<sfx::JV>& eval_rows,
     // get their own pass for the margin distribution, which is the quantity
     // they exist for.
     const std::vector<Probe> taught_probes = eval_probes(eval_rows);
-    const PassResult pr  = run_pass(eng, taught_probes, bc.latency_reps);
+    const PassResult pr  = run_pass(eng, taught_probes, bc.latency_reps,
+                                    bc.confusion,
+                                    bc.dump_perrow ? &rep.perrow_dump : nullptr);
     const PassResult pm  = mixed.empty()
         ? PassResult{} : run_pass(eng, mixed, bc.latency_reps);
     if (pr.choice.n > 0) rep.choice_accuracy = static_cast<double>(pr.choice.correct) / pr.choice.n;
@@ -563,6 +666,7 @@ inline BenchReport run(Engine& eng, const std::vector<sfx::JV>& eval_rows,
         double s = 0.0; for (double v : lat) s += v;
         rep.lat_mean_us = s / static_cast<double>(lat.size());
     }
+    rep.confusion = pr.confusion;
     return rep;
 }
 

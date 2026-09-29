@@ -1,0 +1,516 @@
+{
+ "dump": "data/b77_diag/cal_dump.jsonl",
+ "mode": "per-intent",
+ "min_rows": 8,
+ "global_best": 0.0,
+ "thresholds": {
+  "c00": {
+   "threshold": 0.0,
+   "rows": 10,
+   "honest_total": 0.6,
+   "acc_answered": 0.6,
+   "source": "per_intent"
+  },
+  "c01": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c02": {
+   "threshold": 0.0,
+   "rows": 3,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c03": {
+   "threshold": 0.11,
+   "rows": 10,
+   "honest_total": 0.7,
+   "acc_answered": 0.875,
+   "source": "per_intent"
+  },
+  "c04": {
+   "threshold": 0.01,
+   "rows": 67,
+   "honest_total": 0.0746,
+   "acc_answered": 0.0769,
+   "source": "per_intent"
+  },
+  "c05": {
+   "threshold": 0.03,
+   "rows": 15,
+   "honest_total": 0.7333,
+   "acc_answered": 0.7857,
+   "source": "per_intent"
+  },
+  "c06": {
+   "threshold": 0.0,
+   "rows": 4,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c07": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 0.8333,
+   "source": "global_fallback"
+  },
+  "c08": {
+   "threshold": 0.05,
+   "rows": 14,
+   "honest_total": 0.5714,
+   "acc_answered": 0.6154,
+   "source": "per_intent"
+  },
+  "c09": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c10": {
+   "threshold": 0.07,
+   "rows": 12,
+   "honest_total": 0.5833,
+   "acc_answered": 0.6364,
+   "source": "per_intent"
+  },
+  "c11": {
+   "threshold": 0.0,
+   "rows": 1,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c12": {
+   "threshold": 0.03,
+   "rows": 9,
+   "honest_total": 0.4444,
+   "acc_answered": 0.5,
+   "source": "per_intent"
+  },
+  "c13": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c14": {
+   "threshold": 0.0,
+   "rows": 5,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c15": {
+   "threshold": 0.0,
+   "rows": 3,
+   "honest_total": 0.3333,
+   "source": "global_fallback"
+  },
+  "c16": {
+   "threshold": 0.14,
+   "rows": 14,
+   "honest_total": 0.3571,
+   "acc_answered": 0.625,
+   "source": "per_intent"
+  },
+  "c17": {
+   "threshold": 0.07,
+   "rows": 39,
+   "honest_total": 0.3333,
+   "acc_answered": 0.3714,
+   "source": "per_intent"
+  },
+  "c18": {
+   "threshold": 0.0,
+   "rows": 3,
+   "honest_total": 0.3333,
+   "source": "global_fallback"
+  },
+  "c19": {
+   "threshold": 0.0,
+   "rows": 5,
+   "honest_total": 0.8,
+   "source": "global_fallback"
+  },
+  "c20": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 0.6667,
+   "source": "global_fallback"
+  },
+  "c21": {
+   "threshold": 0.0,
+   "rows": 1,
+   "honest_total": 0.0,
+   "source": "global_fallback"
+  },
+  "c22": {
+   "threshold": 0.06,
+   "rows": 10,
+   "honest_total": 0.8,
+   "acc_answered": 1.0,
+   "source": "per_intent"
+  },
+  "c23": {
+   "threshold": 0.0,
+   "rows": 10,
+   "honest_total": 0.4,
+   "acc_answered": 0.4,
+   "source": "per_intent"
+  },
+  "c24": {
+   "threshold": 0.0,
+   "rows": 1,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c25": {
+   "threshold": 0.02,
+   "rows": 10,
+   "honest_total": 0.5,
+   "acc_answered": 0.625,
+   "source": "per_intent"
+  },
+  "c26": {
+   "threshold": 0.0,
+   "rows": 8,
+   "honest_total": 0.5,
+   "acc_answered": 0.5,
+   "source": "per_intent"
+  },
+  "c27": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c28": {
+   "threshold": 0.13,
+   "rows": 11,
+   "honest_total": 0.4545,
+   "acc_answered": 0.5556,
+   "source": "per_intent"
+  },
+  "c29": {
+   "threshold": 0.0,
+   "rows": 5,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c30": {
+   "threshold": 0.07,
+   "rows": 10,
+   "honest_total": 0.7,
+   "acc_answered": 0.875,
+   "source": "per_intent"
+  },
+  "c31": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 0.8333,
+   "source": "global_fallback"
+  },
+  "c32": {
+   "threshold": 0.0,
+   "rows": 7,
+   "honest_total": 0.5714,
+   "source": "global_fallback"
+  },
+  "c33": {
+   "threshold": 0.09,
+   "rows": 28,
+   "honest_total": 0.1786,
+   "acc_answered": 0.2632,
+   "source": "per_intent"
+  },
+  "c34": {
+   "threshold": 0.0,
+   "rows": 10,
+   "honest_total": 0.4,
+   "acc_answered": 0.4,
+   "source": "per_intent"
+  },
+  "c36": {
+   "threshold": 0.0,
+   "rows": 1,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c37": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c38": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 0.6667,
+   "source": "global_fallback"
+  },
+  "c39": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c40": {
+   "threshold": 0.0,
+   "rows": 7,
+   "honest_total": 0.4286,
+   "source": "global_fallback"
+  },
+  "c41": {
+   "threshold": 0.0,
+   "rows": 3,
+   "honest_total": 0.6667,
+   "source": "global_fallback"
+  },
+  "c42": {
+   "threshold": 0.0,
+   "rows": 1,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c43": {
+   "threshold": 0.0,
+   "rows": 14,
+   "honest_total": 0.6429,
+   "acc_answered": 0.6429,
+   "source": "per_intent"
+  },
+  "c44": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c45": {
+   "threshold": 0.0,
+   "rows": 13,
+   "honest_total": 0.6923,
+   "acc_answered": 0.6923,
+   "source": "per_intent"
+  },
+  "c46": {
+   "threshold": 0.0,
+   "rows": 14,
+   "honest_total": 0.5,
+   "acc_answered": 0.5,
+   "source": "per_intent"
+  },
+  "c47": {
+   "threshold": 0.03,
+   "rows": 16,
+   "honest_total": 0.3125,
+   "acc_answered": 0.3571,
+   "source": "per_intent"
+  },
+  "c48": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c49": {
+   "threshold": 0.18,
+   "rows": 8,
+   "honest_total": 0.25,
+   "acc_answered": 0.5,
+   "source": "per_intent"
+  },
+  "c50": {
+   "threshold": 0.0,
+   "rows": 7,
+   "honest_total": 0.7143,
+   "source": "global_fallback"
+  },
+  "c51": {
+   "threshold": 0.0,
+   "rows": 7,
+   "honest_total": 0.7143,
+   "source": "global_fallback"
+  },
+  "c52": {
+   "threshold": 0.06,
+   "rows": 15,
+   "honest_total": 0.6,
+   "acc_answered": 0.8182,
+   "source": "per_intent"
+  },
+  "c53": {
+   "threshold": 0.03,
+   "rows": 9,
+   "honest_total": 0.3333,
+   "acc_answered": 0.375,
+   "source": "per_intent"
+  },
+  "c54": {
+   "threshold": 0.0,
+   "rows": 23,
+   "honest_total": 0.4348,
+   "acc_answered": 0.4348,
+   "source": "per_intent"
+  },
+  "c55": {
+   "threshold": 0.0,
+   "rows": 6,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c56": {
+   "threshold": 0.0,
+   "rows": 1,
+   "honest_total": 1.0,
+   "source": "global_fallback"
+  },
+  "c57": {
+   "threshold": 0.12,
+   "rows": 13,
+   "honest_total": 0.5385,
+   "acc_answered": 0.6364,
+   "source": "per_intent"
+  },
+  "c58": {
+   "threshold": 0.0,
+   "rows": 4,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c59": {
+   "threshold": 0.04,
+   "rows": 13,
+   "honest_total": 0.2308,
+   "acc_answered": 0.2727,
+   "source": "per_intent"
+  },
+  "c60": {
+   "threshold": 0.0,
+   "rows": 11,
+   "honest_total": 0.7273,
+   "acc_answered": 0.7273,
+   "source": "per_intent"
+  },
+  "c61": {
+   "threshold": 0.01,
+   "rows": 22,
+   "honest_total": 0.4091,
+   "acc_answered": 0.4286,
+   "source": "per_intent"
+  },
+  "c62": {
+   "threshold": 0.02,
+   "rows": 12,
+   "honest_total": 0.25,
+   "acc_answered": 0.3333,
+   "source": "per_intent"
+  },
+  "c63": {
+   "threshold": 0.2,
+   "rows": 29,
+   "honest_total": 0.4828,
+   "acc_answered": 0.7,
+   "source": "per_intent"
+  },
+  "c64": {
+   "threshold": 0.15,
+   "rows": 20,
+   "honest_total": 0.2,
+   "acc_answered": 0.4444,
+   "source": "per_intent"
+  },
+  "c65": {
+   "threshold": 0.05,
+   "rows": 40,
+   "honest_total": 0.175,
+   "acc_answered": 0.1892,
+   "source": "per_intent"
+  },
+  "c66": {
+   "threshold": 0.19,
+   "rows": 44,
+   "honest_total": 0.2727,
+   "acc_answered": 0.4286,
+   "source": "per_intent"
+  },
+  "c67": {
+   "threshold": 0.0,
+   "rows": 37,
+   "honest_total": 0.2703,
+   "acc_answered": 0.2703,
+   "source": "per_intent"
+  },
+  "c68": {
+   "threshold": 0.0,
+   "rows": 2,
+   "honest_total": 0.5,
+   "source": "global_fallback"
+  },
+  "c69": {
+   "threshold": 0.03,
+   "rows": 15,
+   "honest_total": 0.2667,
+   "acc_answered": 0.2857,
+   "source": "per_intent"
+  },
+  "c70": {
+   "threshold": 0.17,
+   "rows": 33,
+   "honest_total": 0.303,
+   "acc_answered": 0.4,
+   "source": "per_intent"
+  },
+  "c71": {
+   "threshold": 0.2,
+   "rows": 37,
+   "honest_total": 0.2973,
+   "acc_answered": 0.55,
+   "source": "per_intent"
+  },
+  "c72": {
+   "threshold": 0.16,
+   "rows": 17,
+   "honest_total": 0.1765,
+   "acc_answered": 0.6,
+   "source": "per_intent"
+  },
+  "c73": {
+   "threshold": 0.03,
+   "rows": 21,
+   "honest_total": 0.5714,
+   "acc_answered": 0.7059,
+   "source": "per_intent"
+  },
+  "c74": {
+   "threshold": 0.18,
+   "rows": 30,
+   "honest_total": 0.4,
+   "acc_answered": 0.6,
+   "source": "per_intent"
+  },
+  "c75": {
+   "threshold": 0.09,
+   "rows": 37,
+   "honest_total": 0.3243,
+   "acc_answered": 0.5455,
+   "source": "per_intent"
+  },
+  "c76": {
+   "threshold": 0.05,
+   "rows": 48,
+   "honest_total": 0.25,
+   "acc_answered": 0.3077,
+   "source": "per_intent"
+  }
+ },
+ "policy_overall": {
+  "n": 1003,
+  "answered": 834,
+  "correct": 402,
+  "acc_answered": 0.482,
+  "honest_total": 0.4008,
+  "defer_rate": 0.1685
+ },
+ "custom_intents": 33
+}

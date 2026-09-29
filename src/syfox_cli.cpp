@@ -89,6 +89,16 @@ struct Args {
     long retrieval_topk = -1;        // --retrieval-topk N (-1 = engine default 5)
     float retrieval_dose = 0;        // --retrieval-dose F (0 = engine default 0.30)
     std::string router;              // --router DIR: stage-1 domain fabric (router.json maps domains)
+    // v3.9.1 diagnostics sweep: physics CONFIG knobs (opt-in; unset = frozen
+    // defaults = bit-identical). Measured sweep discipline: docs/INTRACATEGORY_ATTACK.md
+    float physics_decay = -1;        // --decay F     (settle dissipation)
+    float physics_diffusion = -1;    // --diffusion F (lane flow fraction)
+    float physics_k_settle = -1;     // --k-settle N  (max settle passes)
+    float physics_hop = -1;          // --hop-coupling F (readout lane scaling)
+    float physics_eta = -1;          // --learn-eta F (Hebbian bind rate, LEARN-side)
+    long  physics_lane_cap = 0;      // --lane-cap N  (per-node lane ceiling, LEARN-side)
+    bool  confusion = false;         // bench --confusion: per-class gold x pred matrix
+    std::string dump_perrow;         // bench --dump-perrow PATH: per-choice-question JSONL
     // v3.3 question-conditioned readout (opt-in; see core/syfox.hpp note)
     bool question_gate = false;      // --question-gate: enable readout gating
     // v3.5 JAS: the J-A-S cycle + arithmetic oracle + impossibility register
@@ -219,7 +229,21 @@ syfox::Engine& load_or_die(syfox::Engine& eng, const std::string& dir,
 
 // Apply the CLI mode overrides after load_model(). Mode-neutral by design:
 // substrate.bin stays untouched, flags live only for this process.
+// v3.9.1 physics CONFIG sweep (opt-in): set only what the caller named.
+// Unset (-1/0) never touches cfg_, so default runs stay bit-identical.
+// Used by apply_modes (decide/bench/stats paths), cmd_calibrate and
+// cmd_learn's per-engine flag block (learn_eta / lane_cap are LEARN-side).
+void apply_physics(syfox::Engine& eng, const Args& a) {
+    if (a.physics_decay > 0)      eng.substrate().set_decay(a.physics_decay);
+    if (a.physics_diffusion >= 0) eng.substrate().set_diffusion(a.physics_diffusion);
+    if (a.physics_k_settle > 0)   eng.substrate().set_k_settle(static_cast<int>(a.physics_k_settle));
+    if (a.physics_hop >= 0)       eng.substrate().set_hop_coupling(a.physics_hop);
+    if (a.physics_eta > 0)        eng.substrate().set_learn_eta(a.physics_eta);
+    if (a.physics_lane_cap > 0)   eng.substrate().set_lane_cap(static_cast<std::size_t>(a.physics_lane_cap));
+}
+
 void apply_modes(syfox::Engine& eng, const Args& a) {
+    apply_physics(eng, a);
     eng.substrate().set_source_modes(a.salience_gating, a.miller_window);
     // v3.2 semantic layer knobs: the field is ON whenever the model ships it
     // (substrate v4 tail); the kill switches restore pre-3.2 behavior exactly.
@@ -396,6 +420,7 @@ void cmd_learn(const Args& a) {
         if (a.sentinels_mode != 0) eng.set_sentinels(a.sentinels_mode == 1);
         if (a.order_mode != 0) eng.substrate().set_order_consolidation(a.order_mode == 1);
         if (!a.axioms.empty()) eng.load_axioms(a.axioms);
+        apply_physics(eng, a);                       // v3.9.1 sweep knobs (LEARN-side)
     };
     // v3: consolidation passes. The substrate's own forgetting law decays
     // every lane 0.995x per lesson, so a 25k-lesson SINGLE pass is
@@ -565,6 +590,7 @@ void cmd_calibrate(const Args& a) {
     }
     syfox::Engine eng;
     load_or_die(eng, resolve_model_dir(model_dir), "calibration");
+    apply_physics(eng, a);                    // v3.9.1: sweep knobs shape the fit energies
     if (a.energy_norm) eng.set_energy_norm(true);
     auto rows = load_jsonl(a.examples);
     auto calib_rows = eng.harvest_rows(rows);
@@ -1160,11 +1186,20 @@ void cmd_bench(const Args& a) {
     syfox::bench::BenchConfig bc;
     bc.latency_reps = static_cast<int>(a.latency_reps);
     bc.determinism_runs = static_cast<int>(a.replays);
+    bc.confusion = a.confusion;               // v3.9.1 diagnostics (opt-in)
+    bc.dump_perrow = !a.dump_perrow.empty();
     syfox::bench::BenchReport rep =
         syfox::bench::run(eng, rows,
                           split_note.empty() ? eval_path
                                              : eval_path + " (" + split_note + ")",
                           bc, a.model);
+    if (!a.dump_perrow.empty()) {
+        std::ofstream df(a.dump_perrow);
+        if (!df) { std::cerr << "syfox: cannot write " << a.dump_perrow << "\n"; std::exit(2); }
+        for (const auto& jv : rep.perrow_dump) df << jv.dump() << "\n";
+        std::cerr << "syfox: per-row dump -> " << a.dump_perrow << " ("
+                  << rep.perrow_dump.size() << " choice records)\n";
+    }
     auto j = rep.to_json();
     if (!a.split.empty()) j.obj["eval_split"] = sfx::JV(a.split);
     if (!lang_note.empty()) j.obj["lang_note"] = sfx::JV(lang_note);
@@ -2219,6 +2254,14 @@ int main(int argc, char** argv) {
         else if (k == "--typos") { if (i + 1 >= argc) usage_exit(); a.typos = std::strtof(argv[++i], nullptr); }
         else if (k == "--latency-reps") { if (i + 1 >= argc) usage_exit(); a.latency_reps = std::strtol(argv[++i], nullptr, 10); }
         else if (k == "--replays") { if (i + 1 >= argc) usage_exit(); a.replays = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--decay") { if (i + 1 >= argc) usage_exit(); a.physics_decay = std::strtof(argv[++i], nullptr); }
+        else if (k == "--diffusion") { if (i + 1 >= argc) usage_exit(); a.physics_diffusion = std::strtof(argv[++i], nullptr); }
+        else if (k == "--k-settle") { if (i + 1 >= argc) usage_exit(); a.physics_k_settle = std::strtof(argv[++i], nullptr); }
+        else if (k == "--hop-coupling") { if (i + 1 >= argc) usage_exit(); a.physics_hop = std::strtof(argv[++i], nullptr); }
+        else if (k == "--learn-eta") { if (i + 1 >= argc) usage_exit(); a.physics_eta = std::strtof(argv[++i], nullptr); }
+        else if (k == "--lane-cap") { if (i + 1 >= argc) usage_exit(); a.physics_lane_cap = std::strtol(argv[++i], nullptr, 10); }
+        else if (k == "--confusion") a.confusion = true;
+        else if (k == "--dump-perrow") { if (i + 1 >= argc) usage_exit(); a.dump_perrow = argv[++i]; }
         else if (k == "--augment") a.augment = true;
         else if (k == "--dedup") a.dedup = true;
         else if (k == "--novelty") a.novelty = true;

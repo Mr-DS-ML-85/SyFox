@@ -42,7 +42,7 @@
 
 namespace syfox {
 
-inline const char* VERSION = "3.9.0";
+inline const char* VERSION = "3.9.1";
 
 // ---------------------------------------------------------------------------
 // v2.2 boundary injection protocol — sub-word bridges for corrupted forms.
@@ -130,6 +130,13 @@ struct Answer {
     float confidence = 0.0f;
     bool deferred = false;
     std::string reason;                                  // honest-silence reasons
+    // v3.9.1 diagnostics: top-2 gap of the RAW readout energies BEFORE the
+    // calibration temperature. The fitted T on the bank77 fabric (0.0019,
+    // measured) saturates the post-temperature probability gap at ~1, which
+    // silences the probability-gap defer axis; the raw energy gap is the
+    // physical quantity a threshold policy can actually sweep. Disclosure
+    // only — nothing in the engine consumes it.
+    float raw_margin = 0.0f;
     // v3.3 readout disclosures: an EXACT top-2 probability tie (the readout
     // carries no signal between the top two; the pick is deterministic
     // criteria order), and the question tokens that gated the readout when
@@ -2466,6 +2473,14 @@ private:
         for (std::size_t i = 0; i < labels.size(); ++i)
             a.probabilities.emplace_back(labels[i], p[i]);
         a.confidence = entropy_confidence(p);
+        {   // v3.9.1: pre-temperature energy separation (diagnostics)
+            float e1 = -1e30f, e2 = -1e30f;
+            for (float v : energies) {
+                if (v > e1) { e2 = e1; e1 = v; }
+                else if (v > e2) e2 = v;
+            }
+            a.raw_margin = (e1 > -1e29f && e2 > -1e29f) ? e1 - e2 : 0.0f;
+        }
         // v3.9.0 (RADE) PROOF PASS: typed path between the state's strongest
         // axiom-graph concept and the winning anchor, premise-cited. Opt-in
         // disclosure; --require-proof defers a choice with no typed path
@@ -2525,6 +2540,14 @@ private:
         if (labels.empty()) { a.deferred = true; a.reason = "no_levels"; return; }
         std::vector<float> p;
         softmax_ps(energies, p, calib_.score_temperature);
+        {
+            float e1 = -1e30f, e2 = -1e30f;
+            for (float v : energies) {
+                if (v > e1) { e2 = e1; e1 = v; }
+                else if (v > e2) e2 = v;
+            }
+            a.raw_margin = (e1 > -1e29f && e2 > -1e29f) ? e1 - e2 : 0.0f;
+        }
         float val = 0.0f;
         for (std::size_t i = 0; i < labels.size(); ++i) {
             a.probabilities.emplace_back(labels[i], p[i]);

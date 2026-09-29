@@ -592,6 +592,126 @@ static void test_bench_e2e() {
 }
 
 // ---------------------------------------------------------------------------
+// v3.9.1 — bench diagnostics: per-class confusion matrix + per-row dump
+// (opt-in, default OFF keeps the JSON byte-identical) and the physics CONFIG
+// sweep setters (frozen defaults, clamped, decision-neutral until set).
+// ---------------------------------------------------------------------------
+static void test_bench_diagnostics() {
+    std::cout << "[bench: confusion matrix + per-row dump + physics knobs]\n";
+    using namespace syfox;
+    Engine eng;
+    auto rows = make_ticket_rows();
+    learn_tickets(eng, rows);
+    auto calib = eng.harvest_rows(rows);
+    eng.fit_calibration(calib);
+
+    // -- physics CONFIG knobs: defaults untouched, clamps enforced -----------
+    CHECK(eng.substrate().decay() == 0.82f, "default decay untouched (0.82)");
+    CHECK(eng.substrate().diffusion() == 0.45f, "default diffusion untouched (0.45)");
+    CHECK(eng.substrate().hop_coupling() == 0.35f, "default hop_coupling untouched (0.35)");
+    CHECK(eng.substrate().learn_eta() == 0.10f, "default learn_eta untouched (0.10)");
+    CHECK(eng.substrate().lane_cap() == 256, "default lane_cap untouched (256)");
+    eng.substrate().set_decay(0.90f);
+    CHECK(eng.substrate().decay() == 0.90f, "set_decay applies");
+    eng.substrate().set_decay(0.001f);
+    CHECK(eng.substrate().decay() == 0.05f, "set_decay clamps to 0.05 floor");
+    eng.substrate().set_diffusion(1.5f);
+    CHECK(eng.substrate().diffusion() == 1.0f, "set_diffusion clamps to 1.0");
+    eng.substrate().set_lane_cap(4);
+    CHECK(eng.substrate().lane_cap() == 8, "set_lane_cap clamps to >= 8");
+    eng.substrate().set_decay(0.82f);
+    eng.substrate().set_diffusion(0.45f);
+    eng.substrate().set_lane_cap(256);
+
+    // -- confusion + dump: collected only when enabled -----------------------
+    bench::BenchConfig bc_off;
+    bc_off.latency_reps = 1;
+    bc_off.determinism_runs = 1;
+    auto rep_off = bench::run(eng, rows, "in-domain", bc_off, "test-model");
+    CHECK(rep_off.confusion.empty(), "confusion empty when not requested");
+    CHECK(rep_off.to_json().dump().find("confusion") == std::string::npos,
+          "default bench JSON carries no confusion block");
+
+    bench::BenchConfig bc;
+    bc.latency_reps = 1;
+    bc.determinism_runs = 1;
+    bc.confusion = true;
+    bc.dump_perrow = true;
+    auto rep = bench::run(eng, rows, "in-domain (resubstitution)", bc, "test-model");
+    const auto& conf = rep.confusion;
+    CHECK(!conf.empty(), "confusion collected when enabled");
+    long sum_all = 0, sum_diag = 0, sum_defer = 0;
+    for (const auto& g : conf)
+        for (const auto& p : g.second) {
+            sum_all += p.second;
+            if (p.first == "DEFER") sum_defer += p.second;
+            else if (p.first == g.first) sum_diag += p.second;
+        }
+    CHECK(sum_all == static_cast<long>(rows.size()),
+          "every taught choice question lands in exactly one matrix cell");
+    CHECK(sum_defer == 0, "no DEFER column entries on answered in-domain rows");
+    CHECK(sum_diag == sum_all,
+          "resubstitution: the diagonal holds every cell (acc 1.0)");
+    CHECK(rep.choice_accuracy == 1.0, "confusion run accuracy consistent");
+
+    // -- ROW/COLUMN ALIGNMENT INVARIANT (the DEFER shift bug) ----------------
+    // Force deferrals so the DEFER pseudo-class enters the label union
+    // (it sorts BEFORE the alphabetic golds). The JSON matrix row i must
+    // equal the confusion counts of labels[i] as gold — a bug in v3.9.1
+    // emitted one row per GOLD while labels included DEFER, shifting every
+    // row by one. Cross-check every cell through the JSON.
+    // (a probability gap reaches exactly 1.0 when the second candidate is
+    // 0.0, so 0.99 does not force a defer — 2.0 defers every row).
+    eng.set_defer_margin(2.0f);
+    bench::BenchConfig bcd;
+    bcd.latency_reps = 1;
+    bcd.determinism_runs = 1;
+    bcd.confusion = true;
+    auto repd = bench::run(eng, rows, "in-domain (forced defers)", bcd, "test-model");
+    CHECK(repd.confusion.count("DEFER") == 0, "DEFER is never a gold row");
+    long defer_cells = 0;
+    for (const auto& g : repd.confusion) defer_cells += g.second.count("DEFER");
+    CHECK(defer_cells >= 1, "forced margin produces DEFER cells");
+    sfx::JV jd = repd.to_json().obj.at("confusion");
+    const auto& labels_j = jd.at("labels").arr;
+    const auto& mat_j = jd.at("matrix").arr;
+    CHECK(mat_j.size() == labels_j.size(),
+          "matrix has exactly one row per label (alignment)");
+    bool aligned = true;
+    for (std::size_t i = 0; i < labels_j.size() && aligned; ++i) {
+        const std::string lab = labels_j[i].as_str();
+        long row_sum = 0;
+        for (const auto& v : mat_j[i].arr) row_sum += static_cast<long>(v.as_num(0));
+        long map_sum = 0, map_diag = 0;
+        const auto git = repd.confusion.find(lab);
+        if (git != repd.confusion.end()) {
+            for (const auto& p : git->second) {
+                map_sum += p.second;
+                if (p.first == lab) map_diag = p.second;
+            }
+        }
+        if (row_sum != map_sum) aligned = false;
+        if (map_diag != static_cast<long>(mat_j[i].arr[i].as_num(0))) aligned = false;
+    }
+    CHECK(aligned, "every JSON matrix row/diagonal matches the confusion map");
+
+    // -- per-row dump: one record per taught choice question -----------------
+    CHECK(rep.perrow_dump.size() == rows.size(),
+          "one dump record per taught choice question");
+    bool fields_ok = true, raw_ok = true;
+    for (const auto& jv : rep.perrow_dump) {
+        if (!jv.has("row") || !jv.has("gold") || !jv.has("pred") ||
+            !jv.has("raw_margin") || !jv.has("margin") || !jv.has("reason"))
+            fields_ok = false;
+        if (jv.at("raw_margin").as_num(0) < 0.0) raw_ok = false;
+    }
+    CHECK(fields_ok, "dump records carry gold/pred/margins/reason");
+    CHECK(raw_ok, "raw energy margins are non-negative");
+    CHECK(rep.to_json().dump().find("\"confusion\"") != std::string::npos,
+          "enabled bench JSON carries the confusion block");
+}
+
+// ---------------------------------------------------------------------------
 // v2.2 — multilingual boundary: script detection, UTF-8 tokenization,
 // character trigram lanes, mass-guarded augmentation, deterministic typos.
 // ---------------------------------------------------------------------------
@@ -2712,6 +2832,7 @@ int main() {
     test_recall();
     test_gate();
     test_bench_e2e();
+    test_bench_diagnostics();
     test_semantic_field();
     test_context_lanes();
     test_retrieval_default();

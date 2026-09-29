@@ -405,6 +405,39 @@ public:
     // miller_window discipline) and re-settles the SAME injected field.
     void set_source_cap(float c) { cfg_.source_cap = std::max(1.0f, c); }
 
+    // v3.9.1 diagnostics sweep: setters for the remaining CONFIG knobs, so a
+    // measured sweep (docs: physics constant sweep) does not require a
+    // rebuilt binary per point. Defaults are untouched — cfg_ starts at the
+    // frozen SI values and every setter is opt-in per process, so replay and
+    // bench bit-identity hold unless a flag explicitly changes a knob
+    // (test_reason-era contract: the default configuration IS the shipped
+    // physics; knobs only scale/excite it, never rewrite the equations).
+    //   decay / diffusion — settle dissipation & lane flow fractions
+    //   hop_coupling      — readout-side lane contribution scaling
+    //   learn_eta         — Hebbian bind rate (LEARN-side; affects fabrics
+    //                        taught in the same process AFTER the set)
+    //   lane_cap          — per-node lane count ceiling (LEARN-side eviction)
+    void set_decay(float d) {
+        cfg_.decay = std::min(0.999f, std::max(0.05f, d));
+    }
+    void set_diffusion(float d) {
+        cfg_.diffusion = std::min(1.0f, std::max(0.0f, d));
+    }
+    void set_hop_coupling(float h) {
+        cfg_.hop_coupling = std::min(2.0f, std::max(0.0f, h));
+    }
+    void set_learn_eta(float e) {
+        cfg_.learn_eta = std::min(1.0f, std::max(0.0f, e));
+    }
+    void set_lane_cap(std::size_t cap) {
+        cfg_.lane_cap = std::max<std::size_t>(8, cap);
+    }
+    float decay()        const { return cfg_.decay; }
+    float diffusion()    const { return cfg_.diffusion; }
+    float hop_coupling() const { return cfg_.hop_coupling; }
+    float learn_eta()    const { return cfg_.learn_eta; }
+    std::size_t lane_cap() const { return cfg_.lane_cap; }
+
     // v3.9.0 (HTR §2.2 discrete surrogate): participation ratio of the whole
     // energized field, R = (ΣE)² / (N·ΣE²) over nodes with E > 1e-7 — the
     // no-phase coherence proxy the ΔR gate compares the candidate set against.
